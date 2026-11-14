@@ -3,7 +3,9 @@
 **Status:** accepted 2026-10-31, agent-drafted for maintainer review (next-gen roadmap
 [§9.4](../plans/next-gen-graphics-roadmap.md#94-the-automated-pipeline) and §12 step 4,
 "A0"). Written before the code. Amends [ADR-0011](0011-art-style-lighting.md) §8 (the tangent
-generator). ADR-0020 and ADR-0021 are reserved for N0 and N1.
+generator). ADR-0020 and ADR-0021 are reserved for N0 and N1. Amended 2026-11-14 after review
+([Amendment 1](#amendment-1-2026-11-14-a0-review-bounded-tangents-and-a-harder-gate)): runtime tangents are hard-bounded, shipped meshes carry baked
+tangents, and the gate hashes third-party files and refuses special files.
 
 ## Context
 The next-gen roadmap brings in third-party CC0 and CC-BY art (§9.2) and AI-generated assets
@@ -137,7 +139,9 @@ client, and pack hashes are unchanged.
 Rust (`forbid(unsafe_code)`), no dependencies, MSRV 1.85, Zlib AND (MIT OR Apache-2.0), and
 fuzz-tested by its authors to be byte-identical to Mikkelsen's C. Its legacy behaviour is kept
 (the `corrected-*` features stay off) because matching the bakers matters more than fixing
-the reference's edge-sort and welding quirks. Our adapter:
+the reference's edge-sort and welding quirks. *(Superseded by [amendment 1](#amendment-1-2026-11-14-a0-review-bounded-tangents-and-a-harder-gate): both
+`corrected-*` features are on, because the legacy weld and sort are quadratic on crafted
+input.)* Our adapter:
 
 - passes **`(u, -v)`**: glTF `v` runs down the image, so negating it gives the space a DCC tool
   computes with `v` up before its exporter flips `v`, the convention ADR-0011 §8 already
@@ -175,7 +179,10 @@ of quadratic work, 16× below the stack overflow and far above the ~6 corners pe
 a real mesh or the few hundred at a UV-sphere pole) or the sum of corners² over positions
 exceeds **2^24** (`TANGENT_MAX_SHARING_COST`; the worst case measured under it is about 1 s, from 16
 twisted-UV fans of 1020 corners; a dense mesh at the vertex cap is
-about 2.4 M), so many positions just under the cap cannot add up. Degenerate triangles (two
+about 2.4 M), so many positions just under the cap cannot add up. *(Superseded by [amendment 1](#amendment-1-2026-11-14-a0-review-bounded-tangents-and-a-harder-gate):
+the caps are now 512 corners, Σk² ≤ 2^22 and Σk³ ≤ 2^28. Under the old caps, 16 random-UV
+fans of 1020 corners took 0.9–1.2 s, and a cluster of adjacent floats took 59 s in the legacy
+weld, which no cap tracked.)* Degenerate triangles (two
 corners at one position, MikkTSpace's own test) escape both, because each of their corners
 scans every good corner for a tangent to copy (upstream: "O(N^2)"): a 181 × 181 grid plus
 16 Ki degenerate triangles on their own vertices takes 0.88 s, about 0.1 ns per (degenerate
@@ -187,7 +194,8 @@ The checks are one pass over the triangles and a sort of the positions, within t
 noise.
 `mesh/generate_tangents/{10k,65k}` (`crates/assets/benches/mesh_tangents.rs`) measures the
 cost: about 13 ms for a 10 k-vertex grid and 92 ms at the 65 536-vertex cap on the
-reference machine, load-time only.
+reference machine, load-time only. *(Amendment 1 adds the cases at the caps and the comparison
+with the old generator, about 100× slower.)*
 
 Tests pin the result against an independent `f64` implementation of Mikkelsen's definition
 on a smooth fan, where the old area weighting is 0.06 away, and against `bevy_mikktspace`
@@ -222,11 +230,14 @@ triangle and a position-degenerate one.
   `LicenceException`, `LicenceUse`, `ALLOWED_LICENCES`, `LICENCE_EXCEPTIONS`,
   `licence_status`, `needs_attribution`, `third_party_section`, `splice_third_party`,
   `credits_text`, `ai_disclosure`, `PROVENANCE_FILE`, `CREDITS_FILE`, `AI_DISCLOSURE_FILE`,
-  `MAX_PROVENANCE_BYTES`, `THIRD_PARTY_BEGIN`, `THIRD_PARTY_END`), and
+  `MAX_PROVENANCE_BYTES`, `THIRD_PARTY_BEGIN`, `THIRD_PARTY_END`; amendment 1 adds
+  `ConceptOnlyService`, `CONCEPT_ONLY_SERVICES`, `read_plain_file` and
+  `AssetProvenance::sha256`), and
   `content-check --provenance [--check]` (exit 0 pass, 1 gate failure or stale notice, 2
   usage).
 - New `MeshData::TANGENT_MAX_SHARED_CORNERS`, `MeshData::TANGENT_MAX_SHARING_COST` and
-  `MeshData::TANGENT_MAX_DEGENERATE_COST`; a mesh over any gets fallback tangents (`w = +1`, perpendicular to the normal) everywhere.
+  `MeshData::TANGENT_MAX_DEGENERATE_COST` (amendment 1 adds `TANGENT_MAX_SUBGROUP_COST` and
+  lowers the first two); a mesh over any gets fallback tangents (`w = +1`, perpendicular to the normal) everywhere.
 - New dependency `bevy_mikktspace =1.0.0` in `moba-assets` (so the client, the tools and the
   fuzz crate); `cargo-deny`'s allow-list already has Zlib, MIT and Apache-2.0.
 - The committed sample meshes `content/models/{sentinel,crystal,rampart}.glb` (and
@@ -248,3 +259,118 @@ triangle and a position-degenerate one.
   render-only.
 - Every new asset needs a provenance entry before `scripts/agent-verify.sh` passes, which is
   the point; the format is in [content-authoring](../content-authoring.md#provenance).
+
+## Amendments
+
+### Amendment 1 (2026-11-14, A0 review): bounded tangents and a harder gate
+
+Recorded in the A0 PR (`feat/a0-licence-gate`, #349) after its three reviews. §4's bound did
+not hold: the caps counted corners, but MikkTSpace's cost also depends on welding, UVs and
+the shape of each fan. The gate also read files it should refuse, and it trusted directory
+names and unhashed bytes.
+
+- **Both `corrected-*` features are on** (`corrected-vertex-welding`,
+  `corrected-edge-sorting`). The legacy weld (`merge_verts_fast`) falls back to an O(k²) scan
+  when the widest axis spans adjacent floats: a 255 × 255 grid on adjacent `f32`s near 10^6
+  took 59 s. The legacy edge quicksort uses a fixed pivot. The corrected versions are a
+  `BTreeMap` weld keyed by `total_cmp` and `sort_unstable`, both O(n log n); the same cluster
+  now takes 0.1–0.2 s. The output is therefore no longer byte-identical to the C in general.
+  For the shipped samples it is: `sample-mesh` regenerates `content/models/{sentinel,
+  skinned,crystal,rampart}.glb` and `fuzz/corpus/glb/sentinel.glb` byte for byte. The
+  reference test against the platform `acos` builds with the same features, so it now checks
+  only our `acos`, not the welding.
+- **The caps follow the cost.** Within one group of g faces sharing a position, MikkTSpace
+  filters faces in O(g²), runs one `acos` per face per new subgroup, and compares subgroups in
+  O(g³) at most. The degenerate pass is O(degenerate × good corners). So the guard now checks,
+  over corners k per position (counted by bit pattern, `-0.0` as `0.0`, as before):
+  - k ≤ **512** (`TANGENT_MAX_SHARED_CORNERS`, was 1024; a 256-segment UV-sphere pole has
+    256);
+  - Σk² ≤ **2^22** (`TANGENT_MAX_SHARING_COST`, was 2^24; about 56–78 ns per pair in the
+    worst case, so about 0.3 s);
+  - Σk³ ≤ **2^28** (new `TANGENT_MAX_SUBGROUP_COST`; the subgroup compares, at most k³ per
+    position, about 0.1 s at the cap; a dense mesh at the vertex cap is about 14 M, a
+    256-segment pole about 17 M);
+  - degenerate × good corners ≤ 2^28 (`TANGENT_MAX_DEGENERATE_COST`, unchanged).
+
+  The pair term dominates, so the ceiling is about 0.3 s. A frontier sweep (release, best of 3) of sliver fans
+  (0.01 rad wide, random UVs, so every pair of faces costs an `acos`) at the Σk² cap found the
+  worst case at 964 fans of 64 triangles, 0.23 s:
+
+  | Triangles per fan | Fans | Time | ns per pair |
+  |---|---|---|---|
+  | 8 | 6553 | 37 ms | 60 |
+  | 16 | 3640 | 87 ms | 75 |
+  | 32 | 1927 | 130 ms | 58 |
+  | 64 | 964 | 234 ms | 56 |
+  | 128 | 127 | 113 ms | — |
+  | 256 | 15 | 52 ms | — |
+  | 510 | 2 | 41 ms | 78 |
+
+  A fan of t triangles has t corners at its centre. A 255-side grid with 230 degenerate triangles, the most under the
+  degenerate cap, takes 0.12–0.23 s. One consequence: a double-sided mesh at the 65 536-vertex
+  cap (12 corners per position, Σk² about 4.7 M) now takes the fallback at runtime. That is
+  acceptable, because shipped meshes no longer depend on runtime generation (next item).
+- **Runtime generation is about 100× the old generator.** The bench
+  (`crates/assets/benches/mesh_tangents.rs`) measures 13 ms for the 10 k-vertex grid and
+  88 ms at the 65 536-vertex cap, against 0.15 ms and 0.8 ms for the pre-A0 area-weighted
+  generator. It gains `sliver-fans-at-cap` (0.23 s), `big-fans-at-cap` (two fans of 510,
+  26 ms) and `degenerates-at-cap` (0.12 s). §4's 92 ms and "about 1 s" are replaced by these
+  numbers.
+- **Shipped meshes carry baked tangents.** `content-check --provenance` loads every `.glb`
+  under the content root without generating tangents and fails one that has `TEXCOORD_0` but
+  lacks `TANGENT` on any primitive (`sample-mesh` already writes them). Runtime MikkTSpace
+  is now a bounded fallback for mods and development files, not the shipping path.
+- **Loading without tangents.** New `GlbTangents { Generate, FileOnly }`, `load_glb_with` and
+  `load_glb_file_with`; `load_glb` and `load_glb_file` are unchanged (`Generate`). `FileOnly`
+  keeps a file's own `TANGENT` and generates none. `mesh-bake`, `vat-bake`, `ao-bake`,
+  `content-check`'s footprint and the pack validation in `moba_assets` use it, because none
+  of them reads tangents. VFX `unit_mesh` and the client keep `Generate`: the renderer asks for
+  tangents, so skipping them at load would only move the cost.
+- **Regression tests** (`moba_assets::mesh`), with a time bound of 1.5 s in release builds:
+  964 sliver fans of 64 (under the caps; 965 are over), two fans of 510 with disc and sliver
+  UVs (three are over), the adjacent-float cluster, and the 255 grid with 230 degenerate
+  triangles (232 are over). The `glb` fuzz target now checks the tangents the loader returns
+  (`mesh.tangents()`, present whenever UVs are) instead of generating its own.
+- **Special files are never read.** The gate reads `provenance.toml`, `CREDITS.txt`,
+  `AI-DISCLOSURE.md` and `THIRD_PARTY.md` only through the new `provenance::read_plain_file`:
+  `symlink_metadata` must say a plain file, the open handle is checked again, and at most
+  `limit + 1` bytes are read. A symlink to `/dev/zero` or a FIFO is an error, not an
+  out-of-memory or a hang. A refused manifest (for example a directory named
+  `provenance.toml`) is reported and never read, and a notice path that is not a plain file
+  fails the command before anything is written. Notices are capped at 4 MiB.
+- **Directory names are plain.** Every directory under the content root must match
+  `[A-Za-z0-9._-]` (the rule file patterns already had), so a name cannot forge a
+  `THIRD_PARTY.md` marker or a Markdown line. Directory names also go through the Markdown
+  escaping in the generated notices. The `--content` path is normalised (`./content/` is
+  written as `content`).
+- **SHA-256 pins (maintainer decision).** An entry may record
+  `sha256 = { "rock-042-color.ktx2" = "…" }`, 64 lower-case hex digits per covered file, and
+  the gate verifies each one. It is **required** for every file an entry covers when its
+  `source` is not `"original"`, so a third-party file cannot change after its licence was
+  reviewed; original work stays hash-optional. A key naming a file the entry does not cover
+  is an error. The hash is of the committed bytes: `.gitattributes` normalises text to LF, so
+  record it after `git add`, or mark a third-party text file `-text` to keep its upstream bytes.
+- **Smaller gate fixes.** A `*` pattern may match only `*.toml` files (list binaries by name).
+  The Gemini screen (`ConceptOnlyService`, `CONCEPT_ONLY_SERVICES`) now also checks every
+  `ai.tools` entry and each AI input's name and source, not only `ai.model` and the input
+  licence. Manifest text also rejects the Unicode line and paragraph separators (U+2028,
+  U+2029) and the bidirectional controls U+202A–U+202E and U+2066–U+2069.
+- **What the gate does not prove.** Provenance is self-declared: an entry that omits its
+  `[asset.ai]` block, or claims `source = "original"`, is taken at its word, and nothing in
+  the files can show otherwise. Review of the manifest change is the control. The gate covers
+  only the content root it is given (`content/` in CI); code, shaders and any file outside
+  that root are outside it.
+- **Layering.** `bevy_mikktspace` reaches `moba-sim`, `moba-server` and `moba-net` through
+  `moba-game` → `moba-assets`. That is not a layering violation: the rule (AGENTS.md, checked
+  by `scripts/agent-verify.sh`) keeps `moba-render`, `moba-platform`, `ash`, `winit` and
+  `gpu-allocator` out of those graphs, and this is a
+  dependency-free `no_std` crate that never runs on a simulation path; tangents stay
+  render-only.
+- **Not done.** A const `acos` table in place of the series was considered and skipped: it
+  would change tangent bits and so every committed `.glb`, for a load-time cost the baked
+  tangents now avoid.
+- **API additions** (all additive): `ConceptOnlyService`, `CONCEPT_ONLY_SERVICES`,
+  `read_plain_file` and `AssetProvenance::sha256` in `moba_assets::provenance`;
+  `GlbTangents`, `load_glb_with`, `load_glb_file_with`; `MeshData::TANGENT_MAX_SUBGROUP_COST`.
+  No wire, replay, simulation-logic, state-hash or content-hash change; the committed meshes
+  are byte-identical, so captures are too (compared against `main`'s CI artefacts in the PR).

@@ -104,16 +104,24 @@ impl MeshData {
     /// Maximum indices per mesh (128 Ki triangles).
     pub const MAX_INDICES: usize = 3 * 131_072;
     /// [`Self::generate_tangents`] skips `MikkTSpace` when more triangle corners than this
-    /// share one position. `MikkTSpace`'s time grows with the square of that count (8 Ki
-    /// corners take about 0.4 s, and 16 Ki overflow its recursion's stack), so a hostile
-    /// `.glb` could otherwise stall or abort a loader. Real meshes have about 6 corners per
-    /// position and well under 1 Ki at a UV-sphere pole.
-    pub const TANGENT_MAX_SHARED_CORNERS: usize = 1024;
+    /// share one position. `MikkTSpace` groups the faces around a vertex recursively, one
+    /// stack frame per face (16 Ki overflow a thread's stack), and its time grows with the
+    /// square and cube of that count, so a hostile `.glb` could otherwise stall or abort a
+    /// loader. Real meshes have about 6 corners per position, and a 256-segment UV-sphere
+    /// pole has 256.
+    pub const TANGENT_MAX_SHARED_CORNERS: usize = 512;
     /// [`Self::generate_tangents`] also skips `MikkTSpace` when the sum over positions of
-    /// (corners sharing the position)² exceeds this (2^24; the worst case measured under it is
-    /// about 1 s, from 16 twisted-UV fans of 1020 corners), so many positions just under [`Self::TANGENT_MAX_SHARED_CORNERS`]
-    /// cannot add up. A dense mesh at the vertex cap is about 2.4 M.
-    pub const TANGENT_MAX_SHARING_COST: u64 = 1 << 24;
+    /// (corners sharing the position)² exceeds this (2^22). `MikkTSpace` compares every
+    /// pair of corners around a vertex, and with incoherent UVs evaluates a tangent space per
+    /// pair (one `acos` each), about 55–70 ns per pair, so this caps that work at about
+    /// 0.3 s (ADR-0022 amendment 1). A dense mesh at the vertex cap is about 2.4 M.
+    pub const TANGENT_MAX_SHARING_COST: u64 = 1 << 22;
+    /// [`Self::generate_tangents`] also skips `MikkTSpace` when the sum over positions of
+    /// (corners sharing the position)³ exceeds this (2^28). Around one vertex `MikkTSpace`
+    /// can compare each corner's subgroup (up to `k` entries) with up to `k` others, so a
+    /// position with `k` corners can cost `k³` element compares; this caps that at about
+    /// 0.1 s. A dense mesh at the vertex cap is about 14 M, and a 256-segment pole 17 M.
+    pub const TANGENT_MAX_SUBGROUP_COST: u64 = 1 << 28;
     /// [`Self::generate_tangents`] also skips `MikkTSpace` when (corners of degenerate
     /// triangles) × (corners of the others) exceeds this (2^28). Each corner of a triangle
     /// with two corners at one position scans every good corner for a tangent to copy, about
@@ -232,8 +240,11 @@ impl MeshData {
     ///
     /// The tangents are `MikkTSpace` (A0, ADR-0022), the tangent space normal-map bakers
     /// (Blender, xNormal, Substance) and glTF assume: the reference algorithm through
-    /// `bevy_mikktspace`, a byte-identical port of the C original, with its default 180°
-    /// grouping threshold. It runs on the unit normals and on `(u, -v)`: glTF `v` runs down
+    /// `bevy_mikktspace`, a port of the C original, with its default 180° grouping threshold
+    /// and its `corrected-vertex-welding` and `corrected-edge-sorting` features, which
+    /// replace two steps of the C that are quadratic on crafted input (ADR-0022 amendment 1).
+    /// Where the C's welding or edge sort would group corners differently, the result can
+    /// differ from the C's; the shipped samples' tangents are identical. It runs on the unit normals and on `(u, -v)`: glTF `v` runs down
     /// the image, so negating it gives the tangent space a DCC tool computes with `v` up
     /// before its glTF export flips `v` (see [`MeshData`]); negation keeps every UV
     /// difference and equality exact.
@@ -244,8 +255,8 @@ impl MeshData {
     /// mesh exported with its seams split gets exact `MikkTSpace` everywhere. A vertex with
     /// no tangent space (only degenerate triangles touch it, or a zero tangent) gets a fixed
     /// unit vector perpendicular to its normal and `w = +1`. A mesh over
-    /// [`Self::TANGENT_MAX_SHARED_CORNERS`], [`Self::TANGENT_MAX_SHARING_COST`] or
-    /// [`Self::TANGENT_MAX_DEGENERATE_COST`] gets that
+    /// [`Self::TANGENT_MAX_SHARED_CORNERS`], [`Self::TANGENT_MAX_SHARING_COST`],
+    /// [`Self::TANGENT_MAX_SUBGROUP_COST`] or [`Self::TANGENT_MAX_DEGENERATE_COST`] gets that
     /// fallback for every vertex, without running `MikkTSpace` (untrusted input must not
     /// stall the loader; ADR-0022). Only `+ - * /` and `sqrt` are
     /// used (the angle weights use an `acos` series in those operations), so the result is
@@ -506,7 +517,8 @@ fn generate_tangents(
 }
 
 /// Whether `MikkTSpace` stays within [`MeshData::TANGENT_MAX_SHARED_CORNERS`],
-/// [`MeshData::TANGENT_MAX_SHARING_COST`] and [`MeshData::TANGENT_MAX_DEGENERATE_COST`].
+/// [`MeshData::TANGENT_MAX_SHARING_COST`], [`MeshData::TANGENT_MAX_SUBGROUP_COST`] and
+/// [`MeshData::TANGENT_MAX_DEGENERATE_COST`].
 /// A triangle is degenerate, as `MikkTSpace` decides it, when two of its corners have equal
 /// positions. Corners are counted per **position** (bit
 /// pattern, `-0.0` as `0.0`), not per welded vertex: `MikkTSpace` is also quadratic in
@@ -537,14 +549,18 @@ fn mikktspace_is_bounded(positions: &[V3], indices: &[u32]) -> bool {
         .map(|(vertex, &count)| (key(vertex), count))
         .collect();
     keyed.sort_unstable_by_key(|&(key, _)| key);
-    let mut cost = 0_u64;
+    let (mut pairs, mut triples) = (0_u64, 0_u64);
     for run in keyed.chunk_by(|a, b| a.0 == b.0) {
         let shared: u64 = run.iter().map(|&(_, count)| u64::from(count)).sum();
         if shared > MeshData::TANGENT_MAX_SHARED_CORNERS as u64 {
             return false;
         }
-        cost += shared * shared;
-        if cost > MeshData::TANGENT_MAX_SHARING_COST {
+        // At most 512² and 512³ per position, and every running total stops at its cap.
+        pairs += shared * shared;
+        triples += shared * shared * shared;
+        if pairs > MeshData::TANGENT_MAX_SHARING_COST
+            || triples > MeshData::TANGENT_MAX_SUBGROUP_COST
+        {
             return false;
         }
     }
@@ -1039,7 +1055,8 @@ mod tests {
     }
 
     /// The deterministic build agrees with the reference build (the platform's `f64::acos`,
-    /// which is what makes `bevy_mikktspace` byte-identical to the C original) on a mesh
+    /// as the C original uses; both builds have the same `corrected-*` features, so this
+    /// checks `acos` only, ADR-0022 amendment 1) on a mesh
     /// with a smooth fan, a mirrored UV island, a UV-degenerate triangle and a
     /// position-degenerate one.
     #[test]
@@ -1184,36 +1201,138 @@ mod tests {
                 start.elapsed()
             );
         }
-        // Many positions under the per-position cap still add up: 17 fans of 1000 corners
-        // cost 17 M > 2^24.
-        let fan = high_valence_fan(1000, false);
-        let count = fan.positions().len() as u32;
-        let mut positions = Vec::new();
-        let mut uvs = Vec::new();
-        let mut indices = Vec::new();
-        for copy in 0..17_u32 {
-            let offset = [copy as f32 * 3.0, 0.0, 0.0];
-            positions.extend(
-                fan.positions()
-                    .iter()
-                    .map(|p| [p[0] + offset[0], p[1], p[2]]),
-            );
-            uvs.extend_from_slice(fan.uvs().expect("uvs"));
-            indices.extend(fan.indices().iter().map(|i| i + copy * count));
+    }
+
+    /// The shape and UVs of [`fans`].
+    #[derive(Clone, Copy, Debug)]
+    enum FanUvs {
+        /// A fan over most of a disc, with disc UVs: neighbouring triangles have similar
+        /// tangents.
+        Disc,
+        /// A sliver fan (0.01 rad) with a fixed pseudo-random UV angle per rim vertex: its
+        /// tangents are nearly antiparallel, so `MikkTSpace` splits a vertex's faces into
+        /// almost one subgroup per face and evaluates each (about one `acos` per corner
+        /// pair), its most expensive case (ADR-0022 amendment 1).
+        Sliver,
+    }
+
+    /// `count` fans of `triangles` triangles, 3 m apart, each around its own centre vertex.
+    /// Per fan, (corners per position)² sums to `t² + 4t - 2` and the cubes to
+    /// `t³ + 8t - 6`, over `t + 2` vertices.
+    fn fans(count: u32, triangles: u32, uvs: FanUvs) -> MeshData {
+        let (mut positions, mut uv, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+        let span = match uvs {
+            FanUvs::Disc => 6.0,
+            FanUvs::Sliver => 0.01,
+        };
+        for fan in 0..count {
+            let offset = fan as f32 * 3.0;
+            let base = positions.len() as u32;
+            for i in 0..=triangles {
+                let angle = i as f32 / triangles as f32 * span;
+                positions.push([offset + angle.cos(), angle.sin(), 0.0]);
+                let uv_angle = match uvs {
+                    FanUvs::Disc => angle,
+                    FanUvs::Sliver => {
+                        let hash = i.wrapping_mul(2_654_435_761) ^ fan.wrapping_mul(40_503);
+                        hash as f32 / u32::MAX as f32 * core::f32::consts::TAU
+                    }
+                };
+                uv.push([0.5 + 0.5 * uv_angle.cos(), 0.5 + 0.5 * uv_angle.sin()]);
+            }
+            positions.push([offset, 0.0, 0.1]);
+            uv.push([0.5, 0.5]);
+            let centre = positions.len() as u32 - 1;
+            for i in 0..triangles {
+                indices.extend([centre, base + i, base + i + 1]);
+            }
         }
         let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
-        let many = MeshData::new(positions, normals, indices)
+        MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uv))
+            .expect("valid fans")
+    }
+
+    fn bounded(mesh: &MeshData) -> bool {
+        mikktspace_is_bounded(mesh.positions(), mesh.indices())
+    }
+
+    /// The worst accepted case of each cap runs `MikkTSpace` within the load-time bound
+    /// ADR-0022 amendment 1 states (at most about 0.3 s on the reference machine; asserted at
+    /// 1.5 s so a slow CI runner passes). Timed in optimised builds only: a debug build runs
+    /// the generic `MikkTSpace` code unoptimised.
+    fn assert_within_bound(label: &str, mesh: &MeshData) {
+        let start = std::time::Instant::now();
+        let tangents = mesh.generate_tangents().expect("uvs");
+        let elapsed = start.elapsed();
+        assert_eq!(tangents.len(), mesh.vertex_count());
+        if !cfg!(debug_assertions) {
+            assert!(
+                elapsed < std::time::Duration::from_millis(1500),
+                "{label}: {elapsed:?}"
+            );
+        }
+    }
+
+    /// Many positions under the per-position cap add up: the sums of squares and cubes are
+    /// capped too, and the worst case just under each runs within the bound.
+    #[test]
+    fn sharing_costs_are_capped_and_bounded() {
+        // Squares: 964 sliver fans of 64 triangles are 964 × 4350 ≤ 2^22 < 965 × 4350. Of
+        // every fan size at the caps this is the slowest (about 0.23 s; amendment 1).
+        let under = fans(964, 64, FanUvs::Sliver);
+        assert!(bounded(&under), "under the sharing cost");
+        assert_within_bound("964 sliver fans of 64", &under);
+        assert!(
+            !bounded(&fans(965, 64, FanUvs::Sliver)),
+            "over the sharing cost"
+        );
+        // Cubes: two fans of 510 are 2 × 132 655 074 ≤ 2^28 < three.
+        for uvs in [FanUvs::Disc, FanUvs::Sliver] {
+            let under = fans(2, 510, uvs);
+            assert!(bounded(&under), "under the subgroup cost, {uvs:?}");
+            assert_within_bound(&format!("2 fans of 510, {uvs:?}"), &under);
+        }
+        let over = fans(3, 510, FanUvs::Sliver);
+        assert!(!bounded(&over), "over the subgroup cost");
+        assert!(is_fallback(&over));
+    }
+
+    /// `MikkTSpace`'s original vertex weld splits buckets on their widest axis and scans a
+    /// bucket pairwise once that axis spans adjacent floats, so a cluster spread only along
+    /// the other axes took a minute at the vertex cap (A0 review). Its
+    /// `corrected-vertex-welding` (a sorted map) is O(n log n): the same mesh is ordinary.
+    #[test]
+    fn an_adjacent_float_cluster_welds_quickly() {
+        let side = 255_u32;
+        let x0 = 1.0e6_f32;
+        let x1 = f32::from_bits(x0.to_bits() + 1);
+        let (mut positions, mut uvs, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+        for row in 0..side {
+            for column in 0..side {
+                // x alternates between adjacent floats; y and z spread far below x's ulp.
+                let x = if (row + column) % 2 == 1 { x1 } else { x0 };
+                positions.push([x, column as f32 * 1e-6, row as f32 * 1e-6]);
+                uvs.push([column as f32 / side as f32, row as f32 / side as f32]);
+            }
+        }
+        for row in 0..side - 1 {
+            for column in 0..side - 1 {
+                let at = row * side + column;
+                indices.extend([at, at + 1, at + side, at + 1, at + side + 1, at + side]);
+            }
+        }
+        // A far outlier puts the whole grid in one of the weld's top-level buckets.
+        let base = positions.len() as u32;
+        positions.extend([[x0, 1000.0, 0.0], [x0, 1001.0, 0.0], [x0, 1000.0, 1.0]]);
+        uvs.extend([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        indices.extend([base, base + 1, base + 2]);
+        let normals = vec![[1.0, 0.0, 0.0]; positions.len()];
+        let cluster = MeshData::new(positions, normals, indices)
             .and_then(|mesh| mesh.with_uvs(uvs))
-            .expect("valid");
-        assert!(is_fallback(&many), "over the sharing cost");
-        let sixteen = MeshData::new(
-            many.positions()[..16 * count as usize].to_vec(),
-            many.normals()[..16 * count as usize].to_vec(),
-            many.indices()[..16 * 3000].to_vec(),
-        )
-        .and_then(|mesh| mesh.with_uvs(many.uvs().expect("uvs")[..16 * count as usize].to_vec()))
-        .expect("valid");
-        assert!(!is_fallback(&sixteen), "16 M is within the sharing cost");
+            .expect("valid cluster");
+        assert!(bounded(&cluster));
+        assert_within_bound("adjacent-float cluster", &cluster);
     }
 
     /// A `side × side` grid (good triangles) plus `degenerate` triangles `(a, a, b)` on
@@ -1254,7 +1373,6 @@ mod tests {
         // A few degenerates on a normal mesh: MikkTSpace runs.
         assert!(!is_fallback(&grid_with_degenerates(20, 3)));
         // 50 × 50 grid: 14 406 good corners; 2^28 / 14 406 / 3 ≈ 6211 degenerate triangles.
-        let bounded = |mesh: &MeshData| mikktspace_is_bounded(mesh.positions(), mesh.indices());
         assert!(bounded(&grid_with_degenerates(50, 6211)));
         let over = grid_with_degenerates(50, 6212);
         assert!(!bounded(&over));
@@ -1265,5 +1383,11 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
+        // At the vertex cap: a 255 × 255 grid has 387 096 good corners, so 230 degenerate
+        // triangles (690 corners) are just under 2^28 and 232 are over.
+        let worst = grid_with_degenerates(255, 230);
+        assert!(bounded(&worst));
+        assert_within_bound("255 grid + 230 degenerates", &worst);
+        assert!(!bounded(&grid_with_degenerates(255, 232)));
     }
 }

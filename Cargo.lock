@@ -1364,6 +1364,7 @@ dependencies = [
  "moba-core",
  "moba-test-support",
  "serde",
+ "sha2",
  "toml",
 ]
 

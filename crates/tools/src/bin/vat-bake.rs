@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use moba_assets::{
-    DEFAULT_VAT_FPS, VatBakeClip, VatPlaybackParams, bake_vat, load_glb_file, write_ktx2,
+    DEFAULT_VAT_FPS, GlbTangents, VatBakeClip, VatPlaybackParams, bake_vat, load_glb_file_with,
+    write_ktx2,
 };
 
 const DEFAULT_CLIPS: &str = "idle,run,attack,death";
@@ -95,7 +96,8 @@ fn main() -> ExitCode {
             return usage();
         }
     };
-    let mesh = match load_glb_file(&options.input) {
+    // A VAT bakes positions and normals: tangents are never read.
+    let mesh = match load_glb_file_with(&options.input, GlbTangents::FileOnly) {
         Ok(mesh) => mesh,
         Err(error) => {
             eprintln!("vat-bake: {}: {error}", options.input.display());

@@ -101,7 +101,10 @@ pub use environment::{
 };
 pub use foliage::{FoliageInstance, MAX_FOLIAGE_INSTANCES, generate_foliage};
 #[cfg(feature = "glb")]
-pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
+pub use glb::{
+    GlbError, GlbTangents, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file,
+    load_glb_file_with, load_glb_with,
+};
 pub use grading::{
     GRADING_DIR, GradingLut, GradingLutError, MAX_GRADING_LUT_BYTES, MAX_GRADING_LUT_SIZE,
     MAX_TEAM_HUE_SHIFT, MIN_GRADING_LUT_SIZE, MIN_TEAM_CHROMA, MIN_TEAM_HUE_SEPARATION,
@@ -705,8 +708,10 @@ fn check_file(
         }
         return Ok(());
     }
+    // Validation only: nothing here reads tangents, so none are generated.
     #[cfg(feature = "glb")]
-    load_glb_file(&canonical).map_err(|error| AssetFileProblem::Malformed(error.to_string()))?;
+    load_glb_file_with(&canonical, GlbTangents::FileOnly)
+        .map_err(|error| AssetFileProblem::Malformed(error.to_string()))?;
     // A material next to the model (`materials/<model>.toml`) must load, with its textures.
     if let Some(model) = model_stem(path) {
         check_material(root, canonical_root, model)?;

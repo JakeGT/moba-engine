@@ -21,6 +21,8 @@ moba-core.workspace = true
 serde.workspace = true
 toml.workspace = true
 bevy_mikktspace.workspace = true
+# Provenance `sha256` checks (A0, ADR-0022 amendment 1).
+sha2.workspace = true
 gltf = { workspace = true, optional = true, features = ["names"] }
 bcdec_rs = { workspace = true, optional = true }
 

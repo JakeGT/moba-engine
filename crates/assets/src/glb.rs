@@ -149,12 +149,34 @@ impl From<SkinError> for GlbError {
     }
 }
 
+/// What the loader does for a mesh whose file has no `TANGENT` (see the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GlbTangents {
+    /// Generate `MikkTSpace` tangents from the UVs, once ([`MeshData::with_generated_tangents`]).
+    #[default]
+    Generate,
+    /// Keep only the file's own `TANGENT`s: without them [`MeshData::tangents`] is `None`.
+    /// For consumers that never read tangents (the bakers, bounds and budget checks), which
+    /// then skip `MikkTSpace`, and for checking that a shipped file carries its own
+    /// (`content-check --provenance`, ADR-0022 amendment 1).
+    FileOnly,
+}
+
 /// Reads and parses a `.glb` file, refusing files larger than [`MAX_GLB_BYTES`] without
 /// reading them.
 ///
 /// # Errors
 /// Returns [`GlbError::Io`] for file errors, otherwise as [`load_glb`].
 pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
+    load_glb_file_with(path, GlbTangents::Generate)
+}
+
+/// [`load_glb_file`] with a choice of what happens to a mesh without `TANGENT`.
+///
+/// # Errors
+/// As [`load_glb_file`].
+pub fn load_glb_file_with(path: &Path, tangents: GlbTangents) -> Result<MeshData, GlbError> {
     let file = std::fs::File::open(path).map_err(|error| GlbError::Io(error.kind()))?;
     let length = file
         .metadata()
@@ -168,7 +190,7 @@ pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
     file.take(MAX_GLB_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| GlbError::Io(error.kind()))?;
-    load_glb(&bytes)
+    load_glb_with(&bytes, tangents)
 }
 
 /// Parses a binary glTF file into one merged, validated mesh, skinned if it uses a skin.
@@ -181,6 +203,14 @@ pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
 /// # Errors
 /// Returns a [`GlbError`] describing the first problem found.
 pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
+    load_glb_with(bytes, GlbTangents::Generate)
+}
+
+/// [`load_glb`] with a choice of what happens to a mesh without `TANGENT`.
+///
+/// # Errors
+/// As [`load_glb`].
+pub fn load_glb_with(bytes: &[u8], generate: GlbTangents) -> Result<MeshData, GlbError> {
     if bytes.len() > MAX_GLB_BYTES {
         return Err(GlbError::TooLarge);
     }
@@ -239,11 +269,12 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
     if let Some(uvs) = uvs {
         mesh = mesh.with_uvs(uvs)?;
     }
-    mesh = match tangents {
-        Some(tangents) => mesh.with_tangents(tangents)?,
+    mesh = match (tangents, generate) {
+        (Some(tangents), _) => mesh.with_tangents(tangents)?,
         // Generated once here (MikkTSpace, A0), so every consumer, bone-LOD skins included,
         // shares them instead of regenerating; a no-op without UVs.
-        None => mesh.with_generated_tangents(),
+        (None, GlbTangents::Generate) => mesh.with_generated_tangents(),
+        (None, GlbTangents::FileOnly) => mesh,
     };
     let SkinMode::Skinned(skin) = skin else {
         return Ok(mesh);
@@ -1265,7 +1296,7 @@ mod tests {
 
     #[test]
     fn texcoords_are_read_as_float_or_normalised_ints() {
-        let with_uvs = |component: u32, data: Vec<u8>| {
+        let uv_glb = |component: u32, data: Vec<u8>| {
             let json = triangle_json("", POSITION_ACCESSOR)
                 .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TEXCOORD_0":3}"#)
                 .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
@@ -1282,10 +1313,17 @@ mod tests {
             let mut bin = triangle_bin();
             bin.extend([0, 0]); // pad the u16 indices to 80 bytes
             bin.extend(data);
-            load_glb(&glb(&json, Some(&bin)))
+            glb(&json, Some(&bin))
         };
+        let with_uvs = |component: u32, data: Vec<u8>| load_glb(&uv_glb(component, data));
         let mesh = with_uvs(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0])).expect("f32 uvs");
         assert_eq!(mesh.uvs(), Some(&[[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]][..]));
+        assert!(mesh.tangents().is_some(), "generated at load");
+        // `FileOnly` reads the same mesh without generating tangents.
+        let bytes = uv_glb(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0]));
+        let file_only = load_glb_with(&bytes, GlbTangents::FileOnly).expect("f32 uvs");
+        assert_eq!(file_only.uvs(), mesh.uvs());
+        assert!(file_only.tangents().is_none(), "no TANGENT in the file");
         let mut bytes = vec![0, 0, 255, 0, 0, 255];
         bytes.resize(24, 0); // the buffer view is 24 bytes long
         let mesh = with_uvs(5121, bytes).expect("u8 uvs");

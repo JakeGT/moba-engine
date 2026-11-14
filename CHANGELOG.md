@@ -155,7 +155,11 @@ the semver check):
     an asset licence under `animations/`, the NVIDIA licence only as `ai.weights_licence`);
     the content root may hold only packs and the generated notices; dot entries and
     symlinks are errors; manifest text may not hold control characters or comment markers;
-    and `THIRD_PARTY.md` needs exactly one marker pair. It writes
+    and `THIRD_PARTY.md` needs exactly one marker pair. Directory names follow the file-name
+    rule; a `*` pattern may cover only `*.toml`; manifests and notices are read only as plain
+    files (a symlink, FIFO or device is an error); a third-party entry pins each file's
+    SHA-256 (`sha256 = { "name" = "…" }`, verified when present); and every `.glb` with UVs
+    must carry baked `TANGENT`s (ADR-0022 amendment 1). It writes
     the content section of `THIRD_PARTY.md`, `content/CREDITS.txt` and the Steam
     AI-disclosure list `content/AI-DISCLOSURE.md`; `--check` (in `scripts/agent-verify.sh`,
     `just ci-tools` and a unit test) fails when they are stale. New `moba_assets::provenance`
@@ -169,11 +173,14 @@ the semver check):
     plane are now wound counter-clockwise about their normals, as MikkTSpace assumes. The
     `.glb` loader generates tangents once at load (so bone-count skin LODs inherit them) and
     reverses the corner order under a mirroring node, keeping front faces counter-clockwise.
-    A mesh with more than 1024 triangle corners at one position, a total sharing cost over
-    2^24, or degenerate × good triangle corners over 2^28 gets the fallback tangent instead
-    of MikkTSpace, whose time is quadratic in those counts (a hostile `.glb` could stall or
-    stack-overflow the loader);
-    new bench `mesh/generate_tangents/{10k,65k}`. LODs,
+    `bevy_mikktspace`'s `corrected-*` welding and edge sort replace the C's quadratic ones
+    (the samples' tangents are unchanged). A mesh with more than 512 triangle corners at one
+    position, Σk² over 2^22 or Σk³ over 2^28 of those counts, or degenerate × good corners
+    over 2^28 gets the fallback tangent instead of MikkTSpace, bounding a hostile `.glb` at
+    about 0.3 s (0.23 s measured); runtime generation is about 100× the old generator
+    (13 ms for 10 k vertices, 88 ms at the cap). New `GlbTangents::FileOnly` and
+    `load_glb_with`/`load_glb_file_with` skip it for the bakers and validation. New bench
+    `mesh/generate_tangents/{10k,65k,sliver-fans-at-cap,big-fans-at-cap,degenerates-at-cap}`. LODs,
     VAT, baked AO and captured frames are unchanged. No wire, replay, simulation or
     content-hash change.
 - **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 2;

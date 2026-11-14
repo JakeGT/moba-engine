@@ -384,6 +384,7 @@ dependencies = [
  "gltf",
  "moba-core",
  "serde",
+ "sha2",
  "toml",
 ]
 

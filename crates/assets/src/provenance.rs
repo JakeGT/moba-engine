@@ -3,8 +3,10 @@
 //! Every file in a content root's asset directories (any directory below the root) is
 //! covered by exactly one entry of the [`PROVENANCE_FILE`] manifest in its own directory. The
 //! root itself may hold only pack files (`*.toml`, gameplay data) and the generated
-//! [`CREDITS_FILE`] and [`AI_DISCLOSURE_FILE`]; dot-files, dot-directories and symlinks are
-//! errors anywhere, so nothing can hide from the gate:
+//! [`CREDITS_FILE`] and [`AI_DISCLOSURE_FILE`]; dot-files, dot-directories, symlinks and
+//! special files are errors anywhere (and never read), and directory names are limited to
+//! ASCII letters, digits, `.`, `_` and `-`, so nothing can hide from the gate or break the
+//! notices. A `*` pattern may cover only `*.toml` data files; binaries are listed by name:
 //!
 //! ```toml
 //! [[asset]]
@@ -16,6 +18,8 @@
 //! made_with = "moba-tools sample-mesh"       # optional: how it was produced
 //! # attribution = "..."                      # required for CC-BY
 //! # notes = "..."
+//! # sha256 = { "sentinel.glb" = "<64 hex>" } # checked when present; required per file
+//! #                                          # unless source = "original"
 //!
 //! # [asset.ai]                               # only for AI-generated assets
 //! # model = "TRELLIS.2-4B"
@@ -37,18 +41,27 @@
 //! and for AI-generated assets the model, version, weights licence, seed, prompt or inputs,
 //! and tools, with the roadmap's rules (the asset is CC0, or CC-BY once a person modified
 //! it, and third-party inputs are CC0). Exceptions apply only to the use and directories
-//! they were approved for. Manifest text may not contain control characters or HTML comment
-//! markers, so it cannot break the generated notices. [`third_party_section`], [`credits_text`] and [`ai_disclosure`] render the
+//! they were approved for. A file taken from elsewhere (`source` not `original`) needs its
+//! `sha256`, which pins the reviewed bytes (ADR-0022 amendment 1). Manifest text may not
+//! contain control characters, line or paragraph separators, bidirectional overrides or HTML
+//! comment markers, so it cannot break or disguise the generated notices. [`third_party_section`], [`credits_text`] and [`ai_disclosure`] render the
 //! notices `content-check --provenance` writes; they are deterministic, so `--check` can
 //! compare them with the committed files.
 //!
-//! Provenance is cosmetic metadata: it is never hashed, signed or sent, and the client
-//! never reads it.
+//! Provenance is cosmetic metadata: it is never hashed into a pack, signed or sent, and the
+//! client never reads it. What it declares is the author's statement: the gate cannot tell
+//! that an asset claimed as `original` was really made here, or that one without an `[ai]`
+//! table was made without AI. It covers the content root only (`content/`), not engine-built
+//! assets elsewhere in the repository.
+
+use std::collections::BTreeMap;
 
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::Path;
 
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 
 /// The manifest's file name in each asset directory. It is never an asset itself, and
 /// `check_vfx_dir` skips `vfx/provenance.toml`, so do not name an effect, map visuals or
@@ -143,8 +156,11 @@ pub const LICENCE_EXCEPTIONS: &[LicenceException] = &[
 /// A proprietary generation service the maintainer approved for concept art only (art bible,
 /// concept generation, 2026-10-31). Its output is a reference that people model from by hand:
 /// it is never a shipped asset, never an input to a generator for one, and no shipped asset is
-/// generated with it. Its licence id and model names are therefore rejected everywhere, with a
-/// message saying why, so a concept image cannot reach `content/` under another label.
+/// generated with it. Its licence id is therefore rejected in every licence field, and its
+/// model names in `ai.model`, every `ai.tools` entry and every input's `name` and `source`,
+/// with a message saying why, so a concept image cannot reach `content/` under another
+/// label. (An entry that hides the service entirely, with no `[ai]` table, is beyond any
+/// manifest check.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConceptOnlyService {
@@ -152,7 +168,8 @@ pub struct ConceptOnlyService {
     pub id: &'static str,
     /// Human-readable name.
     pub name: &'static str,
-    /// Lower-case substrings of `ai.model` that name the service's models.
+    /// Lower-case substrings that name the service's models (in `ai.model`, `ai.tools` and
+    /// the inputs' `name` and `source`).
     pub model_markers: &'static [&'static str],
 }
 
@@ -287,6 +304,11 @@ pub struct AssetProvenance {
     /// Present when the asset was generated with AI.
     #[serde(default)]
     pub ai: Option<AiProvenance>,
+    /// Lower-case hex SHA-256 of covered files, by file name. Checked when present, and
+    /// required for every covered file unless [`Self::is_original`]: it pins the bytes that
+    /// were reviewed against the licence (ADR-0022 amendment 1).
+    #[serde(default)]
+    pub sha256: BTreeMap<String, String>,
 }
 
 impl AssetProvenance {
@@ -411,11 +433,22 @@ fn is_source(source: &str) -> bool {
     source == "original" || source.starts_with("https://") || source.starts_with("http://")
 }
 
+/// Whether `character` reorders or breaks the text it sits in: the Unicode line and
+/// paragraph separators (U+2028, U+2029) and the bidirectional embeddings, overrides and
+/// isolates (U+202A–U+202E, U+2066–U+2069), which can make a notice read differently from
+/// its bytes.
+fn is_layout_control(character: char) -> bool {
+    matches!(character, '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Why `value` cannot go into the generated notices, if it cannot: control characters
-/// (line breaks included) and HTML comment markers, which could end the generated section.
+/// (line breaks included), line and paragraph separators and bidirectional controls, and
+/// HTML comment markers, which could end the generated section.
 fn unsafe_text(value: &str) -> Option<&'static str> {
     if value.chars().any(char::is_control) {
         Some("contains a control character (line breaks included)")
+    } else if value.chars().any(is_layout_control) {
+        Some("contains a Unicode line separator or bidirectional control")
     } else if value.contains("<!--") || value.contains("-->") {
         Some("contains an HTML comment marker")
     } else {
@@ -531,6 +564,14 @@ fn check_entry(at: &str, dir: &str, asset: &AssetProvenance, errors: &mut Vec<St
     if let Some(service) = concept_only_model(&ai.model) {
         fail(format!("ai.model: {}", concept_only(service.name)));
     }
+    for tool in &ai.tools {
+        if let Some(service) = concept_only_model(tool) {
+            fail(format!(
+                "ai.tools \"{tool}\": {}",
+                concept_only(service.name)
+            ));
+        }
+    }
     if let Err(reason) = licence_status(&ai.weights_licence, LicenceUse::Weights, dir) {
         fail(format!("ai.weights_licence: {reason}"));
     }
@@ -540,10 +581,21 @@ fn check_entry(at: &str, dir: &str, asset: &AssetProvenance, errors: &mut Vec<St
     if ai.tools.is_empty() || ai.tools.iter().any(|tool| tool.trim().is_empty()) {
         fail(String::from("ai.tools must list every tool used"));
     }
+    check_ai_inputs(dir, ai, &mut fail);
+}
+
+/// The checks on one AI entry's `inputs`: named, sourced, never a concept-only service's
+/// output, and CC0-1.0 when third-party.
+fn check_ai_inputs(dir: &str, ai: &AiProvenance, fail: &mut impl FnMut(String)) {
     for input in &ai.inputs {
         let label = format!("ai input \"{}\"", input.name);
         if input.name.trim().is_empty() {
             fail(String::from("an ai input has no name"));
+        }
+        for (field, value) in [("name", &input.name), ("source", &input.source)] {
+            if let Some(service) = concept_only_model(value) {
+                fail(format!("{label}: {field}: {}", concept_only(service.name)));
+            }
         }
         if !is_source(&input.source) {
             fail(format!(
@@ -620,11 +672,25 @@ fn refuse_entry(dir: &str, name: &str, kind: EntryKind, report: &mut ProvenanceR
         "dot-files and dot-directories are not allowed in a content root"
     } else if kind == EntryKind::Other {
         "symlinks and special files are not allowed in a content root"
+    } else if kind == EntryKind::Dir && !plain_name(name) {
+        "a directory name may use only ASCII letters, digits, `.`, `_` and `-`"
     } else {
         return false;
     };
-    report.errors.push(format!("{path}: {problem}"));
+    // A refused directory's name is escaped: it is not plain text.
+    report
+        .errors
+        .push(format!("{}: {problem}", path.escape_debug()));
     true
+}
+
+/// ASCII letters, digits, `.`, `_` and `-` only: nothing Markdown, HTML or a shell reads
+/// specially, so the name goes into the notices as it is.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// Checks `dir` (relative to `root`), then its subdirectories, depth first.
@@ -645,7 +711,18 @@ fn walk(root: &Path, dir: &str, report: &mut ProvenanceReport) {
         .filter(|(name, kind)| *kind == EntryKind::File && name != PROVENANCE_FILE)
         .map(|(name, _)| name.clone())
         .collect();
-    check_dir(root, dir, &files, report);
+    // Only a plain file is read as the manifest: a symlinked or special one was refused
+    // above, and reading it could follow the link (to `/dev/zero`, say) or block on a FIFO.
+    let manifest = entries
+        .iter()
+        .find(|(name, _)| name == PROVENANCE_FILE)
+        .map(|(_, kind)| *kind);
+    if manifest == Some(EntryKind::Dir) {
+        report.errors.push(format!(
+            "{dir}/{PROVENANCE_FILE}: is a directory, not a manifest"
+        ));
+    }
+    check_dir(root, dir, &files, manifest == Some(EntryKind::File), report);
     for (name, kind) in &entries {
         if *kind == EntryKind::Dir {
             walk(root, &format!("{dir}/{name}"), report);
@@ -671,11 +748,19 @@ fn sorted_entries(dir: &Path) -> std::io::Result<Vec<(String, EntryKind)>> {
     Ok(entries)
 }
 
-fn check_dir(root: &Path, dir: &str, files: &[String], report: &mut ProvenanceReport) {
+/// Checks the `files` of `dir` against its manifest, which is read only when `has_manifest`
+/// (a plain file of that name was listed).
+fn check_dir(
+    root: &Path,
+    dir: &str,
+    files: &[String],
+    has_manifest: bool,
+    report: &mut ProvenanceReport,
+) {
     report.files += files.len();
     let manifest_name = format!("{dir}/{PROVENANCE_FILE}");
     let path = root.join(dir).join(PROVENANCE_FILE);
-    let manifest = match read_manifest(&path) {
+    let manifest = match has_manifest.then(|| read_manifest(&path)).transpose() {
         Ok(Some(manifest)) => manifest,
         Ok(None) => {
             if !files.is_empty() {
@@ -719,6 +804,16 @@ fn check_dir(root: &Path, dir: &str, files: &[String], report: &mut ProvenanceRe
                     continue;
                 }
                 matched_any = true;
+                if pattern.contains('*')
+                    && Path::new(file)
+                        .extension()
+                        .is_none_or(|extension| extension != "toml")
+                {
+                    report.errors.push(format!(
+                        "{at}: \"{pattern}\" matches {dir}/{file}; a `*` pattern may cover only \
+                         *.toml data files, so list binaries by name"
+                    ));
+                }
                 match owner[file_index] {
                     Some(other) if other != index => report.errors.push(format!(
                         "{dir}/{file} is covered by [[asset]] #{} and #{} in {manifest_name}",
@@ -742,6 +837,7 @@ fn check_dir(root: &Path, dir: &str, files: &[String], report: &mut ProvenanceRe
             .map(|(_, file)| format!("{dir}/{file}"))
             .collect();
         matched.sort();
+        check_hashes(root, dir, &at, &asset, &matched, &mut report.errors);
         report.entries.push(ProvenanceEntry {
             dir: dir.to_string(),
             files: matched,
@@ -757,20 +853,123 @@ fn check_dir(root: &Path, dir: &str, files: &[String], report: &mut ProvenanceRe
     }
 }
 
-/// The parsed manifest, `None` when the file does not exist.
-fn read_manifest(path: &Path) -> Result<Option<Manifest>, String> {
-    let metadata = match std::fs::metadata(path) {
+/// The parsed manifest at `path`, which the walk listed as a plain file.
+fn read_manifest(path: &Path) -> Result<Manifest, String> {
+    let text = read_plain_file(path, MAX_PROVENANCE_BYTES)?
+        .ok_or_else(|| String::from("disappeared while the gate ran"))?;
+    toml::from_str(&text).map_err(|error| error.to_string().trim_end().to_string())
+}
+
+/// The UTF-8 text of the plain file at `path`, at most `limit` bytes, or `None` when nothing
+/// is there. A symlink (never followed), directory, FIFO, device or socket is an error, and
+/// so is a file over `limit`; the read stops at `limit + 1` bytes even if the file grows, so
+/// neither a link to `/dev/zero` nor a FIFO can exhaust memory or block the gate.
+///
+/// # Errors
+/// A human-readable reason.
+pub fn read_plain_file(path: &Path, limit: u64) -> Result<Option<String>, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    if metadata.len() > MAX_PROVENANCE_BYTES {
-        return Err(format!("larger than {MAX_PROVENANCE_BYTES} bytes"));
+    if !metadata.file_type().is_file() {
+        return Err(String::from(
+            "is a symlink, directory or special file; only a plain file is read",
+        ));
     }
-    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    toml::from_str(&text)
-        .map(Some)
-        .map_err(|error| error.to_string().trim_end().to_string())
+    if metadata.len() > limit {
+        return Err(format!("larger than {limit} bytes"));
+    }
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    // The opened file itself: the path may have been swapped since `symlink_metadata`.
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .file_type()
+        .is_file()
+    {
+        return Err(String::from("is not a plain file"));
+    }
+    let mut text = String::new();
+    file.take(limit + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| error.to_string())?;
+    if text.len() as u64 > limit {
+        return Err(format!("larger than {limit} bytes"));
+    }
+    Ok(Some(text))
+}
+
+/// Lower-case hex SHA-256 of the file at `path`, read in blocks.
+fn sha256_hex(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut block = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut block)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&block[..read]);
+    }
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
+/// The `sha256` checks of one entry in `dir`, whose covered files are `matched` (relative
+/// to the content root): every key names a covered file, every value is 64 lower-case hex
+/// digits equal to that file's SHA-256, and a non-original entry hashes every file.
+fn check_hashes(
+    root: &Path,
+    dir: &str,
+    at: &str,
+    asset: &AssetProvenance,
+    matched: &[String],
+    errors: &mut Vec<String>,
+) {
+    let name_of = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    let covered: Vec<String> = matched.iter().map(|path| name_of(path)).collect();
+    for (name, expected) in &asset.sha256 {
+        if !covered.contains(name) {
+            errors.push(format!(
+                "{at}: sha256 names \"{}\", which this entry does not cover",
+                name.escape_debug()
+            ));
+            continue;
+        }
+        if expected.len() != 64
+            || !expected
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            errors.push(format!(
+                "{at}: sha256 of {name} must be 64 lower-case hex digits"
+            ));
+            continue;
+        }
+        match sha256_hex(&root.join(dir).join(name)) {
+            Ok(actual) if actual == *expected => {}
+            Ok(actual) => errors.push(format!(
+                "{dir}/{name}: SHA-256 is {actual}, but {at} records {expected}; the file \
+                 changed since its licence was reviewed"
+            )),
+            Err(error) => errors.push(format!("{dir}/{name}: {error}")),
+        }
+    }
+    if !asset.is_original() {
+        for name in &covered {
+            if !asset.sha256.contains_key(name) {
+                errors.push(format!(
+                    "{at}: {dir}/{name} is third-party, so it needs its SHA-256 \
+                     (`sha256 = {{ \"{name}\" = \"…\" }}`)"
+                ));
+            }
+        }
+    }
 }
 
 /// The first line of every generated section of `THIRD_PARTY.md`.
@@ -822,7 +1021,7 @@ pub fn third_party_section(report: &ProvenanceReport, content: &str) -> String {
         let files: Vec<String> = entry
             .patterns()
             .iter()
-            .map(|pattern| format!("`{content}/{pattern}`"))
+            .map(|pattern| format!("`{}/{}`", cell(content), cell(pattern)))
             .collect();
         let mut title = cell(&entry.asset.title);
         if entry.asset.ai.is_some() {
@@ -1029,7 +1228,7 @@ pub fn ai_disclosure(report: &ProvenanceReport, content: &str) -> String {
         let files: Vec<String> = entry
             .patterns()
             .iter()
-            .map(|pattern| format!("`{content}/{pattern}`"))
+            .map(|pattern| format!("`{}/{}`", cell(content), cell(pattern)))
             .collect();
         let _ = writeln!(
             out,
@@ -1164,7 +1363,7 @@ mod tests {
 
     const ORIGINAL: &str = r#"
 [[asset]]
-files = ["*.glb"]
+files = ["a.glb"]
 title = "Sample meshes"
 source = "original"
 author = "MOBA Engine contributors"
@@ -1186,7 +1385,8 @@ licence = "MIT OR Apache-2.0"
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].contains("no provenance.toml") && found[0].contains("a.glb, b.glb"));
         // Covered: clean, and the report lists the files.
-        scratch.write("models/provenance.toml", ORIGINAL);
+        let both = ORIGINAL.replace("[\"a.glb\"]", "[\"a.glb\", \"b.glb\"]");
+        scratch.write("models/provenance.toml", &both);
         let report = check_provenance(&scratch.0);
         assert_eq!(report.errors, Vec::<String>::new());
         assert_eq!(report.files, 2);
@@ -1196,7 +1396,7 @@ licence = "MIT OR Apache-2.0"
         scratch.write(
             "models/provenance.toml",
             &format!(
-                "{ORIGINAL}\n[[asset]]\nfiles = [\"a.glb\", \"gone.glb\"]\ntitle = \"A\"\n\
+                "{both}\n[[asset]]\nfiles = [\"a.glb\", \"gone.glb\"]\ntitle = \"A\"\n\
                  source = \"original\"\nauthor = \"x\"\nlicence = \"CC0-1.0\"\n"
             ),
         );
@@ -1220,7 +1420,7 @@ licence = "MIT OR Apache-2.0"
             "{found:?}"
         );
         // Nested directories need their own manifest.
-        scratch.write("models/provenance.toml", &format!("{ORIGINAL}\n[[asset]]\nfiles = [\"c.lod\"]\ntitle = \"C\"\nsource = \"original\"\nauthor = \"x\"\nlicence = \"CC0-1.0\"\n"));
+        scratch.write("models/provenance.toml", &format!("{both}\n[[asset]]\nfiles = [\"c.lod\"]\ntitle = \"C\"\nsource = \"original\"\nauthor = \"x\"\nlicence = \"CC0-1.0\"\n"));
         scratch.write("maps/ao/x.ktx2", "");
         let found = errors(&scratch);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -1352,6 +1552,21 @@ licence = "MIT OR Apache-2.0"
             ("notes", "two\\nlines", "control character"),
             ("attribution", "tab\\there", "control character"),
             ("notes", "bell\\u0007", "control character"),
+            (
+                "notes",
+                "line\\u2028break",
+                "line separator or bidirectional",
+            ),
+            (
+                "made_with",
+                "evil\\u202Etxt.exe",
+                "line separator or bidirectional",
+            ),
+            (
+                "attribution",
+                "isolate\\u2066x\\u2069",
+                "line separator or bidirectional",
+            ),
         ] {
             let found = entry_errors(&format!("{ok}{field} = \"{value}\"\n"));
             assert!(
@@ -1373,7 +1588,7 @@ licence = "MIT OR Apache-2.0"
         for bad in ["a`.glb", "[a].glb", "a b.glb", "<a>.glb", "../a.glb"] {
             scratch.write(
                 "models/provenance.toml",
-                &ORIGINAL.replace("\"*.glb\"", &format!("\"*.glb\", '{bad}'")),
+                &ORIGINAL.replace("\"a.glb\"", &format!("\"a.glb\", '{bad}'")),
             );
             let found = errors(&scratch);
             assert!(
@@ -1386,6 +1601,211 @@ licence = "MIT OR Apache-2.0"
             cell("a|b `c` [d](e) <img>"),
             "a\\|b \\`c\\` \\[d\\](e) &lt;img>"
         );
+    }
+
+    /// A manifest (or any entry) that is a symlink or special file is reported and never
+    /// read: following a link to `/dev/zero` would exhaust memory, and opening a FIFO would
+    /// block the gate.
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_never_read() {
+        let scratch = Scratch::new("special");
+        scratch.write("models/a.glb", "");
+        std::os::unix::fs::symlink("/dev/zero", scratch.0.join("models/provenance.toml"))
+            .expect("link");
+        let fifo = scratch.0.join("textures/provenance.toml");
+        std::fs::create_dir_all(fifo.parent().expect("parent")).expect("dir");
+        let made_fifo = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|status| status.success());
+        let start = std::time::Instant::now();
+        let found = errors(&scratch);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        let special = "symlinks and special files are not allowed in a content root";
+        assert!(
+            found.contains(&format!("models/provenance.toml: {special}")),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|e| e.starts_with("models/: no provenance.toml"))
+        );
+        if made_fifo {
+            assert!(
+                found.contains(&format!("textures/provenance.toml: {special}")),
+                "{found:?}"
+            );
+            assert!(read_plain_file(&fifo, 1024).is_err(), "a FIFO is not read");
+        }
+        let link = scratch.0.join("models/provenance.toml");
+        assert!(
+            read_plain_file(&link, 1024).is_err(),
+            "a link is not followed"
+        );
+        assert_eq!(read_plain_file(&scratch.0.join("absent"), 1024), Ok(None));
+        scratch.write("big.toml", &"x".repeat(2048));
+        assert!(read_plain_file(&scratch.0.join("big.toml"), 1024).is_err());
+        assert_eq!(
+            read_plain_file(&scratch.0.join("big.toml"), 4096).map(|text| text.map(|t| t.len())),
+            Ok(Some(2048))
+        );
+    }
+
+    /// Directory names go into the notices, so they are plain ASCII names like the
+    /// patterns; anything else is reported (escaped) and its contents are not walked.
+    #[test]
+    fn directory_names_are_plain() {
+        let scratch = Scratch::new("dirnames");
+        scratch.write("models/a.glb", "");
+        scratch.write("models/provenance.toml", ORIGINAL);
+        scratch.write("bad name/x.glb", "");
+        scratch.write("models/sub[1]/x.glb", "");
+        let found = errors(&scratch);
+        let rule = "a directory name may use only ASCII letters, digits, `.`, `_` and `-`";
+        assert_eq!(
+            found,
+            [
+                format!("bad name: {rule}"),
+                format!("models/sub[1]: {rule}")
+            ]
+        );
+    }
+
+    /// A directory name cannot forge the generated section's END marker (A0 review).
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_name_cannot_forge_a_marker() {
+        let scratch = Scratch::new("forge");
+        let forged = format!("a`|b\n{THIRD_PARTY_END}\nx");
+        scratch.write(&format!("{forged}/x.glb"), "");
+        scratch.write(
+            &format!("{forged}/provenance.toml"),
+            &ORIGINAL.replace("a.glb", "x.glb"),
+        );
+        let report = check_provenance(&scratch.0);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("a directory name may use only"));
+        assert!(!report.errors[0].contains('\n'), "the name is escaped");
+        assert!(
+            report.entries.is_empty(),
+            "nothing under it reaches the notices"
+        );
+        // The renderer escapes the directory as a cell too.
+        let entry = ProvenanceEntry {
+            dir: String::from("a`|b"),
+            files: vec![String::from("a`|b/x.glb")],
+            asset: toml::from_str(&ORIGINAL.replace("[[asset]]", "")).expect("entry"),
+        };
+        let report = ProvenanceReport {
+            entries: vec![entry],
+            files: 1,
+            errors: Vec::new(),
+        };
+        let section = third_party_section(&report, "content");
+        assert!(section.contains("`content/a\\`\\|b/a.glb`"), "{section}");
+    }
+
+    /// `*` patterns are for data files (`*.toml`); binaries are listed by name, so a new
+    /// binary never slips under an old entry unreviewed.
+    #[test]
+    fn star_patterns_cover_only_toml() {
+        let scratch = Scratch::new("stars");
+        scratch.write("vfx/a.toml", "");
+        scratch.write("vfx/b.toml", "");
+        scratch.write("vfx/atlas.ktx2", "");
+        let manifest = |files: &str| {
+            format!(
+                "[[asset]]\nfiles = [{files}]\ntitle = \"T\"\nsource = \"original\"\n\
+                 author = \"A\"\nlicence = \"CC0-1.0\"\n"
+            )
+        };
+        scratch.write(
+            "vfx/provenance.toml",
+            &manifest("\"*.toml\", \"atlas.ktx2\""),
+        );
+        assert_eq!(errors(&scratch), Vec::<String>::new());
+        scratch.write("vfx/provenance.toml", &manifest("\"*\""));
+        let found = errors(&scratch);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("matches vfx/atlas.ktx2; a `*` pattern may cover only *.toml"),
+            "{found:?}"
+        );
+    }
+
+    /// The lower-case hex SHA-256 of `bytes`.
+    fn sha256_of(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    }
+
+    /// A third-party file is pinned by its SHA-256; an original one may be. Every recorded
+    /// hash is checked, and must name a file its entry covers.
+    #[test]
+    fn third_party_files_are_pinned_by_sha256() {
+        let scratch = Scratch::new("sha256");
+        scratch.write("textures/rock.ktx2", "rock bytes");
+        scratch.write("textures/moss.ktx2", "moss bytes");
+        let rock = sha256_of(b"rock bytes");
+        let moss = sha256_of(b"moss bytes");
+        let manifest = |source: &str, hashes: &str| {
+            format!(
+                "[[asset]]\nfiles = [\"rock.ktx2\", \"moss.ktx2\"]\ntitle = \"T\"\n\
+                 source = \"{source}\"\nauthor = \"A\"\nlicence = \"CC0-1.0\"\n{hashes}"
+            )
+        };
+        let check = |source: &str, hashes: &str| {
+            scratch.write("textures/provenance.toml", &manifest(source, hashes));
+            errors(&scratch)
+        };
+        let downloaded = "https://example.org/rock";
+        // Third-party: every file needs a hash.
+        let found = check(downloaded, "");
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found
+                .iter()
+                .all(|e| e.contains("is third-party, so it needs its SHA-256"))
+        );
+        let both =
+            format!("sha256 = {{ \"rock.ktx2\" = \"{rock}\", \"moss.ktx2\" = \"{moss}\" }}\n");
+        assert_eq!(check(downloaded, &both), Vec::<String>::new());
+        // A changed file, a malformed hash, a name the entry does not cover.
+        let found = check(downloaded, &both.replace(&rock, &moss));
+        assert!(
+            found
+                .iter()
+                .any(|e| e.starts_with("textures/rock.ktx2: SHA-256 is")
+                    && e.contains("changed since its licence was reviewed")),
+            "{found:?}"
+        );
+        let found = check(downloaded, &both.replace(&rock, &rock.to_uppercase()));
+        assert!(
+            found.iter().any(|e| e.contains("64 lower-case hex digits")),
+            "{found:?}"
+        );
+        let found = check(
+            downloaded,
+            &both.replace(" }", &format!(", \"gone.ktx2\" = \"{rock}\" }}")),
+        );
+        assert!(
+            found
+                .iter()
+                .any(|e| e.contains("sha256 names \"gone.ktx2\", which this entry does not cover")),
+            "{found:?}"
+        );
+        // Original work: optional, but checked when present.
+        assert_eq!(check("original", ""), Vec::<String>::new());
+        let one = format!("sha256 = {{ \"rock.ktx2\" = \"{rock}\" }}\n");
+        assert_eq!(check("original", &one), Vec::<String>::new());
+        let found = check("original", &one.replace(&rock, &moss));
+        assert!(found.iter().any(|e| e.contains("SHA-256 is")), "{found:?}");
     }
 
     const AI: &str = "source = \"original\"\nlicence = \"CC0-1.0\"\n[ai]\nmodel = \"TRELLIS.2-4B\"\n\
@@ -1439,26 +1859,6 @@ licence = "MIT OR Apache-2.0"
         );
         let kimodo = AI.replace("\"MIT\"", "\"LicenseRef-NVIDIA-Open-Model-License\"");
         assert_eq!(entry_errors(&kimodo), Vec::<String>::new());
-        // Concept-only services: no shipped asset is generated with them or from their output,
-        // whatever licence the entry claims.
-        let gemini = entry_errors(&AI.replace("TRELLIS.2-4B", "Gemini 3 Pro Image"));
-        assert!(
-            gemini
-                .iter()
-                .any(|e| e.contains("ai.model") && e.contains("concept-only")),
-            "{gemini:?}"
-        );
-        for source in ["original", "https://example.org/sheet"] {
-            let fed = entry_errors(&format!(
-                "{AI}[[ai.inputs]]\nname = \"sheet.png\"\nsource = \"{source}\"\n\
-                 licence = \"LicenseRef-Gemini-API-Output\"\n"
-            ));
-            assert!(
-                fed.iter()
-                    .any(|e| e.contains("sheet.png") && e.contains("concept-only")),
-                "{source}: {fed:?}"
-            );
-        }
         let no_prompt = entry_errors(&AI.replace("a bronze brazier", ""));
         assert!(
             no_prompt
@@ -1495,6 +1895,50 @@ licence = "MIT OR Apache-2.0"
     }
 
     #[test]
+    fn concept_only_services_are_screened_everywhere() {
+        // Concept-only services: no shipped asset is generated with them or from their output,
+        // whatever licence the entry claims.
+        let gemini = entry_errors(&AI.replace("TRELLIS.2-4B", "Gemini 3 Pro Image"));
+        assert!(
+            gemini
+                .iter()
+                .any(|e| e.contains("ai.model") && e.contains("concept-only")),
+            "{gemini:?}"
+        );
+        for source in ["original", "https://example.org/sheet"] {
+            let fed = entry_errors(&format!(
+                "{AI}[[ai.inputs]]\nname = \"sheet.png\"\nsource = \"{source}\"\n\
+                 licence = \"LicenseRef-Gemini-API-Output\"\n"
+            ));
+            assert!(
+                fed.iter()
+                    .any(|e| e.contains("sheet.png") && e.contains("concept-only")),
+                "{source}: {fed:?}"
+            );
+        }
+        // The service named in the tool chain or an input, under any licence label.
+        let tool = entry_errors(&AI.replace("[\"ComfyUI\"]", "[\"ComfyUI\", \"Nano Banana Pro\"]"));
+        assert!(
+            tool.iter()
+                .any(|e| e.contains("ai.tools \"Nano Banana Pro\"") && e.contains("concept-only")),
+            "{tool:?}"
+        );
+        for (name, source) in [
+            ("gemini-sheet.png", "original"),
+            ("sheet.png", "https://gemini.google.com/app/1"),
+        ] {
+            let fed = entry_errors(&format!(
+                "{AI}[[ai.inputs]]\nname = \"{name}\"\nsource = \"{source}\"\n\
+                 licence = \"CC0-1.0\"\n"
+            ));
+            assert!(
+                fed.iter().any(|e| e.contains("concept-only")),
+                "{name} {source}: {fed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn notices_are_generated_and_spliced() {
         let scratch = Scratch::new("notices");
         scratch.write("models/a.glb", "");
@@ -1516,7 +1960,7 @@ licence = "MIT OR Apache-2.0"
             section.starts_with(THIRD_PARTY_BEGIN)
                 && section.ends_with(&format!("{THIRD_PARTY_END}\n"))
         );
-        assert!(section.contains("| `content/models/*.glb` (1) | Sample meshes | original |"));
+        assert!(section.contains("| `content/models/a.glb` (1) | Sample meshes | original |"));
         assert!(section.contains("Rock \\| 042 (AI-generated)"), "{section}");
         // Splicing replaces the old section and keeps the hand-written text around it.
         let spliced = splice_third_party("# Notices\n\nHand-written.\n", &section).expect("append");

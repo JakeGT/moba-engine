@@ -1,6 +1,7 @@
 //! `content-check --provenance` (A0, ADR-0022): exit 0 when the gate passes and the notices
 //! are current, 1 for a gate failure or a stale notice (`--check`), 2 for a usage error;
-//! without `--check` it writes the notices, after which `--check` passes.
+//! without `--check` it writes the notices, after which `--check` passes. Shipped `.glb`
+//! files with UVs need baked tangents, and notice paths must be plain files (amendment 1).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -17,7 +18,7 @@ impl Root {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("content/models")).expect("content dir");
         std::fs::write(dir.join("content/pack.toml"), "").expect("pack");
-        std::fs::write(dir.join("content/models/a.glb"), "").expect("asset");
+        std::fs::write(dir.join("content/models/a.glb"), triangle_glb(true)).expect("asset");
         std::fs::write(
             dir.join("content/models/provenance.toml"),
             "[[asset]]\nfiles = [\"a.glb\"]\ntitle = \"A\"\nsource = \"original\"\n\
@@ -52,6 +53,40 @@ impl Drop for Root {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// A one-triangle `.glb` with `POSITION`, `NORMAL`, `TEXCOORD_0` and, with `tangents`,
+/// `TANGENT`.
+fn triangle_glb(tangents: bool) -> Vec<u8> {
+    let floats =
+        |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let mut bin = floats(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    bin.extend(floats(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]));
+    bin.extend(floats(&[0.0, 1.0, 1.0, 1.0, 0.0, 0.0]));
+    bin.extend(floats(&[
+        1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+    ]));
+    let tangent = if tangents { r#","TANGENT":3"# } else { "" };
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2{tangent}}}}}]}}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":36}},{{"buffer":0,"byteOffset":72,"byteLength":24}},{{"buffer":0,"byteOffset":96,"byteLength":48}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},{{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}},{{"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}},{{"bufferView":3,"componentType":5126,"count":3,"type":"VEC4"}}]}}"#,
+        bin.len()
+    );
+    let mut json = json.into_bytes();
+    while json.len() % 4 != 0 {
+        json.push(b' ');
+    }
+    let total = 12 + 8 + json.len() + 8 + bin.len();
+    let mut glb = Vec::with_capacity(total);
+    glb.extend(b"glTF");
+    glb.extend(2_u32.to_le_bytes());
+    glb.extend(u32::try_from(total).expect("small").to_le_bytes());
+    glb.extend(u32::try_from(json.len()).expect("small").to_le_bytes());
+    glb.extend(b"JSON");
+    glb.extend(&json);
+    glb.extend(u32::try_from(bin.len()).expect("small").to_le_bytes());
+    glb.extend(b"BIN\0");
+    glb.extend(&bin);
+    glb
 }
 
 fn run(args: &[&str]) -> Output {
@@ -153,6 +188,106 @@ fn usage_errors_exit_2() {
             Some(2),
             "{args:?}: {}",
             stderr(&output)
+        );
+    }
+}
+
+/// A shipped `.glb` with UVs must carry its own tangents; one that does not load fails too.
+#[test]
+fn shipped_glbs_with_uvs_need_baked_tangents() {
+    let root = Root::new("tangents");
+    assert_eq!(
+        root.gate(&[]).status.code(),
+        Some(0),
+        "the fixture has tangents"
+    );
+    std::fs::write(root.path("content/models/a.glb"), triangle_glb(false)).expect("glb");
+    let output = root.gate(&["--check"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("models/a.glb: has TEXCOORD_0 but no TANGENT"),
+        "{}",
+        stderr(&output)
+    );
+    std::fs::write(root.path("content/models/a.glb"), "not a glb").expect("glb");
+    let output = root.gate(&["--check"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("models/a.glb: does not load"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// A notices path that is a symlink (here to `/dev/zero`) or a FIFO is an error, is not
+/// read, and is never written through.
+#[cfg(unix)]
+#[test]
+fn notice_paths_must_be_plain_files() {
+    let root = Root::new("special");
+    std::fs::remove_file(root.path("NOTICES.md")).expect("rm");
+    std::os::unix::fs::symlink("/dev/zero", root.path("NOTICES.md")).expect("link");
+    let start = std::time::Instant::now();
+    let output = root.gate(&[]);
+    assert!(start.elapsed() < std::time::Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("only a plain file is read"),
+        "{}",
+        stderr(&output)
+    );
+    // A credits file linked elsewhere: refused by the walk and never written through.
+    std::fs::remove_file(root.path("NOTICES.md")).expect("rm");
+    std::fs::write(root.path("NOTICES.md"), "# Notices\n").expect("notices");
+    std::fs::write(root.path("elsewhere.txt"), "untouched\n").expect("target");
+    std::os::unix::fs::symlink(root.path("elsewhere.txt"), root.path("content/CREDITS.txt"))
+        .expect("link");
+    let output = root.gate(&[]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(read(&root.path("elsewhere.txt")), "untouched\n");
+    // A FIFO is not opened (which would block).
+    std::fs::remove_file(root.path("content/CREDITS.txt")).expect("rm");
+    std::fs::remove_file(root.path("NOTICES.md")).expect("rm");
+    let fifo = Command::new("mkfifo")
+        .arg(root.path("NOTICES.md"))
+        .status()
+        .is_ok_and(|status| status.success());
+    if fifo {
+        let output = root.gate(&["--check"]);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    }
+}
+
+/// `./content`, `content/` and `content` write the same notices.
+#[test]
+fn the_content_path_is_normalised_in_the_notices() {
+    let root = Root::new("label");
+    let gate = |content: &str, extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_content-check"))
+            .current_dir(&root.dir)
+            .args([
+                "--provenance",
+                "--content",
+                content,
+                "--third-party",
+                "NOTICES.md",
+            ])
+            .args(extra)
+            .output()
+            .expect("content-check runs")
+    };
+    let write = gate("./content/", &[]);
+    assert_eq!(write.status.code(), Some(0), "{}", stderr(&write));
+    let notices = read(&root.path("NOTICES.md"));
+    assert!(notices.contains("`content/models/a.glb`"), "{notices}");
+    assert!(!notices.contains("./content"), "{notices}");
+    for content in ["content", "content/", "./content"] {
+        let check = gate(content, &["--check"]);
+        assert_eq!(
+            check.status.code(),
+            Some(0),
+            "{content}: {}",
+            stderr(&check)
         );
     }
 }
