@@ -1296,6 +1296,14 @@ the semver check):
   no behaviour, API or state-hash change.
 
 ### CI
+- The tiered goldens' exact hashes (`tests/golden/render-tiered-hashes.txt`) are keyed on the
+  runner's CPU class as well as CI's lavapipe (ADR-0021 amendment 6): the same lavapipe renders
+  different bytes on Intel and AMD runners (AVX-512 makes no difference), which made
+  `renderer-gate` and `tiered-temporal` fail on Intel runners. The file has an `amd` and an
+  `intel` section, both from CI artifacts; a known device on an unrecorded class fails every
+  back end. `scripts/tiered-goldens.sh` prints the runner's CPU and every capture's full
+  SHA-256 and writes its section into the artifact (`tiered-goldens/hashes-*.txt`); both
+  render jobs log `lscpu`.
 - New `vendor-sdks` job (Linux and Windows): fetches and verifies the pinned SDKs, then builds
   and links `moba-client --features vendor-sdks` and runs clippy and the selection tests with
   `vendor-sdks,dlss-fg` (N0.6). `scripts/agent-verify.sh --full`, `just features` and AGENTS.md
