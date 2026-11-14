@@ -28,8 +28,13 @@ impl NetServer {
             }
         }
         if let Some(team) = self.pending_surrender.take() {
-            for slot in 0..self.config.max_clients.min(self.clients.len()) {
-                if let Some(client) = self.clients[slot].as_ref()
+            for (slot, client) in self
+                .clients
+                .iter()
+                .enumerate()
+                .take(self.config.max_clients)
+            {
+                if let Some(client) = client.as_ref()
                     && client.connected
                     && !client.spectator
                     && client.team == team
@@ -94,8 +99,8 @@ impl NetServer {
 
     fn all_players_ready(&self) -> bool {
         let mut players = 0;
-        for slot in 0..self.config.max_clients.min(self.clients.len()) {
-            let Some(client) = self.clients[slot].as_ref() else {
+        for client in self.clients.iter().take(self.config.max_clients) {
+            let Some(client) = client.as_ref() else {
                 continue;
             };
             if !client.connected {
@@ -133,8 +138,13 @@ impl NetServer {
         let team = client.team;
         self.surrender_votes[team.index()] |= 1 << slot;
         let mut connected = 0u16;
-        for index in 0..self.config.max_clients.min(self.clients.len()) {
-            if let Some(player) = self.clients[index].as_ref()
+        for (index, player) in self
+            .clients
+            .iter()
+            .enumerate()
+            .take(self.config.max_clients)
+        {
+            if let Some(player) = player.as_ref()
                 && player.connected
                 && !player.spectator
                 && player.team == team
@@ -261,11 +271,13 @@ impl NetServer {
         } else {
             0
         };
-        for slot in 0..self.config.max_clients.min(self.clients.len()).min(active) {
-            if self.clients[slot]
-                .as_ref()
-                .is_some_and(|client| client.connected)
-            {
+        for (slot, client) in self
+            .clients
+            .iter()
+            .enumerate()
+            .take(self.config.max_clients.min(active))
+        {
+            if client.as_ref().is_some_and(|client| client.connected) {
                 mask &= !(1 << slot);
             }
         }
