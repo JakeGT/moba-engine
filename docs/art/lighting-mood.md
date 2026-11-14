@@ -41,7 +41,7 @@ cargo run -q --release -p moba-tools --bin env-bake -- bake --preset ember --siz
 | | **A. Golden Crossing** (decided) | **B. Ember Dusk** (today) | **C. Hazy Noon** | **D. Dust Veil** |
 |---|---|---|---|---|
 | Idea | Late afternoon. A low, warm but not red sun; long readable shadows; a dusty blue sky | Today's look: the sun near setting, a red-orange world | High sun through heat haze; bleached and harsh | A diffuse overcast of suspended dust and ash |
-| Sun elevation | **28°** | 25° | 60° | ~35° (soft) |
+| Sun elevation | **28°** | 25° | 60° | ~30° (soft) |
 | Sun azimuth | West-south-west (behind the Forge base, which holds the west) | West-south-west | West, high | West, diffuse |
 | `sun_dir` | `-0.885, 0.532, 0.465` | `-0.6, 0.35, 0.45` | `-0.35, 0.87, 0.35` | `-0.70, 0.50, 0.50` |
 | `sun_color` (linear) | `2.6, 1.55, 0.85` | `2.4, 0.9, 0.3` | `2.2, 2.0, 1.75` | `0.9, 0.75, 0.55` |

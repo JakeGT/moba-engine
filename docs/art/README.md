@@ -44,33 +44,39 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-10-31 | Also the **Gemini API ("Nano Banana"), paid tier, for concept art and model sheets only**: a reference people model from, never shipped and never fed to a generator (enforced by the A0 provenance gate) | Maintainer |
 | 2026-10-31 | **Nano Banana 2.1 for drafts, Pro for model sheets** (after a side-by-side test) | Maintainer |
 | 2026-10-31 | Whole bible redrawn and rewritten for technology that looks like magic: rounds G3 (factions), G4 (everything else) and G5 (hero model sheets); materials renamed to technology names with measured stand-ins | Agent draft; approved by the maintainer 2026-11-14 (below) |
-| 2026-11-14 | **Art bible v0 approved.** The maintainer's words: "The Art style in the bible is approved - follow the recommended designs. Blender is installed. If you need any other tools installed to create models, ask." Every "Decision needed" in this folder is settled on its recommended option ([list below](#decisions-taken-2026-11-14)). Blender is installed for modelling; models are made by hand from the boards and model sheets, as [concept generation](#concept-generation) step 3 already says | Maintainer |
-| 2026-11-14 | Slice hero: **the Kiln Warden** (Hero M, the `Blade` kit). Oracle and Strider stay A4 candidates | Maintainer (approval above) |
+| 2026-11-14 | **Art bible v0 approved.** The maintainer's words: "The Art style in the bible is approved - follow the recommended designs. Blender is installed. If you need any other tools installed to create models, ask." Every "Decision needed" in this folder is settled on its recommended option ([list below](#decisions-taken-2026-11-14)), except the five questions in the two briefs (designer: HUD skin, display face, icon style; marketing: name and logo, key-art direction), which stay open, and the lane's value step, which had no recommendation (see [Open](#open)). Blender is installed for modelling; models are made by hand from the boards and model sheets, as [concept generation](#concept-generation) step 3 already says | Maintainer |
+| 2026-11-14 | Slice hero: **the Kiln Warden** (the `Blade` kit). Oracle and Strider stay A4 candidates | Maintainer (approval above) |
+| 2026-11-14 | The Kiln Warden's size class is **Hero M** (the draft said "M/L" at 2.0 m) | (derived by the agent; for the maintainer to confirm) |
 | 2026-11-14 | Map 1's mood: **Golden Crossing**; no time-of-day or weather variant for the slice | Maintainer (approval above) |
 | 2026-11-14 | Faction readings: **Forge rec** and **Void rec** | Maintainer (approval above) |
 | 2026-11-14 | Bases: **Forge west, Void east** (presentation only) | Maintainer (approval above) |
 | 2026-11-14 | **Heroes are free agents** | Maintainer (approval above) |
-| 2026-11-14 | Ember crystals: **white-gold cores**, non-emissive orange facet rims, off the lanes | Maintainer (approval above) |
-| 2026-11-14 | Void: **dark bodies with mandatory pale elements** (≥ 10 % projected area per unit; heroes luma floor 45 and ≥ 15 % light material) | Maintainer (approval above) |
+| 2026-11-14 | Ember crystals: **white-gold cores** with small orange facet rims, kept off the lanes | Maintainer (approval above) |
+| 2026-11-14 | The ember facet rim is **non-emissive** (PAL-3 accent ≤ 3 %); the core swatch is `#FFE6BE` | (derived by the agent; for the maintainer to confirm) |
+| 2026-11-14 | Void: **dark bodies with mandatory pale elements** (bone or silver ≥ 10 % of every Void unit's projected area), plus the material rule: Void body materials at albedo luma ≥ 45 and ≥ 15 % of each Void hero's projected area in a light material | Maintainer (approval above) |
+| 2026-11-14 | Three Void materials and two display swatches lifted to luma 45 at the same hue and chroma | (derived by the agent; for the maintainer to confirm) |
 | 2026-11-14 | Chroma caps **0.06 ground (PAL-1 kept) / 0.08 elsewhere**, p99; albedo ranges per texel at p1/p99 | Maintainer (approval above) |
-| 2026-11-14 | **`team_tint` 0 on photoreal content**, mask kept for Compat | Maintainer (approval above) |
+| 2026-11-14 | **`team_tint` 0 on photoreal content**, mask kept for Compat: on Tiered the renderer ignores the tint (ADR-0023 §8c `team_tint_policy = zero`); Compat keeps it | Maintainer (approval above) |
 | 2026-11-14 | **Ability types coded by shape and motion**, never colour | Maintainer (approval above) |
-| 2026-11-14 | **Rim on allies; outline only on enemies and the hovered unit** | Maintainer (approval above) |
+| 2026-11-14 | **Rim on everyone; outline only on enemies and the hovered unit** | Maintainer (approval above) |
 | 2026-11-14 | **Role-scaled S/M/L heroes** | Maintainer (approval above) |
 | 2026-11-14 | Neutral monsters: **ember scarabs** (slice camp); a Builder warden machine for A4 | Maintainer (approval above) |
-| 2026-11-14 | Names: **working names kept** as internal names (world (b)); new hero display names, kit IDs unchanged; the Builders as ruins and relic machines only | Maintainer (approval above) |
+| 2026-11-14 | Names: **working names kept as internal names**, with public in-world names picked later by the brand pass; new hero display names, kit IDs unchanged; the Builders as ruins and relic machines only | Maintainer (approval above) |
 | 2026-11-14 | Green/blue/red kept as team colours for v0 | Maintainer (approval above) |
-| 2026-11-14 | Material vocabulary: options **(a)** for every item and **(c)** for how dark the Void may go ([§8](material-vocabulary.md#8-decisions)) | Maintainer (approval above) |
-| 2026-11-14 | Lane value step: **lift the lane to luma about 115** (no explicit recommendation: the bible's leading option) | Maintainer (approval above; leading option taken by the agent) |
+| 2026-11-14 | Material vocabulary: every item on its recommendation, as listed in [§8](material-vocabulary.md#8-decisions); for how dark the Void may go, both the rims and the material floor | Maintainer (approval above) |
+| 2026-11-14 | Lane value step: **lift the lane to luma 112–119** (no recommendation in the draft: its first-named option, over darkening the ash) | (derived by the agent; for the maintainer to confirm) |
+| 2026-11-14 | The other derived numbers listed under [Open](#open) | (derived by the agent; for the maintainer to confirm) |
 
 ## Decisions taken 2026-11-14
 
-All taken by the maintainer's approval above, on the bible's recommended option. The numbers
-are the ones the files used while the items were open, so other documents (ADR-0023 §8c) can
-still cite them. Where an item had no explicit recommendation, the bible's leading option was
-taken; those are marked *leading option*.
+All taken by the maintainer's approval above, on the bible's recommended option. The item
+numbers are unchanged, so other documents (ADR-0023 §8c) can still cite them. Applying some
+options needed numbers the draft did not have (the lane, `L_ref`, the ember swatches, VFX-1,
+LANE-1 and the others listed under [Open](#open)); the agent derived those, and they are
+marked as derived until the maintainer confirms them. The one item with no recommendation,
+the lane's value step, took the draft's first-named option, also marked derived.
 
-1. **The slice hero:** the **Kiln Warden** (Hero M, Forge, the `Blade` kit). The Still Oracle
+1. **The slice hero:** the **Kiln Warden** (Forge, the `Blade` kit; Hero M, derived). The Still Oracle
    and the Ash Strider stay A4 candidates. See [heroes](heroes-and-minions-v0.md).
 2. **Map 1's lighting mood:** **Golden Crossing**. No time-of-day or weather variant for the
    slice. See [lighting](lighting-mood.md).
@@ -79,17 +85,20 @@ taken; those are marked *leading option*.
 4. **Which faction holds which base:** **Forge west, Void east** (presentation only; the sim's
    Blue and Red are unchanged). See [world](world-and-factions.md#ember-crossing-who-stands-where).
 5. **Heroes are free agents:** any hero plays on either side. See [world](world-and-factions.md#ember-crossing-who-stands-where).
-6. **The ember crystals:** **white-gold cores** (PAL-4), small non-emissive orange facet rims,
-   kept off the lanes. See [palette](palette-and-value.md#6-ember-crossing-palette-map-1).
+6. **The ember crystals:** **white-gold cores** (PAL-4), small orange facet rims (non-emissive:
+   derived), kept off the lanes. See [palette](palette-and-value.md#6-ember-crossing-palette-map-1).
 7. **How dark the Void may go:** **dark bodies plus mandatory pale elements** (bone or silver,
-   ≥ 10 % of every Void unit's projected area; Void heroes also ≥ 15 % light material). See
+   ≥ 10 % of every Void unit's projected area), and Void body materials at albedo luma ≥ 45
+   with ≥ 15 % of each Void hero's projected area in a light material. See
    [palette](palette-and-value.md#5-faction-palettes).
 8. **The chroma caps and measurement method:** C ≤ 0.06 on the ground (PAL-1, kept at 0.06)
    and ≤ 0.08 elsewhere (p99 of texels); albedo ranges measured per texel as luma
    percentiles (p1/p99). See
    [palette](palette-and-value.md) and [materials](material-vocabulary.md#8-decisions).
-9. **`team_tint` on photoreal content:** **0**, with the mask kept for Compat. The Tiered
-   renderer's default flips when the rims pass CON-2 ([ADR-0023](../adr/0023-frame-architecture-materials.md) §8c). See
+9. **`team_tint` on photoreal content:** **0**, with the mask kept for Compat. This is a Tiered
+   renderer policy, not a content value: the renderer's `team_tint_policy` flips to `zero`
+   when the rims pass CON-2 ([ADR-0023](../adr/0023-frame-architecture-materials.md) §8c), and
+   Compat keeps the team tint. See
    [materials](material-vocabulary.md#8-decisions).
 10. **Ability-type coding:** **by shape and motion**, never colour. See [VFX](vfx-language.md).
 11. **Rim vs outline on allies:** **rim on everyone, outline only on enemies and the hovered
@@ -97,16 +106,16 @@ taken; those are marked *leading option*.
     [silhouettes](silhouettes-and-scale.md#team-rims-the-team-layer-on-units).
 12. **Hero scale:** **role-scaled S/M/L**. See [silhouettes](silhouettes-and-scale.md#size-classes).
 13. **The rest:**
-    - names: the working names are kept as internal names (world option (b)); the public
-      names come from the brand pass. Heroes get new display names; kit IDs are unchanged;
+    - names: the working names are kept as internal names, and the public in-world names
+      come from the brand pass. Heroes get new display names; kit IDs are unchanged;
     - the neutral monsters: **ember scarabs** for the slice camp, and a dormant Builder warden
       machine as the large objective in A4;
     - the Builders appear only as ruins and relic machines, never as figures;
     - green/blue/red stay the team colours for v0;
-    - every option in [material-vocabulary.md §8](material-vocabulary.md#8-decisions) on its
-      recommendation: (a) for each item, and (c) (both) for how dark the Void may go;
-    - the lane's value step: lift the lane to luma about 115 (*leading option*; the alternative
-      was darkening the burnt ash beside it).
+    - every item in [material-vocabulary.md §8](material-vocabulary.md#8-decisions) on its
+      recommendation; for how dark the Void may go, both the rims and the material floor;
+    - the lane's value step: lift the lane to luma 112–119 (derived: the draft's first-named
+      option; the alternative was darkening the burnt ash beside it).
 
 ## Open
 
@@ -116,18 +125,58 @@ taken; those are marked *leading option*.
 - **Marketing's brief** ([brand-and-key-art.md](brand-and-key-art.md)): the game's name and
   logo, the public faction names, and which key-art direction to develop. Owned by a marketing
   executive and the designer, not yet engaged.
-- **Void luma floor vs three material targets.** The decided floor (luma ≥ 45 on Void heroes)
-  sits above three rows in [material-vocabulary.md §3.2](material-vocabulary.md#32-the-void):
-  obsidian metamaterial, polished (42), obsidian, knapped (facets 42) and Void lacquer (39).
-  Whether those targets rise or are kept off heroes needs a maintainer decision.
+- **The lane lift raises every emissive cap.** `L_ref` is the lane in direct sun, so lifting
+  the lane raises every emissive cap: about +40 % against the draft lane's centre (`#7E5A47`)
+  and about +70 % against the draft's printed `L_ref` (0.047, at 25°). The maintainer can
+  confirm the lift or take the other option (darken the ash beside the lane) instead.
+
+### For the maintainer to confirm (derived by the agent)
+
+These numbers were derived by the agent while applying the approved options. They are in
+force for v0 but are not the maintainer's words:
+- **Kiln Warden size class:** Hero M (the draft said "M/L" at 2.0 m; 2.0 m is in M).
+- **The lane:** lifted to luma 112–119 (`#8D6855`–`#956F5D`, display swatch `#906B58`),
+  LANE-1; and the `L_ref` consequence above.
+- **Ember crystals:** the orange facet rim is non-emissive (PAL-3 accent ≤ 3 %); the draft
+  display swatch `#FFD9A8` (C 0.076, above PAL-4) is replaced by the authored core `#FFE6BE`;
+  the Ember Crossing display swatches now match the material targets.
+- **VFX-1:** the outside-zone cap is 0.12 (was 0.13), to match PAL-5.
+- **Violet edge:** `#A08CD0` everywhere (the VFX `#9F86D9` broke VFX-1).
+- **PBR-FORGE-1:** C ≤ 0.075, the measured brass chroma (0.072) the recommendation named, so
+  the bible's own brass and sun-glass targets pass; gilt and worn sun-alloy display swatches
+  retargeted to ≤ 0.07.
+- **Void:** obsidian (polished and knapped) and Void lacquer lifted to luma 45, and the
+  palette's Void swatches to luma ≥ 45, at the same hue and chroma.
+- **Desert sand:** in playable space lowered to L ≤ 0.62 (VAL-1); the lighter draft sand is
+  for off-board drifts only.
+- **SIL-2:** minions ≤ 0.8× a Hero M (1.6 m), with siege judged by footprint and shape (the
+  draft's "smallest hero" gave 1.28 m, which its own minion sizes break).
+- **Builder alloy:** `#B4B6B8` (luma 182) with an aluminium or steel stand-in, so it passes
+  the 180 metal floor (titanium, luma 171, does not).
+- **The Still Oracle's crown:** one description, three hovering Void-composite segments.
+- **Modelling:** the heroes' next steps say "model it by hand in Blender" instead of
+  "image → TRELLIS.2".
+- **Thresholds:** every non-decision threshold (VAL, CON, CB, SIL, RIM, TEL, VFX, EXP, SHD,
+  PBR) marked approved; UI-1 to UI-4 stay proposed with the designer's brief.
+- **Briefs:** their "Decision needed" markers renamed "Open".
+- **New check IDs:** VOID-1, EMB-1, LANE-1, RIM-7, VFX-9, PBR-FORGE-1, PBR-HEAT-1, PBR-VOID-1,
+  PBR-VOID-2 and TINT-1.
+
+### Follow-ups outside this folder
+
+- [ADR-0023](../adr/0023-frame-architecture-materials.md) still calls decisions 9 and 11
+  open, and its §2 quotes the draft's Void body range (luma 39–58; now 45–58). Its switches
+  flip after CON-2 as written, so only the wording is stale.
+- [boards/palettes.jpg](boards/palettes.jpg) shows the draft palette values; see
+  [boards/PROVENANCE.md](boards/PROVENANCE.md).
 
 ## How to propose a change
 
 1. Open a PR that edits the relevant part. Say which decision it changes, and why.
 2. If it changes a numeric rule, update [checks.md](checks.md) in the same PR.
-3. The part's lead approves (the table above). The maintainer's approval of v0 on 2026-11-14
-   is recorded in the decision log; every later change to this folder still needs a
-   maintainer decision before it merges. Agents draft and open PRs: people decide.
+3. The part's lead approves (table above) and the approval is recorded in the decision log.
+   Agents draft and open PRs and never merge changes to this folder, except a PR that only
+   records a decision already logged by the maintainer, as PR #347 does for v0.
 4. Record approved decisions in the decision log, with the date.
 
 ## Licences for what lives here

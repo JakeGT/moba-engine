@@ -63,7 +63,7 @@ the ground is kept in a narrow mid band, and units are allowed to go lighter or 
 
 | Rule | What | Threshold |
 |---|---|---|
-| **VAL-1** | Terrain-layer albedo (authored) in playable space | OKLCH L **0.32–0.62** (about sRGB 55–150 on a grey) |
+| **VAL-1** | Terrain-layer albedo (authored) in playable space | OKLCH L **0.32–0.62** (about sRGB 51–134 on a grey) |
 | **VAL-2** | Rendered ground luminance in playable space, after grading, on every tier | Mean OKLab L **0.30–0.58**; 5th–95th percentile range ≤ **0.30** |
 | **VAL-3** | Shadow floor in playable space (rendered) | L ≥ **0.18**: a unit in shadow still reads |
 | **VAL-4** | Highlight ceiling for non-gameplay surfaces in playable space | L ≤ **0.85**. Only VFX, rims and UI may go above. |
@@ -102,8 +102,8 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 | Swatch | sRGB | L | C | H | Use |
 |---|---|---|---|---|---|
 | Sun-alloy | `#A98C62` | 0.66 | 0.067 | 76 | Armour plates, tower crowns (display swatch: the authored metal base colour is in [material-vocabulary.md](material-vocabulary.md)) |
-| Worn sun-alloy | `#8C6E43` | 0.56 | 0.071 | 75 | Older plates, recesses |
-| Gilt | `#C4A86E` | 0.74 | 0.083 | 85 | Accent only (PAL-3), worn through to the alloy |
+| Worn sun-alloy | `#8A6E43` | 0.56 | 0.069 | 77 | Older plates, recesses (PBR-FORGE-1) |
+| Gilt | `#EBD7A6` | 0.88 | 0.068 | 88 | Accent only, worn through to the alloy; the material vocabulary's gilt target (PBR-FORGE-1) |
 | Heat-shield ochre | `#A06C55` | 0.58 | 0.075 | 45 | Unglazed heat-shield tiles |
 | Forge sandstone | `#C4AE8C` | 0.76 | 0.053 | 79 | Masonry |
 | Scorch | `#4A3F38` | 0.38 | 0.019 | 54 | Heat-scorched stone and ground at the Forge base |
@@ -114,8 +114,8 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 
 | Swatch | sRGB | L | C | H | Use |
 |---|---|---|---|---|---|
-| Void composite | `#2E2B33` | 0.30 | 0.015 | 303 | Bodies, monoliths |
-| Obsidian metamaterial | `#22212A` | 0.25 | 0.017 | 290 | Polished faces (reads by **specular**, not albedo) |
+| Void composite | `#2F2C34` | 0.30 | 0.015 | 303 | Bodies, monoliths (luma 45) |
+| Obsidian metamaterial | `#2D2C35` | 0.30 | 0.016 | 291 | Polished faces (reads by **specular**, not albedo); luma 45 |
 | Gravity-ring alloy | `#8A8A90` | 0.64 | 0.009 | 286 | Hovering rings, fittings (pewter-like) |
 | Tarnished silver | `#B8B8BC` | 0.78 | 0.006 | 286 | Bright metal edges |
 | Bone inlay | `#D6CFC2` | 0.86 | 0.019 | 83 | Star-chart lines, masks: keeps Void units off "black blob" |
@@ -123,29 +123,31 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 | Void-glass core (emissive) | `#D9CCFF` | 0.87 | 0.071 | 297 | Light sources |
 | Void-glass edge (emissive) | `#A08CD0` | 0.68 | 0.100 | 297 | Thin rims and cracks only (PAL-5) |
 
-**Decided (2026-11-14): dark bodies plus mandatory pale elements.** Void bodies stay at
-L 0.25–0.30, below the ground band (VAL-1), which keeps them distinct from the Forge. Against
+**Decided (2026-11-14): dark bodies plus mandatory pale elements.** Void bodies stay at about
+L 0.30–0.36 (albedo luma 45 and up), darker than every Ember Crossing ground layer, which keeps
+them distinct from the Forge. (The draft's L 0.25–0.30 swatches were lifted to the decided
+luma floor of 45, at the same hue and chroma: derived by the agent.) Against
 the risk of a dark blob on dark basalt, **every Void unit carries a bone or silver element of
 ≥ 10 % of its projected area** (VOID-1 in [checks.md](checks.md)). Void heroes also meet the
 material rule in [material-vocabulary.md §3.2](material-vocabulary.md#32-the-void) (luma
-floor 45, ≥ 15 % light material). *Considered:* lifting the Void to mid-grey ceramics (safer,
+floor 45 on body materials, ≥ 15 % of each hero's projected area in a light material). *Considered:* lifting the Void to mid-grey ceramics (safer,
 less identity), or leaving it to CON-1 alone.
 
 ## 6. Ember Crossing palette (map 1)
 
 | Swatch | sRGB | L | C | H | Use |
 |---|---|---|---|---|---|
-| Basalt | `#3E3B38` | 0.35 | 0.007 | 68 | Cliffs, terraces, rampart bases |
-| Ash ground | `#5B4C44` | 0.43 | 0.024 | 50 | Base terrain layer |
-| Lane grit | `#906B58` | 0.56 | 0.055 | 48 | Trodden lanes: lifted to luma about 115, a value step above the ash ground (LANE-1) |
-| Desert sand | `#B39A7C` | 0.70 | 0.051 | 72 | Drifts, off-lane, high ground |
+| Basalt | `#4A4744` | 0.40 | 0.006 | 68 | Cliffs, terraces, rampart bases |
+| Ash ground | `#6B6560` | 0.51 | 0.011 | 62 | Base terrain layer (scorched ash) |
+| Lane grit | `#906B58` | 0.56 | 0.055 | 48 | Trodden lanes: the centre of LANE-1's luma 112–119, a value step above the ash ground (derived) |
+| Desert sand | `#938564` | 0.62 | 0.050 | 88 | Drifts, off-lane, high ground in playable space (VAL-1; derived). The lighter draft sand (`#B39A7C`, L 0.70) only off-board (VAL-5) |
 | Ember crystal, today | `#FF6B1A` | 0.70 | **0.198** | 43 | Breaks PAL-4: sits between the enemy red and the colour-blind enemy orange |
 | Ember crystal core (emissive) | `#FFE6BE` | 0.94 | 0.059 | 80 | White-gold core, within PAL-4; the same emissive as the material vocabulary's ember crystal |
 
 **Decided (2026-11-14): white-gold ember cores.** The orange crystals were the map's
 signature, but at C 0.20 they look like enemy colour, which is the exact mistake §4 exists to
-stop. The core is white-gold (PAL-4, ≤ +1 EV); orange survives only as a thin,
-**non-emissive** facet rim, ≤ 3 % of the crystal's area and within PAL-3; and the crystals
+stop. The core is white-gold (PAL-4, ≤ +1 EV); orange survives only as a thin facet rim
+(**non-emissive**: derived by the agent, so it can't break PAL-4), ≤ 3 % of the crystal's area and within PAL-3; and the crystals
 are kept off the lanes (EMB-1 in [checks.md](checks.md)). The earlier display swatch for the
 whole crystal, `#FFD9A8` (C 0.076), sat above PAL-4 and is replaced by the core above.
 *Considered:* orange kept on props more than 12 m from any lane, and crystals in the free

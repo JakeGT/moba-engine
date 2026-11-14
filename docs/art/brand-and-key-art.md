@@ -18,7 +18,10 @@ rest of the bible (2026-11-14) does not settle them.
   and depth of field (roadmap §3). Key art and trailers can be rendered **in engine** with
   that preset.
 - **AI-generated material:** concepts may be AI-assisted (local open-weight models, CC0 with
-  provenance; roadmap §9.5). Steam's AI disclosure is generated from the provenance
+  provenance; roadmap §9.5), and the bible's Gemini lane makes concept art and model sheets
+  that are **concept only**: never shipped, labelled in [boards/PROVENANCE.md](boards/PROVENANCE.md),
+  and the A0 gate rejects any shipped asset made from them ([README](README.md#concept-generation)).
+  Final key art is rendered from the models. Steam's AI disclosure is generated from the provenance
   manifests, so marketing gets the disclosure list for free.
 
 ## What the brand needs to decide
