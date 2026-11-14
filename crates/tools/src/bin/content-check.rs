@@ -487,37 +487,6 @@ fn content_label(content: &std::path::Path) -> String {
     }
 }
 
-/// Every shipped `.glb` that has UVs must carry its own `TANGENT` (ADR-0022 amendment 1):
-/// baked tangents are what the normal maps were authored against, and the loader's
-/// `MikkTSpace` fallback is then never needed for shipped content. Loaded without tangent
-/// generation; a file that does not load is an error too.
-fn baked_tangent_errors(
-    content: &std::path::Path,
-    report: &moba_assets::provenance::ProvenanceReport,
-) -> Vec<String> {
-    let mut errors = Vec::new();
-    for file in report.entries.iter().flat_map(|entry| &entry.files) {
-        if !std::path::Path::new(file)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
-        {
-            continue;
-        }
-        match moba_assets::load_glb_file_with(
-            &content.join(file),
-            moba_assets::GlbTangents::FileOnly,
-        ) {
-            Ok(mesh) if mesh.uvs().is_some() && mesh.tangents().is_none() => errors.push(format!(
-                "{file}: has TEXCOORD_0 but no TANGENT on every primitive; export it with \
-                 MikkTSpace tangents (shipped meshes carry baked tangents, ADR-0022 amendment 1)"
-            )),
-            Ok(_) => {}
-            Err(error) => errors.push(format!("{file}: does not load: {error}")),
-        }
-    }
-    errors
-}
-
 /// The licence and provenance gate (A0, ADR-0022): checks every asset under `content`
 /// (and that every shipped `.glb` with UVs has baked tangents) and writes, or with `check`
 /// compares, the generated notices: the content section of `third_party`,
@@ -528,7 +497,7 @@ fn baked_tangent_errors(
 fn provenance_gate(content: &std::path::Path, third_party: &std::path::Path, check: bool) -> i32 {
     use moba_assets::provenance;
     let mut report = provenance::check_provenance(content);
-    let tangent_errors = baked_tangent_errors(content, &report);
+    let tangent_errors = provenance::baked_tangent_errors(content, &report);
     report.errors.extend(tangent_errors);
     for error in &report.errors {
         eprintln!("error: {error}");

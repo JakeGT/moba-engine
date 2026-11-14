@@ -193,6 +193,35 @@ pub fn load_glb_file_with(path: &Path, tangents: GlbTangents) -> Result<MeshData
     load_glb_with(&bytes, tangents)
 }
 
+/// The rule for shipped meshes (ADR-0022 amendment 1): a `.glb` with `TEXCOORD_0` carries
+/// `TANGENT` on every primitive, so the game never generates tangents for it at load.
+/// Loads with [`GlbTangents::FileOnly`]; a mesh without UVs needs no tangents.
+///
+/// # Errors
+/// Why the file breaks the rule, or why it does not load.
+pub fn check_baked_tangents(bytes: &[u8]) -> Result<(), String> {
+    baked_tangents(load_glb_with(bytes, GlbTangents::FileOnly))
+}
+
+/// [`check_baked_tangents`] on the file at `path` (read as [`load_glb_file`] does).
+///
+/// # Errors
+/// As [`check_baked_tangents`].
+pub fn check_baked_tangents_file(path: &Path) -> Result<(), String> {
+    baked_tangents(load_glb_file_with(path, GlbTangents::FileOnly))
+}
+
+fn baked_tangents(mesh: Result<MeshData, GlbError>) -> Result<(), String> {
+    match mesh {
+        Ok(mesh) if mesh.uvs().is_some() && mesh.tangents().is_none() => Err(String::from(
+            "has TEXCOORD_0 but no TANGENT on every primitive; export it with MikkTSpace \
+             tangents (shipped meshes carry baked tangents, ADR-0022 amendment 1)",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("does not load: {error}")),
+    }
+}
+
 /// Parses a binary glTF file into one merged, validated mesh, skinned if it uses a skin.
 ///
 /// Never panics. Allocation is bounded by the caps: the parsed JSON document (see
@@ -1294,27 +1323,58 @@ mod tests {
         assert_eq!(mesh.normals()[0], [0.0, 0.0, 1.0]);
     }
 
+    /// The test triangle with `TEXCOORD_0` of glTF component type `component` (normalised
+    /// when an integer), from the 24 bytes of `data`, and no `TANGENT`.
+    fn uv_glb(component: u32, data: Vec<u8>) -> Vec<u8> {
+        let json = triangle_json("", POSITION_ACCESSOR)
+            .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TEXCOORD_0":3}"#)
+            .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
+            .replace(
+                r#""byteLength":6}],"#,
+                r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":24}],"#,
+            )
+            .replace(
+                r#""type":"SCALAR"}]"#,
+                &format!(
+                    r#""type":"SCALAR"}},{{"bufferView":3,"componentType":{component},"normalized":true,"count":3,"type":"VEC2"}}]"#
+                ),
+            );
+        let mut bin = triangle_bin();
+        bin.extend([0, 0]); // pad the u16 indices to 80 bytes
+        bin.extend(data);
+        glb(&json, Some(&bin))
+    }
+
+    /// Shipped meshes with UVs carry baked tangents (ADR-0022 amendment 1); the rule that
+    /// `content-check --provenance` and the shipped-content test apply, on every platform.
+    #[test]
+    fn shipped_meshes_with_uvs_need_baked_tangents() {
+        let sentinel = include_bytes!("../../../content/models/sentinel.glb");
+        assert!(
+            load_glb_with(sentinel, GlbTangents::FileOnly)
+                .expect("sentinel")
+                .uvs()
+                .is_some()
+        );
+        assert_eq!(
+            check_baked_tangents(sentinel),
+            Ok(()),
+            "UVs and baked tangents"
+        );
+        assert_eq!(
+            check_baked_tangents(SKINNED),
+            Ok(()),
+            "no UVs, so no tangents needed"
+        );
+        let missing = check_baked_tangents(&uv_glb(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0])))
+            .expect_err("UVs without TANGENT");
+        assert!(missing.contains("no TANGENT"), "{missing}");
+        let broken = check_baked_tangents(b"glTF").expect_err("not a mesh");
+        assert!(broken.starts_with("does not load"), "{broken}");
+    }
+
     #[test]
     fn texcoords_are_read_as_float_or_normalised_ints() {
-        let uv_glb = |component: u32, data: Vec<u8>| {
-            let json = triangle_json("", POSITION_ACCESSOR)
-                .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TEXCOORD_0":3}"#)
-                .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
-                .replace(
-                    r#""byteLength":6}],"#,
-                    r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":24}],"#,
-                )
-                .replace(
-                    r#""type":"SCALAR"}]"#,
-                    &format!(
-                        r#""type":"SCALAR"}},{{"bufferView":3,"componentType":{component},"normalized":true,"count":3,"type":"VEC2"}}]"#
-                    ),
-                );
-            let mut bin = triangle_bin();
-            bin.extend([0, 0]); // pad the u16 indices to 80 bytes
-            bin.extend(data);
-            glb(&json, Some(&bin))
-        };
         let with_uvs = |component: u32, data: Vec<u8>| load_glb(&uv_glb(component, data));
         let mesh = with_uvs(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0])).expect("f32 uvs");
         assert_eq!(mesh.uvs(), Some(&[[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]][..]));

@@ -177,10 +177,10 @@ the semver check):
     (the samples' tangents are unchanged). A mesh with more than 512 triangle corners at one
     position, Σk² over 2^22 or Σk³ over 2^28 of those counts, or degenerate × good corners
     over 2^28 gets the fallback tangent instead of MikkTSpace, bounding a hostile `.glb` at
-    about 0.3 s (0.23 s measured); runtime generation is about 100× the old generator
+    about 0.3 s (0.25 s measured with two caps combined); runtime generation is about 100× the old generator
     (13 ms for 10 k vertices, 88 ms at the cap). New `GlbTangents::FileOnly` and
     `load_glb_with`/`load_glb_file_with` skip it for the bakers and validation. New bench
-    `mesh/generate_tangents/{10k,65k,sliver-fans-at-cap,big-fans-at-cap,degenerates-at-cap}`. LODs,
+    `mesh/generate_tangents/{10k,65k,sliver-fans-at-cap,big-fans-at-cap,degenerates-at-cap,two-caps-combined}`. LODs,
     VAT, baked AO and captured frames are unchanged. No wire, replay, simulation or
     content-hash change.
 - **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 2;

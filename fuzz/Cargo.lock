@@ -382,6 +382,7 @@ dependencies = [
  "bcdec_rs",
  "bevy_mikktspace",
  "gltf",
+ "libc",
  "moba-core",
  "serde",
  "sha2",

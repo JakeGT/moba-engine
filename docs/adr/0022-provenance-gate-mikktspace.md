@@ -294,7 +294,7 @@ names and unhashed bytes.
 
   The pair term dominates, so the ceiling is about 0.3 s. A frontier sweep (release, best of 3) of sliver fans
   (0.01 rad wide, random UVs, so every pair of faces costs an `acos`) at the Σk² cap found the
-  worst case at 964 fans of 64 triangles, 0.23 s:
+  worst single-cap case at 964 fans of 64 triangles, 0.23 s:
 
   | Triangles per fan | Fans | Time | ns per pair |
   |---|---|---|---|
@@ -307,18 +307,24 @@ names and unhashed bytes.
   | 510 | 2 | 41 ms | 78 |
 
   A fan of t triangles has t corners at its centre. A 255-side grid with 230 degenerate triangles, the most under the
-  degenerate cap, takes 0.12–0.23 s. One consequence: a double-sided mesh at the 65 536-vertex
+  degenerate cap, takes 0.12–0.23 s. One mesh can also sit just under two caps at once:
+  940 sliver fans of 64 plus 495 degenerate triangles (1485 × 180 480 corners ≤ 2^28) takes
+  about **0.25 s with two caps combined**, the slowest accepted mesh known (from the
+  reviewers' re-check). One consequence: a double-sided mesh at the 65 536-vertex
   cap (12 corners per position, Σk² about 4.7 M) now takes the fallback at runtime. That is
   acceptable, because shipped meshes no longer depend on runtime generation (next item).
 - **Runtime generation is about 100× the old generator.** The bench
   (`crates/assets/benches/mesh_tangents.rs`) measures 13 ms for the 10 k-vertex grid and
   88 ms at the 65 536-vertex cap, against 0.15 ms and 0.8 ms for the pre-A0 area-weighted
   generator. It gains `sliver-fans-at-cap` (0.23 s), `big-fans-at-cap` (two fans of 510,
-  26 ms) and `degenerates-at-cap` (0.12 s). §4's 92 ms and "about 1 s" are replaced by these
+  26 ms), `degenerates-at-cap` (0.12 s) and `two-caps-combined` (0.25 s, the worst case). §4's 92 ms and "about 1 s" are replaced by these
   numbers.
 - **Shipped meshes carry baked tangents.** `content-check --provenance` loads every `.glb`
   under the content root without generating tangents and fails one that has `TEXCOORD_0` but
-  lacks `TANGENT` on any primitive (`sample-mesh` already writes them). Runtime MikkTSpace
+  lacks `TANGENT` on any primitive (`sample-mesh` already writes them). The rule is library
+  code (`check_baked_tangents`, `check_baked_tangents_file`,
+  `provenance::baked_tangent_errors`), unit-tested on every CI platform on a fixture and on
+  the shipped content, not only through the binary. Runtime MikkTSpace
   is now a bounded fallback for mods and development files, not the shipping path.
 - **Loading without tangents.** New `GlbTangents { Generate, FileOnly }`, `load_glb_with` and
   `load_glb_file_with`; `load_glb` and `load_glb_file` are unchanged (`Generate`). `FileOnly`
@@ -328,13 +334,18 @@ names and unhashed bytes.
   tangents, so skipping them at load would only move the cost.
 - **Regression tests** (`moba_assets::mesh`), with a time bound of 1.5 s in release builds:
   964 sliver fans of 64 (under the caps; 965 are over), two fans of 510 with disc and sliver
-  UVs (three are over), the adjacent-float cluster, and the 255 grid with 230 degenerate
-  triangles (232 are over). The `glb` fuzz target now checks the tangents the loader returns
+  UVs (three are over), the adjacent-float cluster, the 255 grid with 230 degenerate
+  triangles (232 are over), and the two-caps case (496 degenerates are over). The bound is
+  about 6× the 0.25 s worst case on purpose: shared CI runners are several times slower and
+  noisier, and the tests guard against the unbounded cases (seconds to minutes, or a stack
+  overflow), not against tens of percent, which the bench tracks. The `glb` fuzz target now checks the tangents the loader returns
   (`mesh.tangents()`, present whenever UVs are) instead of generating its own.
 - **Special files are never read.** The gate reads `provenance.toml`, `CREDITS.txt`,
   `AI-DISCLOSURE.md` and `THIRD_PARTY.md` only through the new `provenance::read_plain_file`:
-  `symlink_metadata` must say a plain file, the open handle is checked again, and at most
-  `limit + 1` bytes are read. A symlink to `/dev/zero` or a FIFO is an error, not an
+  `symlink_metadata` must say a plain file; the open uses `O_NOFOLLOW | O_NONBLOCK` on unix,
+  so a path swapped for a symlink or FIFO after that check is refused rather than followed or
+  blocked on; the opened handle must be a regular file (`fstat`, every platform); and at most
+  `limit + 1` bytes are read. The SHA-256 check opens files the same way. A symlink to `/dev/zero` or a FIFO is an error, not an
   out-of-memory or a hang. A refused manifest (for example a directory named
   `provenance.toml`) is reported and never read, and a notice path that is not a plain file
   fails the command before anything is written. Notices are capped at 4 MiB.
@@ -370,7 +381,9 @@ names and unhashed bytes.
   would change tangent bits and so every committed `.glb`, for a load-time cost the baked
   tangents now avoid.
 - **API additions** (all additive): `ConceptOnlyService`, `CONCEPT_ONLY_SERVICES`,
-  `read_plain_file` and `AssetProvenance::sha256` in `moba_assets::provenance`;
-  `GlbTangents`, `load_glb_with`, `load_glb_file_with`; `MeshData::TANGENT_MAX_SUBGROUP_COST`.
+  `read_plain_file`, `baked_tangent_errors` and `AssetProvenance::sha256` in
+  `moba_assets::provenance`; `GlbTangents`, `load_glb_with`, `load_glb_file_with`,
+  `check_baked_tangents`, `check_baked_tangents_file`; `MeshData::TANGENT_MAX_SUBGROUP_COST`.
+  `moba-assets` gains `libc` on unix (already in the graph) for the open flags.
   No wire, replay, simulation-logic, state-hash or content-hash change; the committed meshes
   are byte-identical, so captures are too (compared against `main`'s CI artefacts in the PR).

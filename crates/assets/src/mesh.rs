@@ -1258,9 +1258,14 @@ mod tests {
     }
 
     /// The worst accepted case of each cap runs `MikkTSpace` within the load-time bound
-    /// ADR-0022 amendment 1 states (at most about 0.3 s on the reference machine; asserted at
-    /// 1.5 s so a slow CI runner passes). Timed in optimised builds only: a debug build runs
-    /// the generic `MikkTSpace` code unoptimised.
+    /// ADR-0022 amendment 1 states. Timed in optimised builds only: a debug build runs the
+    /// generic `MikkTSpace` code unoptimised.
+    ///
+    /// The limit, 1.5 s, is about 6× the worst case measured on the reference machine
+    /// (about 0.25 s, two caps combined). The margin is deliberate: shared CI runners are
+    /// several times slower and noisier, and the test guards against the unbounded cases
+    /// the caps exist for (seconds to minutes, or a stack overflow), not against a few tens
+    /// of percent; the bench tracks the actual cost.
     fn assert_within_bound(label: &str, mesh: &MeshData) {
         let start = std::time::Instant::now();
         let tangents = mesh.generate_tangents().expect("uvs");
@@ -1279,7 +1284,8 @@ mod tests {
     #[test]
     fn sharing_costs_are_capped_and_bounded() {
         // Squares: 964 sliver fans of 64 triangles are 964 × 4350 ≤ 2^22 < 965 × 4350. Of
-        // every fan size at the caps this is the slowest (about 0.23 s; amendment 1).
+        // every fan size at the caps this is the slowest (about 0.23 s; with the degenerate cap
+        // as well, `two_caps_combined_stay_bounded`, 0.25 s; amendment 1).
         let under = fans(964, 64, FanUvs::Sliver);
         assert!(bounded(&under), "under the sharing cost");
         assert_within_bound("964 sliver fans of 64", &under);
@@ -1296,6 +1302,38 @@ mod tests {
         let over = fans(3, 510, FanUvs::Sliver);
         assert!(!bounded(&over), "over the subgroup cost");
         assert!(is_fallback(&over));
+    }
+
+    /// `mesh` plus `degenerate` triangles `(a, a, b)` on their own vertices, away from it.
+    fn with_degenerates(mesh: &MeshData, degenerate: u32) -> MeshData {
+        let mut positions = mesh.positions().to_vec();
+        let mut uvs = mesh.uvs().expect("uvs").to_vec();
+        let mut indices = mesh.indices().to_vec();
+        for d in 0..degenerate {
+            let at = positions.len() as u32;
+            positions.extend([[-1.0 - d as f32, -5.0, 0.0], [-1.0 - d as f32, -6.0, 0.0]]);
+            uvs.extend([[0.0, 0.0], [0.0, 1.0]]);
+            indices.extend([at, at, at + 1]);
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid mesh")
+    }
+
+    /// One mesh can sit just under two caps at once: 940 sliver fans of 64 (Σk² 4.09 M)
+    /// plus 495 degenerate triangles (1485 × 180 480 good corners ≤ 2^28 < 496). The
+    /// slowest accepted mesh found, about 0.25 s (amendment 1).
+    #[test]
+    fn two_caps_combined_stay_bounded() {
+        let fans = fans(940, 64, FanUvs::Sliver);
+        let worst = with_degenerates(&fans, 495);
+        assert!(bounded(&worst), "under every cap");
+        assert_within_bound("940 sliver fans of 64 + 495 degenerates", &worst);
+        assert!(
+            !bounded(&with_degenerates(&fans, 496)),
+            "over the degenerate cost"
+        );
     }
 
     /// `MikkTSpace`'s original vertex weld splits buckets on their widest axis and scans a
@@ -1354,16 +1392,11 @@ mod tests {
                 indices.extend([at, at + 1, at + side, at + 1, at + side + 1, at + side]);
             }
         }
-        for d in 0..degenerate {
-            let at = positions.len() as u32;
-            positions.extend([[-1.0 - d as f32, -5.0, 0.0], [-1.0 - d as f32, -6.0, 0.0]]);
-            uvs.extend([[0.0, 0.0], [0.0, 1.0]]);
-            indices.extend([at, at, at + 1]);
-        }
         let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
-        MeshData::new(positions, normals, indices)
+        let grid = MeshData::new(positions, normals, indices)
             .and_then(|mesh| mesh.with_uvs(uvs))
-            .expect("valid grid")
+            .expect("valid grid");
+        with_degenerates(&grid, degenerate)
     }
 
     /// Degenerate triangles spread over many positions trip neither sharing cap, but their

@@ -9,12 +9,15 @@
 //! - `mesh/generate_tangents/65k`: a 256 × 256 grid (65 536 vertices, the
 //!   [`MeshData::MAX_VERTICES`] cap; 130 k triangles): about 90 ms.
 //! - `mesh/generate_tangents/sliver-fans-at-cap`: 964 sliver fans of 64 triangles with
-//!   incoherent UVs, just under `TANGENT_MAX_SHARING_COST`: the slowest accepted case found,
+//!   incoherent UVs, just under `TANGENT_MAX_SHARING_COST`: the slowest single-cap case,
 //!   about 0.23 s.
 //! - `mesh/generate_tangents/big-fans-at-cap`: two such fans of 510, just under
 //!   `TANGENT_MAX_SUBGROUP_COST`: about 25 ms.
 //! - `mesh/generate_tangents/degenerates-at-cap`: a 255 × 255 grid plus 230 degenerate
 //!   triangles, just under `TANGENT_MAX_DEGENERATE_COST`: about 0.12 s.
+//! - `mesh/generate_tangents/two-caps-combined`: 940 sliver fans of 64 plus 495 degenerate
+//!   triangles, just under the sharing and degenerate costs at once: the slowest accepted
+//!   mesh found, about 0.25 s.
 //!
 //! The grid is a gentle height field with per-vertex normals, so every triangle has a
 //! non-degenerate UV mapping and `MikkTSpace` runs its full path (no fallbacks).
@@ -97,6 +100,18 @@ fn grid_with_degenerates(side: u32, degenerate: u32) -> MeshData {
             indices.extend([at, at + 1, at + side, at + 1, at + side + 1, at + side]);
         }
     }
+    let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+    let grid = MeshData::new(positions, normals, indices)
+        .and_then(|mesh| mesh.with_uvs(uvs))
+        .expect("valid grid");
+    with_degenerates(&grid, degenerate)
+}
+
+/// `mesh` plus `degenerate` triangles `(a, a, b)` on their own vertices, away from it.
+fn with_degenerates(mesh: &MeshData, degenerate: u32) -> MeshData {
+    let mut positions = mesh.positions().to_vec();
+    let mut uvs = mesh.uvs().expect("uvs").to_vec();
+    let mut indices = mesh.indices().to_vec();
     for d in 0..degenerate {
         let at = positions.len() as u32;
         positions.extend([[-1.0 - d as f32, -5.0, 0.0], [-1.0 - d as f32, -6.0, 0.0]]);
@@ -106,7 +121,7 @@ fn grid_with_degenerates(side: u32, degenerate: u32) -> MeshData {
     let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
     MeshData::new(positions, normals, indices)
         .and_then(|mesh| mesh.with_uvs(uvs))
-        .expect("valid grid")
+        .expect("valid mesh")
 }
 
 fn bench_tangents(c: &mut Criterion) {
@@ -119,6 +134,10 @@ fn bench_tangents(c: &mut Criterion) {
         ("sliver-fans-at-cap", sliver_fans(964, 64)),
         ("big-fans-at-cap", sliver_fans(2, 510)),
         ("degenerates-at-cap", grid_with_degenerates(255, 230)),
+        (
+            "two-caps-combined",
+            with_degenerates(&sliver_fans(940, 64), 495),
+        ),
     ];
     for (name, mesh) in cases {
         assert!(mesh.generate_tangents().is_some(), "the mesh has UVs");

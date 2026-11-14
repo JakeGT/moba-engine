@@ -1361,6 +1361,7 @@ dependencies = [
  "bevy_mikktspace",
  "criterion",
  "gltf",
+ "libc",
  "moba-core",
  "moba-test-support",
  "serde",

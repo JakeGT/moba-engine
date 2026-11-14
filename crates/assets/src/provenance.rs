@@ -853,6 +853,29 @@ fn check_dir(
     }
 }
 
+/// The baked-tangent rule ([`crate::check_baked_tangents`], ADR-0022 amendment 1) on every
+/// `.glb` the report covers below `root`: one error per file that has UVs but no `TANGENT`,
+/// or does not load. `content-check --provenance` adds these to the gate's errors.
+#[cfg(feature = "glb")]
+#[must_use]
+pub fn baked_tangent_errors(root: &Path, report: &ProvenanceReport) -> Vec<String> {
+    report
+        .entries
+        .iter()
+        .flat_map(|entry| &entry.files)
+        .filter(|file| {
+            Path::new(file)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+        })
+        .filter_map(|file| {
+            crate::check_baked_tangents_file(&root.join(file))
+                .err()
+                .map(|reason| format!("{file}: {reason}"))
+        })
+        .collect()
+}
+
 /// The parsed manifest at `path`, which the walk listed as a plain file.
 fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let text = read_plain_file(path, MAX_PROVENANCE_BYTES)?
@@ -881,16 +904,7 @@ pub fn read_plain_file(path: &Path, limit: u64) -> Result<Option<String>, String
     if metadata.len() > limit {
         return Err(format!("larger than {limit} bytes"));
     }
-    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    // The opened file itself: the path may have been swapped since `symlink_metadata`.
-    if !file
-        .metadata()
-        .map_err(|error| error.to_string())?
-        .file_type()
-        .is_file()
-    {
-        return Err(String::from("is not a plain file"));
-    }
+    let file = open_plain(path).map_err(|error| error.to_string())?;
     let mut text = String::new();
     file.take(limit + 1)
         .read_to_string(&mut text)
@@ -901,9 +915,41 @@ pub fn read_plain_file(path: &Path, limit: u64) -> Result<Option<String>, String
     Ok(Some(text))
 }
 
-/// Lower-case hex SHA-256 of the file at `path`, read in blocks.
+/// Opens `path` for reading only if it is a plain file at the moment of opening. On unix the
+/// open refuses a symlink as the last component (`O_NOFOLLOW`) and cannot block on a FIFO
+/// (`O_NONBLOCK`), and on every platform the opened handle must be a regular file (`fstat`),
+/// so a path swapped for a link, FIFO or device after an earlier check is never read.
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| {
+        // `O_NOFOLLOW` on a symlink fails with `ELOOP` (Linux, macOS) or `EMLINK` (FreeBSD).
+        #[cfg(unix)]
+        if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::EMLINK)) {
+            return std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "is a symlink; only a plain file is read",
+            );
+        }
+        error
+    })?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "is a directory or special file; only a plain file is read",
+        ));
+    }
+    Ok(file)
+}
+
+/// Lower-case hex SHA-256 of the plain file at `path`, read in blocks.
 fn sha256_hex(path: &Path) -> std::io::Result<String> {
-    let mut file = std::fs::File::open(path)?;
+    let mut file = open_plain(path)?;
     let mut hasher = Sha256::new();
     let mut block = vec![0_u8; 64 * 1024];
     loop {
@@ -1638,7 +1684,26 @@ licence = "MIT OR Apache-2.0"
                 "{found:?}"
             );
             assert!(read_plain_file(&fifo, 1024).is_err(), "a FIFO is not read");
+            // The open itself neither blocks on a FIFO (no writer) nor reads it.
+            let start = std::time::Instant::now();
+            assert!(open_plain(&fifo).is_err());
+            assert!(sha256_hex(&fifo).is_err());
+            assert!(start.elapsed() < std::time::Duration::from_secs(5));
         }
+        // A link to a plain file, as a path swapped after the walk's check would be: the open
+        // refuses it (`O_NOFOLLOW`), so neither the reader nor the hash follows it.
+        scratch.write("real.toml", "x = 1");
+        let swapped = scratch.0.join("swapped.toml");
+        std::os::unix::fs::symlink(scratch.0.join("real.toml"), &swapped).expect("link");
+        assert!(
+            open_plain(&swapped).is_err(),
+            "the open does not follow a link"
+        );
+        assert!(
+            sha256_hex(&swapped).is_err(),
+            "the hash does not follow a link"
+        );
+        assert!(sha256_hex(&scratch.0.join("real.toml")).is_ok());
         let link = scratch.0.join("models/provenance.toml");
         assert!(
             read_plain_file(&link, 1024).is_err(),
@@ -2013,6 +2078,12 @@ licence = "MIT OR Apache-2.0"
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let report = check_provenance(&repo.join("content"));
         assert_eq!(report.errors, Vec::<String>::new());
+        #[cfg(feature = "glb")]
+        assert_eq!(
+            baked_tangent_errors(&repo.join("content"), &report),
+            Vec::<String>::new(),
+            "every shipped .glb with UVs carries baked tangents"
+        );
         assert!(report.files > 0 && !report.entries.is_empty());
         let read = |path: &str| {
             std::fs::read_to_string(repo.join(path))

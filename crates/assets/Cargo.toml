@@ -26,6 +26,10 @@ sha2.workspace = true
 gltf = { workspace = true, optional = true, features = ["names"] }
 bcdec_rs = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW | O_NONBLOCK` for the provenance gate's plain-file opens (ADR-0022 amendment 1).
+libc.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 # The reference `MikkTSpace` build (platform `acos`) the deterministic one is checked against.
