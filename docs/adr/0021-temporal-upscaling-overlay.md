@@ -1719,9 +1719,17 @@ its own PR.) §4 holds, with these departures and clarifications:
     at native), and Quality's later frames sit at 0–9 % (frame 20: 9.24 %) where they were
     at 0–1.6 %. The wake and the hero are unchanged and far inside their bounds. Repeated
     runs give the same numbers. DLSS has no reactive mask, so the particle's core rests on
-    the motion vectors and DLSS's own history handling. **No bound was changed;** the
-    coordinator decides between a maintainer exception (a DLSS particle bound, as FSR 3.1
-    has from Performance down) and a fix.
+    the motion vectors and DLSS's own history handling. **Re-run 2026-11-14** on driver
+    620.70.06 (DLSS 310.9.16, the same render code), twice with identical numbers: Quality
+    0.183 / 0.40 / **16.14 %** (fails), Performance 0.142 / 0.59 / 3.12 % (passes), native
+    0.073 / 0.12 / **10.84 %** (fails) (perf/0034). So Performance, the mode the gate waited
+    on, now passes, and Quality and native fail; Quality's 16.14 % is over FSR 3.1's
+    Performance bound of 15 % as well. **No bound was changed;** the maintainer decides
+    between: a fix, not yet found (DLSS's reactive-mask equivalent, `BiasCurrentColor`, must
+    not be used with the current models, [S1]; another preset for Quality and DLAA, or a
+    change to the particles' motion, are untried); a maintainer exception (a DLSS
+    particle bound for Quality and native, recorded as a further amendment); or keeping
+    DLSS out of `auto` (item 2) until it passes, with `MOBA_UPSCALER=dlss` still available.
 17. **CI.** `scripts/resize-smoke.sh` runs in the required `renderer-gate` with TAAU and
     Compat only (`UPSCALERS=taau`, 100 frames, sizes 480×270 → 320×180 → 640×360; AO, which
     the smoke guards, is shared by every anti-aliasing mode, so the FXAA case was dropped)

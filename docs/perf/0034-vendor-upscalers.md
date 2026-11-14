@@ -21,7 +21,7 @@ Captured 2026-11-03 for ADR-0021 §4, verification gates 3, 5 and 6, and
 
 | Back end | Status |
 |---|---|
-| DLSS SR (`dlss`) | **runs on the RTX 5070 Ti under Linux (gate 5)**: validation clean in Native (DLAA), Quality, Balanced, Performance and Ultra Performance, with and without the sharpen pass, and across window resizes under X11 and Wayland ([below](#resizes)). Gate 3 at Performance is **pending** ([below](#ghost-probe-on-the-rtx-gate-3)); the `windows-vm` run is **pending** |
+| DLSS SR (`dlss`) | **runs on the RTX 5070 Ti under Linux (gate 5)**: validation clean in Native (DLAA), Quality, Balanced, Performance and Ultra Performance, with and without the sharpen pass, and across window resizes under X11 and Wayland ([below](#resizes)). Gate 3 **fails at Quality (16.14 %) and native (10.84 %)** on the particle smear and passes at Performance ([below](#re-run-2026-11-14-driver-6207006)); the `windows-vm` run is **pending** |
 | FSR 4 (`fsr4`) | **compiled and unit-tested only**; blocked at run time on AMD's Windows driver and an RDNA card (`windows-vm` plus an AMD GPU). Not chosen by `auto` |
 | XeSS (`xess`) | **compiled and unit-tested only**; its Vulkan runtime is Windows-only, so blocked on `windows-vm` |
 | Fallback | one line, then TAAU, for each case [below](#fallbacks-gate-5); 0 validation messages |
@@ -180,6 +180,28 @@ DLSS's own history handling; why the new motion (written for fragments with cove
 the hero are unchanged. **No bound was changed;** whether DLSS gets its own particle bound
 (as FSR 3.1 has 15 % from Performance down) or a fix is the coordinator's decision
 (Amendment 5 item 16).
+
+### Re-run 2026-11-14 (driver 620.70.06)
+
+The same probe on the same render code (the branch at `7bdff2e` plus docs and perf-gate
+changes only), a `dlss` release build with `libnvidia-ngx-dlss.so.310.9.16` beside it, after
+the NVIDIA driver moved from 615.78.08 to **620.70.06**, under the GPU lock with no other
+client running, validation `required`: `UPSCALERS=dlss scripts/ghost-probe.sh`, run twice
+with identical numbers and 0 validation messages
+(`~/.cache/moba-evidence/n1c/gate3-1114c/run1`, `run2`; the `gate3-1114` and
+`gate3-1114b` directories beside it are invalid runs: the first had no validation layer on
+its path, and the second's DLSS rows are the TAAU fallback, without the DLSS binary beside
+the executable):
+
+| Back end, mode | render | worst wake | hero smear | particle smear | result |
+|---|---|---|---|---|---|
+| DLSS Quality | 853×480 | 0.183 % | 0.40 % | **16.14 %** | **fails** |
+| DLSS Performance | 640×360 | 0.142 % | 0.59 % | 3.12 % | passes |
+| DLSS native (DLAA) | 1280×720 | 0.073 % | 0.12 % | **10.84 %** | **fails** |
+
+Quality's worst frame is again the first measured (frame 4: 127 of 787 core pixels; frame
+20: 70 of 747, 9.37 %); native's is frame 4 (85 of 784), with every later frame at 2.6 % or
+less. **No bound was changed;** the options are in Amendment 5 item 16.
 
 ## Overlay invariance (gate 3)
 
