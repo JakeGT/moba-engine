@@ -17,17 +17,18 @@
 #     from /proc/cpuinfo): the same lavapipe renders other bytes on Intel than on AMD
 #     runners, most likely through llvmpipe's RSQRTPS, an approximation whose bits are the
 #     vendor's own. AVX-512 does not explain the split (Zen 3 without it matches Zen 4 and 5
-#     with it); two Intel models have been seen, and they agree. On CI (GITHUB_ACTIONS) every back end
-#     fails when vulkan-probe names no device, when the file has no section, when the device
-#     is in the file but this CPU class is not, or when the file predates the classes (a
-#     `device` line without cpu=). When the image's lavapipe itself changed (a device the
-#     file does not name), every class needs regenerating: FSR 3.1, whose only regression
-#     check this is, fails; TAAU, in the required renderer-gate, warns and keeps its
-#     fingerprints (amendment 4 item 7). Off CI another device is skipped with a log line. A
-#     mismatch on a recorded class is a code change, or a sign that the class key is too
-#     coarse: the log's CPU line says which.
+#     with it), and three Intel models agree (Ice Lake, Emerald Rapids, Granite Rapids). On CI
+#     (GITHUB_ACTIONS) every back end fails when vulkan-probe names no device, when the file
+#     has no section, when the device is in the file but this CPU class is not, or when the
+#     file predates the classes (a `device` line without cpu=). When the image's lavapipe
+#     itself changed (a device the file does not name), every class needs regenerating:
+#     FSR 3.1, whose only regression check this is, fails; TAAU, in the required
+#     renderer-gate, warns and keeps its fingerprints (amendment 4 item 7). Off CI another
+#     device is skipped with a log line. A mismatch on a recorded class is a code change, or
+#     a sign that the class key is too coarse: the log's CPU line says which.
 #     Every run writes its section to <output dir>/hashes-<back ends>.txt (with the CPU it
-#     ran on, and failed captures as `# FAILED`), which CI's artifact keeps: fill the file
+#     ran on, failed captures as `# FAILED`, and no `device` line when vulkan-probe named
+#     none), which CI's artifact keeps: fill the file
 #     from CI runs only, one per class. WRITE_HASHES=1 rewrites the current device and
 #     class's section in place, on CI only (ALLOW_LOCAL_HASHES=1 for a scratch TIERED_HASHES
 #     file); TIERED_HASHES names another file;
@@ -105,11 +106,18 @@ classes=$(PREFIX="device $device cpu=" awk \
   "$hashes" 2>/dev/null | tr '\n' ' ' || true)
 # A `device` line without ` cpu=`: the format before ADR-0021 amendment 6.
 old_format=0
-if grep -E '^device ' "$hashes" 2>/dev/null | grep -qv ' cpu=[^ ]*$'; then old_format=1; fi
+if awk '/^device / && !/ cpu=[^ ]*$/ { found = 1 } END { exit !found }' "$hashes" 2>/dev/null; then
+  old_format=1
+fi
 # This run's section, kept in the artifact (CI fills the file from it). A capture that failed
-# the fallback or two-run check is listed as `# FAILED`, so it cannot be copied by mistake.
+# the fallback, two-run or fingerprint check is listed as `# FAILED`, so it cannot be copied
+# by mistake, and a run whose probe named no device writes no `device` line.
 manifest="$out/hashes-${upscalers// /-}.txt"
-printf '%s\n%s\n' "# cpu $cpu_line" "device $key" > "$manifest"
+if [ -n "$device" ]; then
+  printf '%s\n%s\n' "# cpu $cpu_line" "device $key" > "$manifest"
+else
+  printf '%s\n%s\n' "# cpu $cpu_line" "# no device: vulkan-probe named none" > "$manifest"
+fi
 exact=0
 status=0
 regenerate="add a 'device $key' section to $hashes from a CI run on this class (its"
@@ -186,7 +194,6 @@ for upscaler in $upscalers; do
       continue
     elif cmp -s "$out/$capture_name-1.ppm" "$out/$capture_name-2.ppm"; then
       echo "ok: tiered $capture_name: two runs byte-identical (${hash:0:16})"
-      echo "$capture_name $hash" >> "$manifest"
     else
       echo "FAIL: tiered $capture_name: the two runs differ"
       echo "# FAILED (the two runs differ): $capture_name $hash" >> "$manifest"
@@ -213,8 +220,11 @@ for upscaler in $upscalers; do
     elif ! "$check" "$out/$capture_name-1.ppm" --expected "$fingerprint" \
       --diff "$out/$capture_name-diff.ppm"; then
       echo "FAIL: tiered $capture_name: fingerprint"
+      echo "# FAILED (fingerprint): $capture_name $hash" >> "$manifest"
       status=1
+      continue
     fi
+    echo "$capture_name $hash" >> "$manifest"
   done
 done
 if [ "${WRITE_HASHES:-0}" = 1 ]; then

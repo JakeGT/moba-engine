@@ -1300,10 +1300,11 @@ the semver check):
   runner's CPU class as well as CI's lavapipe (ADR-0021 amendment 6): the same lavapipe renders
   different bytes on Intel and AMD runners, which made `renderer-gate` and `tiered-temporal`
   fail on Intel runners. AVX-512 does not explain the split (Zen 3 without it matches Zen 4
-  and 5 with it); two Intel models (Xeon 6975P-C, Platinum 8573C) agree. The file has an `amd` and an `intel`
-  section, both from CI artifacts. On CI every back end fails when the class has no section,
-  the file is missing or in the old format, or `vulkan-probe` names no device; a changed
-  lavapipe still fails only FSR 3.1. `scripts/tiered-goldens.sh` prints the runner's CPU and
+  and 5 with it), and three Intel models agree (Ice Lake, Emerald Rapids, Granite Rapids). The
+  file has an `amd` and an `intel` section, both from CI artifacts. On CI every back end
+  fails when the class has no section, the file is missing or in the old format, or
+  `vulkan-probe` names no device; a changed lavapipe still fails only FSR 3.1.
+  `scripts/tiered-goldens.sh` prints the runner's CPU and
   every capture's full SHA-256 and writes its section into the artifact
   (`tiered-goldens/hashes-*.txt`, failed captures as `# FAILED`); `WRITE_HASHES=1` runs only
   on CI (or with `ALLOW_LOCAL_HASHES=1`). A `cpu_sample` dispatch of `render-golden.yml`

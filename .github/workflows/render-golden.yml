@@ -721,8 +721,10 @@ jobs:
           if-no-files-found: ignore
 
   # Merges the legs' sections: one per CPU class, ready to paste into
-  # tests/golden/render-tiered-hashes.txt. Legs of one class that disagree fail it (the class
-  # key would be too coarse), and so does a class whose legs all failed.
+  # tests/golden/render-tiered-hashes.txt. It fails, and prints no section for that class,
+  # when runners of one class disagree (the class key would be too coarse) or a class lacks
+  # any capture name seen on any leg (a `# FAILED` capture counts as missing); a leg whose
+  # probe named no device fails it too.
   tiered-hash-sections:
     name: tiered-hash-sections
     needs: tiered-hash-sample
@@ -733,44 +735,61 @@ jobs:
       contents: read
     steps:
       - name: Download the legs' sections
-        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'tiered-hash-sample-*' -D legs
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            -p 'tiered-hash-sample-*' -D legs
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Merge them per CPU class
+        # pipefail: the merge's exit status must survive `tee`.
+        shell: bash
         run: |
+          set -o pipefail
           python3 - legs <<'PY' | tee render-tiered-hashes.sections.txt
           import pathlib, sys
-          classes, cpus, status = {}, {}, 0
+          classes, cpus, names, status = {}, {}, set(), 0
+          def error(message):
+              global status
+              print(f"::error::{message}", file=sys.stderr)
+              status = 1
           for f in sorted(pathlib.Path(sys.argv[1]).glob("*/hashes-taau-fsr3.txt")):
               lines = f.read_text().splitlines()
-              key = next(l[len("device "):] for l in lines if l.startswith("device "))
+              keys = [l[len("device "):] for l in lines if l.startswith("device ")]
+              if not keys or keys[0].startswith("unknown"):
+                  error(f"{f.parent.name}: no device (vulkan-probe named none)")
+                  continue
+              key = keys[0]
               cpu = next((l[len("# cpu "):] for l in lines if l.startswith("# cpu ")), "?")
               cpus.setdefault(key, set()).add(cpu.split(" flags:")[0])
+              captures = classes.setdefault(key, {})
               for l in lines:
+                  if l.startswith("# FAILED"):
+                      # `# FAILED (reason): <capture> <sha256>`: expected, but not usable.
+                      names.add(l.split(": ", 1)[1].split()[0])
+                      continue
                   if l.startswith("#") or l.startswith("device ") or not l.strip():
                       continue
                   name, digest = l.split()
-                  seen = classes.setdefault(key, {}).setdefault(name, set())
-                  seen.add(digest)
-              classes.setdefault(key, {})
+                  names.add(name)
+                  captures.setdefault(name, set()).add(digest)
           for key in sorted(classes):
-              if not classes[key]:
-                  print(f"::error::every capture failed on '{key}'", file=sys.stderr)
-                  status = 1
-                  continue
-              print(f"device {key}")
-              for name in sorted(classes[key]):
-                  digests = classes[key][name]
-                  if len(digests) != 1:
-                      print(f"::error::{name} differs between legs of '{key}': {sorted(digests)}",
-                            file=sys.stderr)
-                      status = 1
-                  print(f"{name} {sorted(digests)[0]}")
+              captures, ok = classes[key], True
+              for name in sorted(names - captures.keys()):
+                  error(f"'{key}': no usable {name} capture on any runner of this class")
+                  ok = False
+              for name in sorted(captures):
+                  if len(captures[name]) != 1:
+                      error(f"'{key}': {name} differs between runners: {sorted(captures[name])}")
+                      ok = False
               for cpu in sorted(cpus[key]):
-                  print(f"# from {cpu}", file=sys.stderr)
+                  print(f"# {key.rsplit(' ', 1)[-1]} from {cpu}", file=sys.stderr)
+              if not ok:
+                  continue  # no section for a class that is incomplete or disagrees
+              print(f"device {key}")
+              for name in sorted(captures):
+                  print(f"{name} {next(iter(captures[name]))}")
           if not classes:
-              print("::error::no leg produced a section", file=sys.stderr)
-              status = 1
+              error("no leg produced a section")
           sys.exit(status)
           PY
           cat render-tiered-hashes.sections.txt >> "$GITHUB_STEP_SUMMARY"

@@ -100,15 +100,17 @@ and no AA): nine captures, one hash (`4adde3f7af91db8c`). Each FSR case checks i
   end, then checks:
   - **an exact SHA-256** per capture against `tests/golden/render-tiered-hashes.txt`, generated
     from CI's artifact for `d9c2d6a` (the same hashes as `c0ff307`'s, so stable across runs
-    on CI runners of the same CPU vendor; ADR-0021 amendment 6). It applies only on the lavapipe named in the file (device name, Vulkan version and
-    driver info, read with `vulkan-probe --json`: `llvmpipe (LLVM 21.1.8, 256 bits)
-    api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)` on the pinned `ubuntu-26.04`
-    image). Elsewhere the script prints "exact hashes: skipped", except on CI for FSR 3.1,
+    on CI runners of the same CPU vendor; ADR-0021 amendment 6). It applies only on the
+    lavapipe named in the file (device name, Vulkan version and driver info, read with
+    `vulkan-probe --json`: `llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335 driver=Mesa
+    26.0.8-1ubuntu0.3 (LLVM 21.1.8)` on the pinned `ubuntu-26.04` image). Elsewhere the script
+    prints "exact hashes: skipped", except on CI for FSR 3.1,
     where a mismatch fails `tiered-temporal` with a message to regenerate the file (TAAU, in
     the required `renderer-gate`, warns instead). *(ADR-0021 amendment 6: CI's lavapipe
     renders other bytes on Intel runners than on AMD ones; these are the AMD hashes, and the
     file now has an AMD and an Intel section. On the pinned lavapipe, a CPU class without a
-    section fails every back end, TAAU included.)*;
+    section fails every back end, TAAU included, and so does a CI run whose `vulkan-probe`
+    names no device.)*;
   - the 64×36 fingerprint, on any lavapipe. It does not catch an FSR 3.1 regression (below).
 - **Why CI's bytes differ from a local run.** SHA-256 prefixes of the captures:
 
