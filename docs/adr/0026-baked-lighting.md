@@ -28,8 +28,9 @@ collected, with its recommendation, under
     (§5c);
   - [ADR-0010](0010-texture-pipeline.md): the KTX2 loader accepts 3D images, still without
     arrays or supercompression (§4d);
-  - [ADR-0023](0023-frame-architecture-materials.md) §1a and §2c step 4: `gb1.a` bit 1 becomes
-    `LIGHTMAP` (§5b), and step 4 becomes the bake lookup.
+  - [ADR-0023](0023-frame-architecture-materials.md) §1a, §2a and §2c step 4: `gb1.a` bit 1
+    becomes `LIGHTMAP` (§5b), `light_classify` also selects at most two reflection probes per
+    tile (§7c), and step 4 becomes the bake lookup.
 - **Compat is unchanged by N3.** Every N3 PR leaves every Compat golden byte-identical. N3
   only *specifies and tests* the subset C1 will sample (§8); the C1 PR wires it in and
   rebaselines Compat deliberately, then Compat freezes (ADR-0020 §2d).
@@ -136,7 +137,7 @@ Constraints:
 **1a. Baked indirect, not baked direct.** The bake stores, for static receivers:
 - **sky light** from the map's environment, with its visibility (what today's IBL ambient
   lacks, and what today's baked AO approximates);
-- **every indirect bounce** of the sun and the sky off static geometry (up to 4 bounces, then
+- **every indirect bounce** of the sun and the sky off static geometry (4 bounces unconditionally, then
   Russian roulette);
 - **light from static emissive surfaces** (the ember crystals, molten seams on static props).
 
@@ -386,10 +387,11 @@ float3 baked_specular(float3 p, float3 r, float roughness, float3 irradiance_her
 occlusion, fog, rims) is unchanged. No new pass and no new render target.
 
 **5b. Which pixels use the lightmap.** ADR-0023 kept `gb1.a` bit 1 for N3. It becomes
-**`LIGHTMAP`**: set by the G-buffer fragment stages for terrain and foliage pixels, and by the
-forward water shader for itself (its bed is terrain). `deferred_light` takes `baked_terrain` for
-those, cross-fading to `baked_volume` where the terrain normal is steeper than 60° (cliff faces
-in the margin); every other pixel takes `baked_volume`. **Decision needed (maintainer) Q13:**
+**`LIGHTMAP`**: set by the G-buffer fragment stages for terrain and foliage pixels.
+`deferred_light` takes `baked_terrain` for those, cross-fading to `baked_volume` where the terrain normal is steeper than 60° (cliff faces
+in the margin); every other pixel takes `baked_volume`. The forward water shader writes no
+G-buffer; it simply calls `baked_terrain` (its bed is terrain), and glass calls
+`baked_volume`. **Decision needed (maintainer) Q13:**
 use bit 1 this way (recommended), leaving model IDs 8–15 for N10 and N6 and declining the spare
 colour attachment of ADR-0023 §1d, which the hybrid (Q1 a) does not need. Q1 (b) would need
 that attachment instead.
@@ -430,8 +432,9 @@ encoding (§2b). Devices are CPU, SYCL (Intel), CUDA (NVIDIA), HIP (AMD) and Met
   fetched like the vendor SDKs (ADR-0020 §6b): a `vendor-sdks.toml` entry pinning the release
   asset above by SHA-256 and its `LICENSE.txt` by SHA-256, unpacked under `target/vendor-sdks/`,
   nothing installed system-wide.
-- It runs on the **CPU device**, so a bake denoises identically on any x86-64 machine and does
-  not depend on CUDA. The bake is small (about 0.5 M texels), so the CPU is fast enough
+- It runs on the **CPU device**, so the denoise does not depend on the GPU vendor or on CUDA.
+  Whether its output is bit-identical across x86-64 CPUs is **unverified**; gate 2 checks
+  repeatability on the bake machine only. The bake is small (about 0.5 M texels), so the CPU is fast enough
   (**estimate**, gate 7).
 - Without the feature, `--denoise filter` (§6b) is the default; the committed Ember bake uses
   OIDN.
@@ -623,20 +626,25 @@ N2b's `deferred_light` on `main`.
 | Phase | Scope | `preset.rs` cells it flips | Needs |
 |---|---|---|---|
 | **N3a** | `moba_render::rt` static BLAS/TLAS (from `smoke/rt.rs`); `light-bake` with the GPU tracer and the CPU oracle; terrain lightmap (both levels) and probe volume with validity, virtual offset and dilation; the in-house filter; KTX2 3D (ADR-0010 amendment); `LightBakeDesc`, the fingerprint, `content-check`, provenance; the CI fixture bake on lavapipe. **No run-time pixel changes.** | none | acceptance |
-| **N3b** | The run-time lookup on Tiered (`baked.slang` in `deferred_light`, water, glass); `LIGHTMAP`; the fallback and off switches; debug views; the `oidn` feature; **the Ember bake in the Golden Crossing mood, committed** | Static GI Low, Medium, High → `Built`; Dynamic GI Low → `Built` | N2b merged |
+| **N3b** | The run-time lookup on Tiered (`baked.slang` in `deferred_light`, water, glass); `LIGHTMAP`; the fallback and off switches; debug views; the `oidn` feature; **an Ember bake of the map visuals as they are on `main`, committed** (no `[lighting]` change, so Compat stays byte-identical) | Static GI Low, Medium, High → `Built`; Dynamic GI Low → `Built` | N2b merged |
 | **N3c** | Reflection probes: bake, prefilter, box projection, renormalisation, per-tile selection; `[[reflection_probes]]`; **the bake format freezes (unblocks C1 with N2c)** | Reflections Low → `Built` | N3b |
 | **N3d** | Incremental bake cache; `scripts/bake-map-light.sh`; other maps if Q11 says so; RTX perf evidence in `docs/perf/`; docs | none | N3c |
 
-**How this unblocks the vertical slice.** A3 needs N2 and N3 (roadmap §8). After N3b and N3c,
-the Ember map section in Golden Crossing is lit at Medium the way the matrix says: baked sky and
+**How this unblocks the vertical slice.** A3 needs N2 and N3 (roadmap §8). N3 delivers the
+tool, the formats, the run-time lookup and a working Ember bake; it does **not** change Ember's
+mood. Switching Ember's `[lighting]` and environment to Golden Crossing is A3's map-section PR,
+which re-bakes Ember with the committed tool in the same PR and rebaselines the Compat Ember
+golden deliberately, with the reason (the mood, not N3, moves it). So the order is N3b/N3c,
+then A3's map PR, with no cycle. After that PR, the Ember map section in Golden Crossing is lit
+at Medium the way the matrix says: baked sky and
 bounce on the ground and walls, units lit by the probe volume as they move between sun and
 shadow, and probe reflections on the bible's metals and obsidian. That is what lets the slice
 check SHD-1/SHD-2 and the bible's "GI bounce off sand" payoff, and judge the look at Medium.
 N3 does **not** deliver Medium's SSGI and SSR (N5) or the Overdrive path tracer (N9): the
 slice's Overdrive view uses the bake as its fallback until N9.
 
-The slice's map geometry (A3's map-section PR) will change after N3b. Each such PR re-bakes
-Ember with the committed tool and settings; the fingerprint makes a forgotten re-bake fail CI.
+Every later change to Ember's geometry or lighting re-bakes in the same PR; the fingerprint
+makes a forgotten re-bake fail CI.
 
 ## Gates
 
@@ -646,10 +654,14 @@ These follow roadmap §10 and the gates of ADR-0020, ADR-0021 and ADR-0023, appl
    - **CPU oracle vs GPU** on the fixture scene (a 32 m board with one wall, one prop and an
      emissive block): mean relative error of L0 ≤ 2 % and of the stored L1 ≤ 0.02, at 4,096
      samples, on lavapipe.
-   - **Open sky:** an empty flat board with albedo 0 bakes to the environment's SH irradiance
-     for an up-facing normal within 1 %, with sky visibility 1.
+   - **Open sky:** an empty flat board with albedo 0 bakes, for an up-facing normal, to a
+     brute-force cosine-weighted integral of the environment cube's level 0 over the upper
+     hemisphere within 1 %, with sky visibility 1. (Not to the SH-L2 sidecar, which is a
+     different truncation; its difference from the bake is recorded, not gated.)
    - **Furnace:** a closed box with uniform albedo ρ = 0.5 and uniform emission E converges to
-     the analytic `E / (1 − ρ)` within 1 % (exercising multiple bounces and Russian roulette).
+     the analytic `E / (1 − ρ)` within 1 %. This holds only with unbounded Russian roulette, so
+     the gate runs with `--bounces` as the depth where roulette starts, not a hard cap; the
+     production default (4, then roulette) is the same estimator.
    - **View factor:** a long wall's sky visibility at a set of distances matches its analytic
      view factor within 1 %.
 2. **Determinism (N3a).** The fixture bake on lavapipe is byte-identical across two runs; the
@@ -672,7 +684,8 @@ These follow roadmap §10 and the gates of ADR-0020, ADR-0021 and ADR-0023, appl
      runs, with validation and sync validation clean. The fixture bake is committed under
      `tests/`, so the goldens never depend on a GPU bake.
 6. **Readability (merge-gating, N3b on).** On the standard captures at every tier, both team
-   palettes, rims on, Ember in Golden Crossing with its bake:
+   palettes, rims on, Ember with its committed bake (and again in A3's map PR once Ember is in
+   Golden Crossing):
    - **CON-1, CON-2, CON-4, CON-5** (no tier below Low − 0.02);
    - **VAL-2** (ground mean L 0.30–0.58) and **VAL-3** (shadow floor L ≥ 0.18);
    - **SHD-1** in each structure's and wall's shadow, and **SHD-2** with a hero standing in it;
@@ -706,8 +719,8 @@ These follow roadmap §10 and the gates of ADR-0020, ADR-0021 and ADR-0023, appl
 
 **Code dependencies:**
 - N3b needs N2b (`deferred_light`) on `main`; N2a is PR #369, still open.
-- The Golden Crossing bake needs the mood in Ember's map visuals (A3's map-section PR) and,
-  for N3b's final bake, the reworked map geometry.
+- The Golden Crossing bake is made in A3's map-section PR, which sets the mood in Ember's map
+  visuals; N3 itself bakes Ember as it is on `main`.
 - ADR-0022's provenance gate (#349) for checking `provenance.toml`; N3a writes the file in its
   format either way.
 
