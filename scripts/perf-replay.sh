@@ -8,11 +8,12 @@
 #
 #   scripts/perf-replay.sh [output dir]
 #
-# Environment: TICKS (default 18000), TIERS (default "low medium high ultra"), BASELINE
+# Environment: TICKS (default 18000), TIERS (default "low medium high ultra", or "low high
+# ultra" on Tiered, the tiers with a [tiered.<tier>] table), BASELINE
 # (default tests/perf/baseline.toml; empty skips the regression check), WINDOW (default
-# 1920x1080), RENDER_PATH (default compat; "tiered" runs the tiered presets: since N1a their
-# absolute budgets fail perf-gate, while their [tiered.<tier>] baseline regressions are
-# report-only until the last N1 part flips them, ADR-0021 amendment 2), UPSCALER (default
+# 1920x1080), RENDER_PATH (default compat; "tiered" runs the tiered presets: their absolute
+# budgets and, since the last N1 part flipped them, their [tiered.<tier>] baselines fail
+# perf-gate, ADR-0021 amendments 2 and 5), UPSCALER (default
 # taau: the tiered path's upscaler, pinned so a build with a vendor upscaler measures the
 # baseline's back end unless asked; perf-gate checks it against the table's `upscaler`, ADR-0021
 # amendment 5), RUN (a command prefix such as "xvfb-run -a"). The replay itself is evidence
@@ -20,9 +21,13 @@
 set -euo pipefail
 out=${1:-perf-replay}
 ticks=${TICKS:-18000}
-tiers=${TIERS:-low medium high ultra}
 baseline=${BASELINE-tests/perf/baseline.toml}
 path=${RENDER_PATH:-compat}
+if [ "$path" = tiered ]; then
+  tiers=${TIERS:-low high ultra}
+else
+  tiers=${TIERS:-low medium high ultra}
+fi
 upscaler=${UPSCALER:-taau}
 mkdir -p "$out"
 replay="$out/teamfight-$ticks.mbr"

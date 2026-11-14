@@ -1087,7 +1087,8 @@ from the text above, or the text left a choice open, this is what was done and w
     are committed now from N1a's RTX medians (perf/0031) and compared **report-only**
     (`TIERED_BASELINE_FAILS` in `perf-gate`). Each later N1 part re-records them; whichever
     N1 part merges last flips the regression check to failing, after a rerun on a quiet
-    machine (perf/0031's frame-time note). `docs/status.md` names that owner.
+    machine (perf/0031's frame-time note). `docs/status.md` names that owner. (N1c did, amendment 5
+    item 18.)
 17. **`TemporalUpscaler::record` is an `unsafe fn`**, with the same contract as N1b's
     `Fsr3::record`: every recorded command buffer is submitted exactly once, in record order,
     on one queue, or the caller treats a failure to submit as fatal or calls
@@ -1740,6 +1741,17 @@ its own PR.) §4 holds, with these departures and clarifications:
     which rewrites the hash file from CI's artifact captures under CI's device line
     (correcting amendment 4 item 7's `WRITE_HASHES=1` advice, which keys the file to the
     machine it runs on).
+18. **The Tiered baselines are re-recorded and now fail (amendment 2 item 16 closed).** N1c
+    is the last N1 part to merge, so it re-recorded `[tiered.low|high|ultra]` in
+    `tests/perf/baseline.toml` under `perf-replay.sh`'s conditions (18,000 ticks, 1920×1080,
+    warm cache, the open build with `upscaler = "taau"`) on the RTX 5070 Ti, as the median of
+    three interleaved rounds under the GPU lock, and set `TIERED_BASELINE_FAILS = true`: a
+    Tiered regression, a missing table, another GPU or another upscaler now fails
+    `perf-gate`, as on Compat. GPU total p95: Low 0.514, High 0.566, Ultra 0.566 ms (N1a's
+    short-replay tables: 0.551, 0.598, 0.599); render p95 0.311, 0.300 and 0.310 ms
+    (perf/0034). On Tiered, `perf-replay.sh` defaults to the tiers that have a table (Low,
+    High, Ultra). Compat's `[ultra]` render p95 (#363) was re-measured beside it and is
+    **not** re-baselined here.
 
 ## Sources
 

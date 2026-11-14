@@ -148,12 +148,15 @@ the semver check):
     tested on an AMD card. A back end that cannot run falls back to TAAU with one line.
   - DLSS runs on the RTX 5070 Ti under Linux, validation-clean in every mode: about 0.57 ms
     at 1080p Quality, a ghosting wake well below TAAU's, overlay IDs byte-identical; since
-    N1b's stage 2 its particle core fails gate 3 at Quality and native (16.0 % and 10.8 %
-    against 7.5 %), awaiting a decision (amendment 5 item 16). FSR 4 and XeSS
+    N1b's stage 2 its particle core fails gate 3 at Quality and native (16.1 % and 10.8 %
+    against 7.5 %, re-run on driver 620.70.06; Performance passes at 3.1 %), awaiting the
+    maintainer's decision (amendment 5 item 16). FSR 4 and XeSS
     are compiled and unit-tested only (their runtimes need Windows; FSR 4 also an AMD card).
   - Each frame's render size is clamped to the back end's range; when its scales meet (a
     one-size range, or DLSS Performance's floor at 0.5) dynamic resolution is turned off with
-    one line. Per-back-end sharpness defaults (0 for DLSS and XeSS) and an RCAS
+    one line. FSR 3.1 Quality therefore renders the SDK's truncated size (426×240 at
+    640×360, one column narrower than before), so its three Quality tiered hashes were
+    regenerated from CI's captures. Per-back-end sharpness defaults (0 for DLSS and XeSS) and an RCAS
     sharpen pass for back ends without their own. Mip bias follows the back end. The tiered
     `hdr_out` target gains `TRANSFER_DST` (NGX clears it).
   - XeSS's required device features are folded into the core feature structures at device
@@ -173,6 +176,10 @@ the semver check):
   - `tiered-goldens.sh`'s `HASHES_FROM`/`HASH_DEVICE` rewrite the exact hashes from CI's
     artifact under CI's device line (`WRITE_HASHES=1` keys them to the local machine), and
     both render jobs log the host CPU (model, `avx512f`).
+  - **perf-gate:** the `[tiered.low|high|ultra]` baselines are re-recorded under
+    `perf-replay.sh` conditions (TAAU, medians of three rounds on the RTX 5070 Ti) and
+    `TIERED_BASELINE_FAILS` is on: a Tiered regression now fails, as on Compat (ADR-0021
+    amendment 5 item 18). On Tiered, `perf-replay.sh` defaults to Low, High and Ultra.
 - **Fixed: `Invalid VkImageView` after a window resize** (and sometimes at an X11 start), with
   AO on, on both paths and every AA mode: lighting wrote its descriptor sets with the
   destroyed AO view before re-binding it. Shadow, contact and AO views are now bound in one

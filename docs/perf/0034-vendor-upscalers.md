@@ -223,6 +223,16 @@ captures: run 41667430134 on `7bdff2e`, each capture byte-identical across its t
 applied with `HASHES_FROM=<artifact> HASH_DEVICE=<CI's device line>
 scripts/tiered-goldens.sh`.
 
+**The hashes are stable across CI runs and runner CPUs.** The next run on the same render
+code (run 43623389792 on `db68822`, docs and hashes only since `7bdff2e`) matched all four
+FSR 3.1 hashes (`tiered-temporal`) and TAAU's four (`renderer-gate`). In run 41667430134
+`tiered-temporal` ran on an AMD EPYC 9V45 and `renderer-gate` on an EPYC 9V74 (both
+`avx512f`: yes); in run 43623389792 both ran on an AMD EPYC 7763 (`avx512f`: no). On this
+code, then, llvmpipe's output did not depend on the runner's CPU. (#369 saw hashes change
+between runs on its own code; that is tracked separately and not reproduced here.) A local lavapipe frame log on the
+branch confirms the cause: FSR 3.1 Quality at 640×360 renders `render=426x240` at scale
+0.667, where `657a7ab`'s `dynres::render_extent` rounds to 427×240.
+
 ## Fallbacks (gate 5)
 
 | Build, case | Log |
@@ -283,10 +293,45 @@ the load to about 4.
   says estimates never close a target, so DLSS's cost there stays open. FSR 3.1 is not in the
   table: N1b's stage 2 had not merged.
 
+## Tiered baselines re-recorded
+
+ADR-0021 amendment 2 item 16 left the `[tiered.*]` regression check report-only until the
+last N1 part; N1c is that part (Amendment 5 item 18). Recorded 2026-11-14 on the RTX 5070 Ti
+(driver 620.70.06, memory clock at P0, 14001 MHz, two displays) with `scripts/perf-replay.sh`
+(`TIERS=<tier> RENDER_PATH=tiered|compat`, 18,000 ticks, 1920×1080, vsync and validation
+off, warm pipeline cache), the open build (no vendor features, `upscaler=taau`), one tier
+per GPU-lock hold, interleaved as tiered Low, High, Ultra, then Compat Ultra, with a
+sampler logging load, clients, memory clock and GPU utilisation every 10 s
+(`~/.cache/moba-evidence/n1c/flip-1114/`). No other `moba-client` ran in any kept round.
+Two rounds were discarded and re-run as round 4: tiered Low round 1 overlapped two Cycles
+CPU renders run outside the lock, and Compat Ultra round 2 ran at twice the GPU time from
+its first sample (GPU total p50 1.353 against 0.663 ms, 39 % utilisation against 23 %) with
+no other client, an unidentified GPU load. The November 3 rounds in `flip/` are not used:
+they ran on driver 615.78.08 with the memory clock at P3 (7001 MHz).
+
+| Case | Rounds (GPU total p95 / render p95, ms) | Median | Was |
+|---|---|---|---|
+| Tiered Low | 0.514 / 0.278, 0.514 / 0.317, 0.512 / 0.311 | **0.514 / 0.311** | 0.551 / 0.338 |
+| Tiered High | 0.567 / 0.300, 0.566 / 0.288, 0.565 / 0.308 | **0.566 / 0.300** | 0.598 / 0.344 |
+| Tiered Ultra | 0.564 / 0.349, 0.568 / 0.302, 0.566 / 0.310 | **0.566 / 0.310** | 0.599 / 0.327 |
+| Compat Ultra | 0.678 / 0.314, 0.681 / 0.313, 0.682 / 0.317 | 0.681 / 0.314 | `[ultra]` 0.664 / 0.254 (limit 0.830 / 0.3175) |
+
+- The Tiered medians are now the `[tiered.low|high|ultra]` tables (`upscaler = "taau"`), and
+  `TIERED_BASELINE_FAILS` is `true`. N1a's tables came from a 3,000-frame replay with a cold
+  cache, which is why they were higher. Every kept Tiered log passes `perf-gate
+  --warm-cache --baseline tests/perf/baseline.toml` with the new tables and the flip on.
+- GPU total is steady (within 0.004 ms per tier). Render p95 is CPU time and follows machine
+  load: Ultra's round 1 (0.349 ms) ran while the 1-minute load average reached 11. The
+  0.05 ms floor and the 25 % allowance cover the spread.
+- **Compat Ultra (#363)** passes in all three rounds, but only just: render p95
+  0.313–0.317 ms against the 0.3175 ms limit, under `perf-replay.sh` conditions. #363's
+  tail is reproduced, not caused here (it predates N1c), and `[ultra]` is **not**
+  re-baselined.
+
 ## Not verified
 
 - FSR 4 and XeSS at run time (above), including their jitter signs and barriers.
 - DLSS in `windows-vm`.
-- Gate 3 for DLSS: it fails at Quality and native after N1b's stage 2 (above), awaiting the
-  coordinator's decision.
+- Gate 3 for DLSS: it fails at Quality and native after N1b's stage 2, again on driver
+  620.70.06 (above), awaiting the maintainer's decision.
 - DLSS's cost on the Low and Medium reference cards.

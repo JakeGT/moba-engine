@@ -18,9 +18,9 @@
 //! (`moba_assets::COMPAT_GPU_BUDGETS`); a breach fails. Tiered logs are checked against
 //! `moba_assets::GPU_BUDGETS` and their own `[tiered.<tier>]` baselines. Since N1a (ADR-0020
 //! §5d, ADR-0021 amendment 2 item 16) a Tiered **budget** breach fails; Tiered **baseline**
-//! breaches (regressions, a missing table, another GPU) stay report-only until the last N1
-//! part merges and flips them (`TIERED_BASELINE_FAILS`; the owner is tracked in
-//! `docs/status.md`): they print as `report-only` lines. The pacing and run-integrity checks
+//! breaches (regressions, a missing table, another GPU, another upscaler) were report-only
+//! until the last N1 part (N1c, ADR-0021 amendment 5) re-recorded the baselines and flipped
+//! `TIERED_BASELINE_FAILS`: they fail now, as on Compat. The pacing and run-integrity checks
 //! fail on both paths.
 //!
 //! The baseline names the GPU it was measured on (top-level `gpu = "..."`) and holds one
@@ -49,10 +49,10 @@ fn known_table(table: &str) -> bool {
     }
 }
 
-/// Whether a Tiered baseline breach fails (`false`: report-only). Each N1 part re-records the
-/// `[tiered.*]` baselines; the last one to merge sets this to `true` (ADR-0021 amendment 2,
-/// item 16; the owner is in `docs/status.md`).
-const TIERED_BASELINE_FAILS: bool = false;
+/// Whether a Tiered baseline breach fails (`false`: report-only). Report-only through N1; the
+/// last N1 part (N1c) re-recorded the `[tiered.*]` baselines and set it (ADR-0021 amendment 2
+/// item 16, amendment 5).
+const TIERED_BASELINE_FAILS: bool = true;
 
 /// Allowed growth over the baseline before the gate fails.
 const DEFAULT_MAX_REGRESSION: f64 = 0.25;
@@ -269,8 +269,8 @@ fn check(
             return (failures, notes);
         }
     };
-    // Budget breaches fail on both paths; baseline breaches on Tiered report only until the
-    // last N1 part flips `TIERED_BASELINE_FAILS`.
+    // Budget breaches fail on both paths; so do baseline breaches, on Tiered since the last N1
+    // part flipped `TIERED_BASELINE_FAILS` (report-only while it is false).
     let mut breaches = Vec::new();
     let need = |key: &str, failures: &mut Vec<String>| {
         let value = log.number(key);
@@ -332,7 +332,7 @@ fn check(
     }
     if tiered && !TIERED_BASELINE_FAILS {
         notes.extend(breaches.into_iter().map(|breach| {
-            format!("report-only (Tiered baseline, until the last N1 part merges): {breach}")
+            format!("report-only (Tiered baseline, TIERED_BASELINE_FAILS is off): {breach}")
         }));
     } else {
         failures.extend(breaches);
@@ -643,12 +643,13 @@ mod tests {
         );
     }
 
-    /// ADR-0020 §5d and ADR-0021 amendment 2 item 16: a tiered log's budget breach fails;
-    /// its `[tiered.<tier>]` baseline breaches report only until the last N1 part flips them;
-    /// its integrity checks fail.
+    /// ADR-0020 §5d and ADR-0021 amendment 2 item 16: a tiered log's budget breach fails; its
+    /// `[tiered.<tier>]` baseline breaches fail since the last N1 part flipped
+    /// `TIERED_BASELINE_FAILS` (amendment 5); its integrity checks fail.
     #[test]
-    fn tiered_logs_fail_budgets_report_baselines_and_fail_integrity() {
-        // Over Ultra's 9 ms: a failure. No tiered baseline table: a report-only note.
+    fn tiered_logs_fail_budgets_baselines_and_integrity() {
+        const _: () = assert!(TIERED_BASELINE_FAILS);
+        // Over Ultra's 9 ms: a failure. No tiered baseline table: a failure too.
         let baseline = Baseline::parse(&baseline_for("0.5")).expect("baseline");
         let over = log("path=tiered gpu_total_p95_ms=12.0");
         let (failures, notes) = check(&over, Some(&baseline), LIMITS);
@@ -663,24 +664,31 @@ mod tests {
             "{notes:?}"
         );
         assert!(
-            notes
+            failures
                 .iter()
-                .any(|note| note.starts_with("report-only")
-                    && note.contains("no [tiered.ultra] table")),
-            "{notes:?}"
+                .any(|failure| failure.contains("no [tiered.ultra] table")),
+            "{failures:?}"
         );
-        // Inside the budget, the missing table alone does not fail.
-        let (failures, _) = check(
+        // Inside the budget, the missing table alone fails.
+        let (failures, notes) = check(
             &log("path=tiered gpu_total_p95_ms=1.0"),
             Some(&baseline),
             LIMITS,
         );
-        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("no [tiered.ultra] table")),
+            "{failures:?}"
+        );
+        assert!(
+            !notes.iter().any(|note| note.starts_with("report-only")),
+            "{notes:?}"
+        );
         // The same numbers on Compat fail, as today.
         let (failures, _) = check(&log("path=compat gpu_total_p95_ms=12.0"), None, LIMITS);
         assert!(failures.iter().any(|failure| failure.contains("budget")));
-        // A tiered baseline table parses and is compared, still report-only
-        // (`TIERED_BASELINE_FAILS` is false until the last N1 part).
+        // A tiered baseline table parses and is compared; a regression fails.
         let tiered = Baseline::parse(
             "gpu = \"NVIDIA GeForce RTX 5070 Ti\"\n[tiered.ultra]\nupscaler = \"taau\"\n\
              gpu_total_p95_ms = 0.5\nrender_p95_ms = 0.2\n",
@@ -691,11 +699,17 @@ mod tests {
             Some(&tiered),
             LIMITS,
         );
-        assert!(failures.is_empty(), "{failures:?}");
         assert!(
-            notes.iter().any(|note| note.contains("regressed")),
-            "{notes:?}"
+            failures.iter().any(|failure| failure.contains("regressed")),
+            "{failures:?} {notes:?}"
         );
+        // Within the allowance, it passes.
+        let (failures, _) = check(
+            &log("path=tiered upscaler=taau gpu_total_p95_ms=0.6"),
+            Some(&tiered),
+            LIMITS,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
         // Integrity still fails on Tiered.
         let (failures, _) = check(
             &log("path=tiered gpu_total_p95_ms=1.0 locked_uploads=3"),
@@ -707,6 +721,17 @@ mod tests {
                 .iter()
                 .any(|failure| failure.contains("locked_uploads"))
         );
+    }
+
+    /// Overdrive's budgets per path, and ADR-0021 amendment 5: a tiered run with another
+    /// upscaler fails against a table recorded with TAAU, and every tiered table names one.
+    #[test]
+    fn tiered_overdrive_budgets_and_upscaler_tables() {
+        let tiered = Baseline::parse(
+            "gpu = \"NVIDIA GeForce RTX 5070 Ti\"\n[tiered.ultra]\nupscaler = \"taau\"\n\
+             gpu_total_p95_ms = 0.5\nrender_p95_ms = 0.2\n",
+        )
+        .expect("a tiered baseline");
         // Overdrive is a tiered tier; on Compat it runs (and is budgeted) as Ultra.
         let (failures, notes) = check(
             &log("path=tiered quality=overdrive gpu_total_p95_ms=1.0"),
@@ -728,22 +753,23 @@ mod tests {
             notes.iter().any(|note| note.contains("budget 7.5 ms")),
             "{notes:?}"
         );
-        // ADR-0021 amendment 5: a run with another upscaler (a DLSS build) is not compared.
-        let (_, notes) = check(
+        // ADR-0021 amendment 5: a run with another upscaler (a DLSS build) is not compared:
+        // it fails as a breach of its own.
+        let (failures, _) = check(
             &log("path=tiered upscaler=dlss gpu_total_p95_ms=0.9"),
             Some(&tiered),
             LIMITS,
         );
         assert!(
-            notes
-                .iter()
-                .any(|note| note.contains("recorded with upscaler \"taau\"")
-                    && note.contains("\"dlss\"")),
-            "{notes:?}"
+            failures.iter().any(
+                |failure| failure.contains("recorded with upscaler \"taau\"")
+                    && failure.contains("\"dlss\"")
+            ),
+            "{failures:?}"
         );
         assert!(
-            !notes.iter().any(|note| note.contains("regressed")),
-            "{notes:?}"
+            !failures.iter().any(|failure| failure.contains("regressed")),
+            "{failures:?}"
         );
         // A tiered table must name its upscaler.
         assert!(

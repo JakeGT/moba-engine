@@ -49,7 +49,7 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **1018 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **1019 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
@@ -135,17 +135,15 @@ Second-audit plan: [`docs/plans/audit-remediation-2026-10-19.md`](plans/audit-re
 - **#45** — extensibility roadmap map, not unfinished implementation work.
 - **#276** — asset pipeline, GPU skinning and mirror/balance: done (#308, #309, #311, #314,
   #316–#319). The epic and #286/#290 are still open on GitHub. Items have no asset references yet.
-- **Tiered perf-gate baselines (ADR-0021 amendment 2, item 16).** Since N1a, Tiered's absolute
-  per-tier budgets fail `perf-gate`, and the `[tiered.low|high|ultra]` baselines in
-  `tests/perf/baseline.toml` are compared report-only (`TIERED_BASELINE_FAILS = false`). Each
-  N1 part (N1b stage 2, N1c, N1d) re-records them; **the owner of the flip is whichever N1
-  part merges last**: it re-records the baselines on a quiet machine and sets
-  `TIERED_BASELINE_FAILS = true` in the same PR. N1d merged before N1a, and N1a's baselines
-  were recorded with it. N1c leaves the open build's tiered frame unchanged (TAAU stays the
-  default; its timings match main, [perf/0034](perf/0034-vendor-upscalers.md)), so it did not
-  re-record them; N1b stage 2 is still to merge. Since N1c every `[tiered.*]` table names its
-  upscaler and `perf-replay.sh` pins it (`UPSCALER`, default `taau`), so the re-recording
-  measures the open build's back end even in a vendor build.
+- **Tiered perf-gate baselines (ADR-0021 amendment 2 item 16, amendment 5 item 18).** Since
+  N1a, Tiered's absolute per-tier budgets fail `perf-gate`. N1c, the last N1 part, re-recorded
+  the `[tiered.low|high|ultra]` baselines in `tests/perf/baseline.toml` under
+  `perf-replay.sh`'s conditions (open build, `upscaler = "taau"`, medians of three rounds on
+  the RTX 5070 Ti, [perf/0034](perf/0034-vendor-upscalers.md#tiered-baselines-re-recorded))
+  and set `TIERED_BASELINE_FAILS = true`: a Tiered regression, a missing table, another GPU
+  or another upscaler now fails, as on Compat. `perf-replay.sh` runs Low, High and Ultra on
+  Tiered (the tiers with a table) and pins `UPSCALER` (default `taau`). Compat Ultra's render
+  p95 still sits at its limit (#363, not re-baselined here).
 - Multi-match flood isolation (#292) is application-layer only: a spoofed multi-source flood
   on one port can still starve new handshakes on that port (other matches are unaffected, see
   [perf/0010](perf/0010-multi-match.md#flood-isolation)); public servers still need a
