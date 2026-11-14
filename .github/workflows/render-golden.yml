@@ -32,6 +32,15 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
+      # The runner's CPU: llvmpipe JITs its shaders for the host CPU, so the exact tiered
+      # hashes are read against it (tests/golden/render-tiered-hashes.txt).
+      - name: Runner CPU
+        run: |
+          lscpu
+          echo "nproc: $(nproc)"
+          for flag in avx2 fma avx512f avx512vl avx512bw; do
+            grep -qw "$flag" /proc/cpuinfo && echo "cpu flag: $flag" || echo "cpu flag: no $flag"
+          done
       - uses: dorny/paths-filter@v4
         id: changes
         if: github.event_name == 'pull_request'
@@ -555,6 +564,15 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
+      # The runner's CPU: llvmpipe JITs its shaders for the host CPU, so the exact tiered
+      # hashes are read against it (tests/golden/render-tiered-hashes.txt).
+      - name: Runner CPU
+        run: |
+          lscpu
+          echo "nproc: $(nproc)"
+          for flag in avx2 fma avx512f avx512vl avx512bw; do
+            grep -qw "$flag" /proc/cpuinfo && echo "cpu flag: $flag" || echo "cpu flag: no $flag"
+          done
       - uses: dorny/paths-filter@v4
         id: changes
         if: github.event_name == 'pull_request'
@@ -640,3 +658,74 @@ jobs:
             ghost-probe
             overlay-invariance
             tiered-goldens
+
+  # TEMPORARY (removed before this PR is marked ready): samples the tiered goldens' hashes on
+  # several runners at once, to tabulate them against the runner's CPU.
+  tiered-cpu-sample:
+    name: tiered-cpu-sample (${{ matrix.sample }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Runner CPU
+        run: |
+          lscpu
+          echo "nproc: $(nproc)"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tiered-cpu-sample
+          save-if: ${{ matrix.sample == 1 }}
+      - uses: ./.github/actions/setup-slang
+      - name: Install software Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan1 \
+            glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev xvfb
+          ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
+          test -n "$ICD" || { echo "lavapipe ICD not found"; exit 1; }
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+      - name: Build client and tools
+        run: cargo build --release --locked -p moba-client -p moba-tools
+      - name: llvmpipe's CPU caps
+        run: GALLIUM_DUMP_CPU=1 ./target/release/vulkan-probe 2>&1 | grep -E 'util_cpu_caps|llvmpipe' || true
+        env:
+          MOBA_RENDER_PATH: tiered
+      - name: Tiered goldens, TAAU
+        continue-on-error: true
+        run: scripts/tiered-goldens.sh ./target/release/moba-client ./target/release/image-check tiered-goldens
+        env:
+          RUN: xvfb-run -a
+          MOBA_RENDER_PATH: tiered
+          UPSCALERS: taau
+      - name: Tiered goldens, FSR 3.1
+        continue-on-error: true
+        run: scripts/tiered-goldens.sh ./target/release/moba-client ./target/release/image-check tiered-goldens
+        env:
+          RUN: xvfb-run -a
+          MOBA_RENDER_PATH: tiered
+          UPSCALERS: fsr3
+      # Does llvmpipe without AVX-512 (Mesa's GALLIUM_OVERRIDE_CPU_CAPS=avx clears avx512f)
+      # converge across CPUs? Evidence only.
+      - name: Tiered goldens, FSR 3.1, GALLIUM_OVERRIDE_CPU_CAPS=avx
+        continue-on-error: true
+        run: scripts/tiered-goldens.sh ./target/release/moba-client ./target/release/image-check tiered-goldens-noavx512
+        env:
+          RUN: xvfb-run -a
+          MOBA_RENDER_PATH: tiered
+          UPSCALERS: fsr3
+          GALLIUM_OVERRIDE_CPU_CAPS: avx
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tiered-cpu-sample-${{ matrix.sample }}
+          path: |
+            tiered-goldens
+            tiered-goldens-noavx512
+          if-no-files-found: ignore
