@@ -8,15 +8,23 @@
 # UPSCALERS picks the back ends (default "taau fsr3"); CI runs "taau" in the required
 # renderer-gate and "fsr3" in tiered-temporal. Per back end and scene:
 #   - two captures, which must be byte-identical;
-#   - an exact SHA-256 check against tests/golden/render-tiered-hashes.txt, but only on the
-#     device that file was generated on (CI's lavapipe: its `device` line, the device name,
-#     Vulkan version and driver info (Mesa and LLVM versions) from `vulkan-probe --json`).
+#   - an exact SHA-256 check against tests/golden/render-tiered-hashes.txt, which has one
+#     section per device and CPU class (ADR-0021 amendment 6): a `device <device> cpu=<class>`
+#     line, then `<capture> <sha256>` lines. The device is CI's lavapipe (the device name,
+#     Vulkan version and driver info (Mesa and LLVM versions) from `vulkan-probe --json`):
 #     llvmpipe's code generation differs between Mesa and LLVM versions, so another lavapipe
-#     renders other bytes for every back end. On another device the check is skipped with a
-#     log line, except on CI (GITHUB_ACTIONS) for FSR 3.1, whose only regression check it
-#     is: there a mismatch fails the run (TAAU, in the required renderer-gate, warns and keeps
-#     its fingerprints). WRITE_HASHES=1 rewrites the file for the current device (from CI's
-#     artifact for CI's lavapipe); TIERED_HASHES names another file;
+#     renders other bytes for every back end. The class is the CPU vendor (`amd`, `intel`,
+#     from /proc/cpuinfo): llvmpipe's JIT uses RSQRTPS, an approximation whose bits are the
+#     vendor's own, so the same lavapipe renders other bytes on Intel than on AMD (AVX-512 or
+#     not makes no difference). On a device the file names, a CPU class it has no section for
+#     fails the run for every back end, with the section to add. On another device the check
+#     is skipped with a log line, except on CI (GITHUB_ACTIONS) for FSR 3.1, whose only
+#     regression check it is: there it fails the run (TAAU, in the required renderer-gate,
+#     warns and keeps its fingerprints). Every run writes its section to
+#     <output dir>/hashes-<back ends>.txt (with the CPU it ran on), which CI's artifact keeps:
+#     fill the file from CI runs only, one per class. WRITE_HASHES=1 rewrites the current
+#     device and class's section in place (on CI's lavapipe only); TIERED_HASHES names
+#     another file;
 #   - the 64x36 fingerprint (tests/golden/render-tiered-[fsr3-]<name>-fingerprint.rgb, WRITE=1
 #     rewrites them). It catches a broken frame, not an upscaler regression: it cannot tell
 #     FSR 3.1 from TAAU (perf/0033), which is why the exact check exists.
@@ -59,40 +67,56 @@ device=$(${RUN:-} "$probe" --json 2>/dev/null | python3 -c '
 import json, sys
 d = json.load(sys.stdin)[0]
 print("%s api=%s driver=%s" % (d["name"], d["api_version"], d["driver_info"]))' 2>/dev/null || true)
-expected_device=$(sed -n 's/^device //p' "$hashes" 2>/dev/null || true)
-# The runner's CPU, next to the hashes (diagnostics: llvmpipe JITs for the host CPU).
-cpuinfo() { sed -n "s/^$1[[:space:]]*: //p" /proc/cpuinfo 2>/dev/null | head -1; }
+# The runner's CPU and its class, the vendor (above; ADR-0021 amendment 6).
+cpuinfo() { sed -n "/^$1[[:space:]]*: /{s///p;q;}" /proc/cpuinfo 2>/dev/null || true; }
 cpu_flags=" $(cpuinfo flags) "
 cpu_has=
 for flag in avx2 fma f16c avx512f avx512vl avx512bw avx512dq avx512_bf16 avx512_fp16; do
-  [[ "$cpu_flags" == *" $flag "* ]] && cpu_has="$cpu_has $flag"
+  if [[ "$cpu_flags" == *" $flag "* ]]; then cpu_has="$cpu_has $flag"; fi
 done
 cpu_line="vendor=$(cpuinfo vendor_id) family=$(cpuinfo 'cpu family') model=$(cpuinfo model)"
 cpu_line="$cpu_line stepping=$(cpuinfo stepping) nproc=$(nproc) name='$(cpuinfo 'model name')'"
 cpu_line="$cpu_line flags:${cpu_has:- none}"
-echo "cpu: $cpu_line"
-echo "device: ${device:-unknown}"
-manifest="$out/hashes-${UPSCALERS// /-}.txt"
-printf '%s\n%s\n' "device ${device:-unknown}" "cpu $cpu_line" > "$manifest"
+case "$(cpuinfo vendor_id)" in
+  GenuineIntel) cpu_class=intel ;;
+  AuthenticAMD) cpu_class=amd ;;
+  "") cpu_class=unknown ;;
+  *) cpu_class=$(cpuinfo vendor_id | tr -c 'A-Za-z0-9\n' _) ;;
+esac
+echo "cpu: $cpu_line (class $cpu_class)"
+key="${device:-unknown} cpu=$cpu_class"
+# The hash file has one section per key: a `device <device> cpu=<class>` line, then
+# `<capture> <sha256>` lines.
+section() { awk -v want="device $1" '/^device /{on = ($0 == want); next} on && NF == 2 && !/^#/' "$hashes"; }
+keys=$(sed -n 's/^device //p' "$hashes" 2>/dev/null || true)
+classes=$(awk -v d="device $device cpu=" 'index($0, d) == 1 { print substr($0, length(d) + 1) }' \
+  "$hashes" 2>/dev/null | tr '\n' ' ' || true)
+# This run's hashes as a section of the file, kept in the artifact (CI fills the file from it).
+manifest="$out/hashes-${upscalers// /-}.txt"
+printf '%s\n%s\n' "# cpu $cpu_line" "device $key" > "$manifest"
 exact=0
+status=0
+regenerate="add a 'device $key' section to $hashes from a CI run on this class (its artifact"
+regenerate="$regenerate has it in $manifest); never from a local run"
 if [ "${WRITE_HASHES:-0}" = 1 ]; then
   test -n "$device" || { echo "FAIL: vulkan-probe named no device"; exit 1; }
-  printf '%s\n%s\n' "# SHA-256 of the tiered captures (scripts/tiered-goldens.sh) on this device only." \
-    "device $device" > "$hashes.new"
-elif [ -n "$device" ] && [ "$device" = "$expected_device" ]; then
+  : > "$hashes.new"
+elif [ -n "$device" ] && printf '%s\n' "$keys" | grep -qxF "$key"; then
   exact=1
-  echo "exact hashes: on $device"
-fi
-status=0
-if [ "${WRITE_HASHES:-0}" != 1 ] && [ "$exact" = 0 ]; then
-  echo "exact hashes: skipped, this device is '${device:-unknown}' and $hashes is for" \
-    "'${expected_device:-none}'; the fingerprints alone are checked"
+  echo "exact hashes: on $key"
+elif [ -n "$device" ] && [ -n "$classes" ]; then
+  # The device is known and this CPU class is not: fail loudly, for every back end.
+  echo "::error::tiered-goldens: no exact hashes for CPU class '$cpu_class' on '$device'" \
+    "(recorded: ${classes% }); $regenerate"
+  echo "FAIL: exact hashes: no section for '$key' (recorded classes: ${classes% }); $regenerate"
+  status=1
+else
+  echo "exact hashes: skipped, this device is '${device:-unknown}' and $hashes has" \
+    "'$(printf '%s' "$keys" | tr '\n' ';')'; the fingerprints alone are checked"
   # On CI the runner's lavapipe changed (or vulkan-probe failed). FSR 3.1 has no other
   # regression check, so its job fails (after the captures, which the artifact keeps);
   # TAAU's, in the required renderer-gate, warns.
   if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    regenerate="regenerate $hashes with WRITE_HASHES=1 from this run's artifact (the captures" \
-    regenerate="$regenerate are in it) or on this lavapipe"
     if [[ " $upscalers " == *" fsr3 "* ]]; then
       echo "::error::tiered-goldens: no exact hashes for FSR 3.1 on '${device:-unknown}'; $regenerate"
       echo "FAIL: exact hashes do not cover this device; $regenerate"
@@ -129,14 +153,14 @@ for upscaler in $upscalers; do
     if [ "${WRITE_HASHES:-0}" = 1 ]; then
       echo "$capture_name $hash" >> "$hashes.new"
     elif [ "$exact" = 1 ]; then
-      want=$(sed -n "s/^$capture_name //p" "$hashes")
+      want=$(section "$key" | sed -n "s/^$capture_name //p")
       if [ "$hash" = "$want" ]; then
         echo "ok: tiered $capture_name: exact hash"
       else
         echo "FAIL: tiered $capture_name: hash ${hash:0:16}, expected ${want:0:16}"
         echo "  actual   $hash"
         echo "  expected ${want:-none}"
-        echo "  cpu      $cpu_line"
+        echo "  on       $key ($cpu_line)"
         status=1
       fi
     fi
@@ -151,15 +175,26 @@ for upscaler in $upscalers; do
   done
 done
 if [ "${WRITE_HASHES:-0}" = 1 ]; then
-  # Keep the other back ends' lines when only some were run.
-  if [ -f "$hashes" ] && [ "$(sed -n 's/^device //p' "$hashes")" = "$device" ]; then
-    grep -v -e '^#' -e '^device ' "$hashes" | while read -r name hash; do
+  # Keep this section's other back ends when only some were run, and every other section.
+  if [ -f "$hashes" ]; then
+    section "$key" | while read -r name hash; do
       grep -q "^$name " "$hashes.new" || echo "$name $hash" >> "$hashes.new"
     done
   fi
-  { head -2 "$hashes.new"; tail -n +3 "$hashes.new" | sort; } > "$hashes"
+  {
+    if [ -f "$hashes" ] && grep -q '^#' "$hashes"; then
+      sed -n '/^#/p;/^device /q' "$hashes"
+    else
+      echo "# SHA-256 of the tiered captures (scripts/tiered-goldens.sh), per device and CPU class."
+    fi
+    { printf '%s\n' "$keys"; echo "$key"; } | grep -v '^$' | sort -u | while IFS= read -r k; do
+      echo "device $k"
+      if [ "$k" = "$key" ]; then sort "$hashes.new"; else section "$k" | sort; fi
+    done
+  } > "$hashes.tmp"
+  mv "$hashes.tmp" "$hashes"
   rm "$hashes.new"
-  echo "wrote $hashes for $device"
+  echo "wrote $hashes for $key"
 fi
 # A history reset mid-stream (ADR-0021 amendment 2 item 28): every 5th frame resets the
 # temporal history with the previous frame still in flight, under the same validation. This
