@@ -232,8 +232,11 @@ an exact SHA-256 per capture checked only on CI's lavapipe, where a device misma
 the job, fingerprints that catch a broken
 frame on any lavapipe, and a mid-stream reset every fifth frame under synchronization
 validation), all in CI's `tiered-temporal` job (`UPSCALERS=fsr3`). A change that alters
-FSR 3.1's output on purpose regenerates the hashes from CI's artifact (or `WRITE_HASHES=1` on
-that lavapipe). Run the ghost probe on a real GPU as well as lavapipe
+FSR 3.1's output on purpose regenerates the hashes from CI's own captures: download the
+`tiered-temporal` artifact of the run on the new code and run
+`HASHES_FROM=<artifact>/tiered-goldens HASH_DEVICE='<the device CI logged>' UPSCALERS=fsr3
+scripts/tiered-goldens.sh` (never `WRITE_HASHES=1` on another machine: it keys the file to
+the device it runs on, which is not CI's). Run the ghost probe on a real GPU as well as lavapipe
 (ADR-0021 amendment 4, item 14): its particle bound is 7.5 % at Quality and native and 15 %
 from Performance down.
 

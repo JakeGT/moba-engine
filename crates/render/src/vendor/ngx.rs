@@ -23,11 +23,16 @@
 use std::ffi::{CStr, c_char, c_int};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use ash::vk::{self, Handle as _};
 
-use super::{Backend, ProbeContext, Unavailable, device_label, nvidia_driver, require_enabled};
+use super::{
+    Backend, ProbeContext, Unavailable, UpscalerRequest, UpscalerResult, device_label,
+    nvidia_driver, require_enabled,
+};
+
+mod dlss;
 use crate::caps::RenderPath;
 
 #[allow(
@@ -57,10 +62,11 @@ const ENGINE_VERSION: &CStr =
     };
 const SDK_VERSION: &str = env!("MOBA_SDK_DLSS_VERSION");
 
-/// The DLSS back end: an initialised NGX session on the renderer's device. Shut down before
-/// the device is destroyed (the renderer drops its vendor selection first).
+/// The DLSS back end: an initialised NGX session on the renderer's device, shared with the
+/// DLSS upscaler made from it. Shut down before the device is destroyed (the renderer drops
+/// its temporal state, then its vendor selection, then the device).
 struct Dlss {
-    _session: Session,
+    session: Arc<Session>,
 }
 
 impl Backend for Dlss {
@@ -71,10 +77,18 @@ impl Backend for Dlss {
     fn detail(&self) -> String {
         format!("DLSS SDK {SDK_VERSION}")
     }
+
+    fn upscaler(&self, request: &UpscalerRequest<'_>) -> Option<UpscalerResult> {
+        Some(
+            dlss::DlssUpscaler::new(Arc::clone(&self.session), request)
+                .map(|upscaler| Box::new(upscaler) as Box<dyn crate::upscale::TemporalUpscaler>),
+        )
+    }
 }
 
-/// An NGX session; dropping it shuts NGX down for the device.
-struct Session {
+/// An NGX session; dropping it shuts NGX down for the device. Every DLSS feature and parameter
+/// map holds the session, so NGX shuts down after the last of them is released.
+pub(super) struct Session {
     /// `VkDevice` as a raw handle (plain data, so the back end is `Send`).
     device: u64,
 }
@@ -484,7 +498,9 @@ pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unav
     unsafe { sys::NVSDK_NGX_VULKAN_DestroyParameters(parameters) };
 
     if available == Some(1) {
-        return Ok(Box::new(Dlss { _session: session }));
+        return Ok(Box::new(Dlss {
+            session: Arc::new(session),
+        }));
     }
     drop(session);
     if needs_driver == Some(1) {

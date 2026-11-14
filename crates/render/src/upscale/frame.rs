@@ -122,8 +122,12 @@ impl TemporalState {
                 previous,
                 jitter,
                 previous_jitter,
-                mip_bias: mip_bias(MipBiasRule::Standard, render.width, output.width)
-                    .clamp(-self.max_lod_bias, self.max_lod_bias),
+                mip_bias: mip_bias(
+                    MipBiasRule::for_kind(self.upscaler.kind()),
+                    render.width,
+                    output.width,
+                )
+                .clamp(-self.max_lod_bias, self.max_lod_bias),
                 render: [render.width, render.height],
                 live: true,
             },

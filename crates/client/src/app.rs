@@ -69,6 +69,8 @@
 //!   is repeatable (with a remote server it is best effort). Projectile effects still advance
 //!   by frame time, so pick a tick before the first fight (the golden uses 120).
 //! - `MOBA_WINDOW_SIZE=<w>x<h>`: logical window size (default 1280x720).
+//! - `MOBA_SMOKE_RESIZE=<frame>:<w>x<h>[,…]`: request those physical window sizes at those
+//!   frames (resize smokes, `scripts/resize-smoke.sh`).
 //! - `MOBA_WARMUP_TICKS=<n>`: the local preview simulates `n` ticks before the first frame;
 //!   in network mode, frame logging and `MOBA_SMOKE_FRAMES` start once Playing reaches tick
 //!   `n` (a client that never reaches it, e.g. a lobby waiting for ready, does not exit).
@@ -285,6 +287,8 @@ struct ClientApp {
     /// Measured frames the frame log had no room for (`MOBA_FRAME_LOG_FRAMES`); the frame
     /// log reports them and `perf-gate` fails a run that dropped any.
     frames_dropped: u64,
+    /// Window sizes still to request, by frame (`MOBA_SMOKE_RESIZE`), soonest first.
+    smoke_resizes: std::collections::VecDeque<(u64, [u32; 2])>,
 }
 
 impl ClientApp {
@@ -476,6 +480,10 @@ impl ClientApp {
             quit_after_frames,
             capture_path,
             capture_frame,
+            smoke_resizes: launch::parse_smoke_resizes(
+                std::env::var("MOBA_SMOKE_RESIZE").ok().as_deref(),
+            )
+            .into(),
             startup_error: None,
             error,
             last_frame: Instant::now(),
@@ -914,6 +922,16 @@ impl App for ClientApp {
             audio.poll();
         }
         self.frames += 1;
+        while let Some(&(at, [width, height])) = self.smoke_resizes.front()
+            && at <= self.frames
+        {
+            self.smoke_resizes.pop_front();
+            eprintln!(
+                "[client] frame {}: requesting a {width}x{height} window",
+                self.frames
+            );
+            frame.window().request_size(width, height);
+        }
         self.poll_shader_reload();
         self.poll_vfx_reload();
         let now = Instant::now();

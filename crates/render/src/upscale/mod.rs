@@ -19,6 +19,7 @@
 
 pub(crate) mod exposure;
 pub(crate) mod frame;
+pub(crate) mod sharpen;
 pub(crate) mod taau;
 
 use ash::vk;
@@ -134,8 +135,21 @@ pub(crate) trait TemporalUpscaler {
         output: Extent,
         max_render: Extent,
     ) -> crate::error::RenderResult<()>;
+    /// Whether [`Self::resize`]'s `max_render` sizes anything: false for a back end that
+    /// accepts any render size up to the output whatever it was created with (DLSS, XeSS), so
+    /// the renderer does not re-create it only to raise its render allocation (ADR-0021
+    /// amendment 5).
+    fn sized_by_max_render(&self) -> bool {
+        true
+    }
     /// Device memory the back end owns (its histories and internal targets).
     fn vram_bytes(&self) -> u64;
+    /// The part of [`Self::vram_bytes`] a vendor SDK allocated itself, outside the renderer's
+    /// allocator and so outside its memory accounting (ADR-0021 amendment 5); the renderer
+    /// adds it to the frame log's VRAM figures. 0 for our own back ends.
+    fn sdk_bytes(&self) -> u64 {
+        0
+    }
     /// Debug builds' shader hot reload (`MOBA_SHADER_DIR`): rebuilds the back end's pipelines
     /// from `shaders`, replacing them only on success. The device is idle. A back end without
     /// shaders of ours (the vendor SDKs) keeps the default, which does nothing.
@@ -164,74 +178,296 @@ pub(crate) fn scaled_range(output: Extent, mode: UpscaleMode, floor: f32) -> (Ex
     (size(floor.min(ceiling)), size(ceiling))
 }
 
+/// Extra usage of the temporal output and the `sharpen` intermediate a vendor SDK writes
+/// into: `TRANSFER_DST` (NGX clears its output with `vkCmdClearColorImage`, ADR-0021
+/// amendment 5) in a build with a vendor upscaler, none in the open build.
+pub(crate) const VENDOR_OUTPUT_USAGE: ash::vk::ImageUsageFlags =
+    if cfg!(any(feature = "dlss", feature = "fsr4", feature = "xess")) {
+        ash::vk::ImageUsageFlags::TRANSFER_DST
+    } else {
+        ash::vk::ImageUsageFlags::empty()
+    };
+
 /// `auto`'s back end in the open build, after the vendor back ends (ADR-0021 §4b and Q1).
 /// FSR 3.1 takes the slot only once its port passes the readability gates and costs within
 /// 0.2 ms of TAAU on the RTX 5070 Ti; the Q1 measurement is in perf/0033 (amendment 4).
 pub(crate) const AUTO_OPEN_BUILD: UpscalerKind = UpscalerKind::Taau;
 
-/// What `MOBA_UPSCALER` asked for and what to try: `auto` takes the first back end compiled in
-/// and supported (DLSS, FSR 4, XeSS, then [`AUTO_OPEN_BUILD`]; ADR-0021 §4b and Q1), and a
-/// named back end that is not compiled in or not wired yet falls back to TAAU with one log
-/// line. FSR 3.1 is wired (`fsr3`, N1b); the vendor back ends arrive with N1c. Whether the
-/// chosen back end can run on this device is [`create`]'s question.
+/// What `MOBA_UPSCALER` asked for among the built-in back ends: `auto` resolves to
+/// [`AUTO_OPEN_BUILD`] (TAAU when that is FSR 3.1 and `fsr3` is not compiled in), `taau` to
+/// TAAU, and `fsr3` to FSR 3.1 when the `fsr3` feature is compiled in, else TAAU with one log
+/// line. The vendor back ends (DLSS, FSR 4, XeSS) are [`create`]'s, through the vendor
+/// selection; they resolve to TAAU here, their fallback. Whether the chosen back end can run
+/// on this device is [`create`]'s question.
 #[must_use]
 pub(crate) fn resolve(requested: Option<UpscalerKind>) -> UpscalerKind {
     let fsr3 = cfg!(feature = "fsr3");
     match requested {
         None if AUTO_OPEN_BUILD == UpscalerKind::Fsr3 && !fsr3 => UpscalerKind::Taau,
         None => AUTO_OPEN_BUILD,
-        Some(UpscalerKind::Taau) => UpscalerKind::Taau,
         Some(UpscalerKind::Fsr3) if fsr3 => UpscalerKind::Fsr3,
-        Some(other) => {
-            let reason = match other {
-                UpscalerKind::Fsr3 => "the `fsr3` feature is not compiled in",
-                _ => "the vendor back ends arrive with N1c",
-            };
+        Some(UpscalerKind::Fsr3) => {
             eprintln!(
-                "[render] upscaler {} is not available in this build ({reason}); using taau",
-                other.name()
+                "[render] upscaler fsr3 is not available in this build (the `fsr3` feature is \
+                 not compiled in); using taau"
             );
             UpscalerKind::Taau
         }
+        Some(_) => UpscalerKind::Taau,
     }
 }
 
-/// Creates the back end `requested` resolves to ([`resolve`]) for `output` with render sizes up
-/// to `max_render`. One that cannot run on this device (FSR 3.1 without its format features or
-/// quad subgroups, ADR-0021 amendment 1) falls back to TAAU with one log line (§4b): the device
-/// is never rejected. Only TAAU's resources are allocated when TAAU runs, and only the other
-/// back end's when it does (amendment 1: the two never hold memory at once).
+/// Which vendor back end `auto` takes, given the one the vendor selection chose for the
+/// upscaler slot (`chosen`: `dlss`, `fsr4`, `xess`, or `builtin`) on a GPU of PCI vendor
+/// `vendor_id` (ADR-0021 §4b, amendment 5): DLSS wherever its probe passed (an NVIDIA RTX GPU
+/// on NVIDIA's driver); XeSS on Intel GPUs only (elsewhere DLSS or the open build is the
+/// better default); FSR 4 not until it is verified on AMD hardware (gate 5). `Err` is the one
+/// line explaining why a chosen back end is passed over.
+pub(crate) fn auto_vendor(chosen: &str, vendor_id: u32) -> Result<Option<UpscalerKind>, String> {
+    match chosen {
+        "dlss" => Ok(Some(UpscalerKind::Dlss)),
+        "xess" if vendor_id == crate::vendor::pci::INTEL => Ok(Some(UpscalerKind::Xess)),
+        "xess" => Err(String::from(
+            "xess is auto's choice on Intel GPUs only (ADR-0021 amendment 5); \
+             MOBA_UPSCALER=xess selects it",
+        )),
+        "fsr4" => Err(String::from(
+            "fsr4 is not auto's choice until it is verified on AMD hardware (ADR-0021 gate 5, \
+             amendment 5); MOBA_UPSCALER=fsr4 selects it",
+        )),
+        _ => Ok(None),
+    }
+}
+
+/// What [`create`] needs: the device and shaders, the vendor back ends selected for the
+/// device, what `MOBA_UPSCALER` asked for, the sizes, the mode and the post-processing
+/// settings.
+pub(crate) struct Setup<'a> {
+    pub(crate) device: &'a crate::device::DeviceContext,
+    pub(crate) shaders: &'a crate::shaders::ShaderSource,
+    pub(crate) vendor: &'a mut crate::vendor::Selection,
+    pub(crate) probe: &'a crate::vendor::ProbeContext<'a>,
+    pub(crate) requested: Option<UpscalerKind>,
+    pub(crate) output: Extent,
+    pub(crate) max_render: Extent,
+    pub(crate) mode: UpscaleMode,
+    pub(crate) post: &'a crate::post::PostConfig,
+    pub(crate) debug: taau::TaauDebugView,
+}
+
+/// The created back end and the sharpness it runs with.
+pub(crate) struct Created {
+    pub(crate) upscaler: Box<dyn TemporalUpscaler>,
+    pub(crate) sharpness: f32,
+    /// The renderer's `sharpen` pass runs after the back end (it does not sharpen itself).
+    pub(crate) sharpen_pass: bool,
+}
+
+/// Creates the back end `setup.requested` asks for (ADR-0021 §4b). A vendor back end comes
+/// from the vendor selection ([`crate::vendor::Selection::create_upscaler`]); one that is
+/// not compiled in, not supported here or fails to create falls back to TAAU with one log
+/// line, and `auto` takes DLSS or XeSS where [`auto_vendor`] says so, else
+/// [`AUTO_OPEN_BUILD`] ([`resolve`]). FSR 3.1 that cannot run on this device (its format
+/// features or quad subgroups, amendment 1) falls back to TAAU with one line too. The device is
+/// never rejected, and only the running back end holds memory (amendment 1). A back end
+/// without its own sharpening
+/// is wrapped in the renderer's `sharpen` pass ([`sharpen::Sharpened`]) when its sharpness
+/// ([`crate::post::PostConfig::sharpness_for`]) is above 0.
 ///
 /// # Errors
-/// TAAU itself cannot be created (a Vulkan or allocation error).
-pub(crate) fn create(
+/// TAAU cannot be created (a Vulkan or allocation error).
+pub(crate) fn create(setup: &mut Setup<'_>) -> crate::error::RenderResult<Created> {
+    let vendor_kind = match setup.requested {
+        None => match auto_vendor(
+            setup.vendor.backend(crate::vendor::Slot::Upscaler),
+            setup.probe.capabilities.vendor_id,
+        ) {
+            Ok(kind) => kind,
+            Err(why) => {
+                eprintln!("[render] {why}; auto uses {}", AUTO_OPEN_BUILD.name());
+                None
+            }
+        },
+        Some(kind @ (UpscalerKind::Dlss | UpscalerKind::Fsr4 | UpscalerKind::Xess)) => Some(kind),
+        Some(UpscalerKind::Taau | UpscalerKind::Fsr3) => None,
+    };
+    let vendor = match vendor_kind {
+        Some(kind) => {
+            let request = crate::vendor::UpscalerRequest {
+                device: setup.device,
+                output: setup.output,
+                max_render: setup.max_render,
+                mode: setup.mode,
+            };
+            match setup
+                .vendor
+                .create_upscaler(kind.name(), setup.probe, &request)
+            {
+                Ok(upscaler) => Some(upscaler),
+                Err(why) => {
+                    eprintln!(
+                        "[render] upscaler {} cannot run here ({why}); using taau",
+                        kind.name()
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    // A built-in request, or `auto` without a vendor back end: FSR 3.1 when it resolves to it
+    // and can run here (amendment 4), else TAAU. A vendor request that fell back above gets
+    // TAAU.
+    let upscaler = if let Some(upscaler) = vendor {
+        upscaler
+    } else {
+        let built_in = if vendor_kind.is_none() {
+            resolve(setup.requested)
+        } else {
+            UpscalerKind::Taau
+        };
+        let fsr3 = if built_in == UpscalerKind::Fsr3 {
+            new_fsr3(setup.device, setup.output, setup.max_render)
+                .inspect_err(|error| {
+                    eprintln!("[render] upscaler fsr3 cannot run here ({error}); using taau");
+                })
+                .ok()
+        } else {
+            None
+        };
+        if let Some(fsr3) = fsr3 {
+            fsr3
+        } else {
+            Box::new(taau::Taau::new(
+                setup.device,
+                setup.shaders,
+                setup.output,
+                setup.max_render,
+                setup.debug,
+            )?)
+        }
+    };
+    if setup.debug != taau::TaauDebugView::None && upscaler.kind() != UpscalerKind::Taau {
+        eprintln!(
+            "[render] MOBA_DEBUG_VIEW {:?} is drawn by taau only; {} shows the frame",
+            setup.debug,
+            upscaler.kind().name()
+        );
+    }
+    Ok(finish(
+        setup.device,
+        setup.shaders,
+        upscaler,
+        setup.output,
+        setup.post,
+    ))
+}
+
+/// TAAU in place of a vendor back end that stopped working (a resize it cannot follow,
+/// ADR-0021 amendment 5), with its sharpness and `sharpen` pass.
+///
+/// # Errors
+/// TAAU cannot be created (a Vulkan or allocation error).
+pub(crate) fn taau_fallback(
     device: &crate::device::DeviceContext,
     shaders: &crate::shaders::ShaderSource,
-    requested: Option<UpscalerKind>,
     output: Extent,
     max_render: Extent,
     debug: taau::TaauDebugView,
-) -> crate::error::RenderResult<Box<dyn TemporalUpscaler>> {
-    let kind = resolve(requested);
-    if kind == UpscalerKind::Fsr3 {
-        match new_fsr3(device, output, max_render) {
-            Ok(fsr3) => {
-                if debug != taau::TaauDebugView::None {
-                    eprintln!(
-                        "[render] MOBA_DEBUG_VIEW {debug:?} is drawn by taau only; fsr3 shows \
-                         the frame"
-                    );
-                }
-                return Ok(fsr3);
-            }
-            Err(error) => {
-                eprintln!("[render] upscaler fsr3 cannot run here ({error}); using taau");
+    post: &crate::post::PostConfig,
+) -> crate::error::RenderResult<Created> {
+    let upscaler = Box::new(taau::Taau::new(device, shaders, output, max_render, debug)?);
+    Ok(finish(device, shaders, upscaler, output, post))
+}
+
+/// Picks the back end's sharpness and wraps it in the `sharpen` pass when it needs one. A
+/// `sharpen` pass that cannot be created leaves the back end unsharpened, with one line.
+fn finish(
+    device: &crate::device::DeviceContext,
+    shaders: &crate::shaders::ShaderSource,
+    upscaler: Box<dyn TemporalUpscaler>,
+    output: Extent,
+    post: &crate::post::PostConfig,
+) -> Created {
+    let mut sharpness = post.sharpness_for(upscaler.kind());
+    let mut sharpen_pass = needs_sharpen_pass(upscaler.has_sharpening(), sharpness);
+    let upscaler = if sharpen_pass {
+        match sharpen::Sharpened::new(device, shaders, upscaler, output) {
+            Ok(sharpened) => Box::new(sharpened) as Box<dyn TemporalUpscaler>,
+            Err((upscaler, error)) => {
+                eprintln!(
+                    "[render] the sharpen pass cannot be created ({error}); {} runs unsharpened",
+                    upscaler.kind().name()
+                );
+                sharpness = 0.0;
+                sharpen_pass = false;
+                upscaler
             }
         }
+    } else {
+        upscaler
+    };
+    Created {
+        upscaler,
+        sharpness,
+        sharpen_pass,
     }
-    Ok(Box::new(taau::Taau::new(
-        device, shaders, output, max_render, debug,
-    )?))
+}
+
+/// The render allocation and scale bounds a back end needs (ADR-0021 §4c, amendment 5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fit {
+    /// The allocation, raised on each side to the back end's minimum for the mode (DLAA's is
+    /// close to native whatever the render scale), never above the output.
+    pub(crate) alloc: Extent,
+    /// The render scales the back end accepts, `lo <= hi`, both in `0..=1`: the
+    /// dynamic-resolution controller's floor and ceiling are clamped into them.
+    pub(crate) scale: (f32, f32),
+}
+
+/// What a back end with render-size `range` at `output` needs of the allocation `alloc`.
+#[must_use]
+pub(crate) fn fit(output: Extent, alloc: Extent, range: (Extent, Extent)) -> Fit {
+    let (low, high) = range;
+    let side = |alloc: u32, low: u32, output: u32| alloc.max(low.min(output)).max(1);
+    let ratio = |size: u32, output: u32| size as f32 / output.max(1) as f32;
+    let lo = ratio(low.width, output.width)
+        .max(ratio(low.height, output.height))
+        .min(1.0);
+    // The larger side's ratio, so rounding never puts the ceiling a pixel under the range's
+    // maximum (`clamp_render` trims the other side to it).
+    let hi = ratio(high.width, output.width)
+        .max(ratio(high.height, output.height))
+        .clamp(lo, 1.0);
+    Fit {
+        alloc: Extent {
+            width: side(alloc.width, low.width, output.width),
+            height: side(alloc.height, low.height, output.height),
+        },
+        scale: (lo, hi),
+    }
+}
+
+/// Whether the renderer's `sharpen` pass runs after a back end (ADR-0021 §3): only when the
+/// back end does not sharpen itself and a sharpness above 0 is chosen.
+#[must_use]
+pub(crate) fn needs_sharpen_pass(has_sharpening: bool, sharpness: f32) -> bool {
+    !has_sharpening && sharpness > 0.0
+}
+
+/// Clamps this frame's render size to the back end's range for the mode (ADR-0021 §4c,
+/// amendment 2 item 19) and to the render allocation `alloc`. The allocation wins when the
+/// two disagree, since the images cannot be larger than they are; [`fit`] raises the
+/// allocation to the back end's minimum, so with temporal AA they never disagree.
+pub(crate) fn clamp_render(render: Extent, range: (Extent, Extent), alloc: Extent) -> Extent {
+    let (low, high) = range;
+    let side = |size: u32, low: u32, high: u32, cap: u32| {
+        size.clamp(low.min(high), high).clamp(1, cap.max(1))
+    };
+    Extent {
+        width: side(render.width, low.width, high.width, alloc.width),
+        height: side(render.height, low.height, high.height, alloc.height),
+    }
 }
 
 /// FSR 3.1's context for `output` and render sizes up to `max_render` (at least 1×1, at most
@@ -262,7 +498,7 @@ fn new_fsr3(
     _output: Extent,
     _max_render: Extent,
 ) -> crate::error::RenderResult<Box<dyn TemporalUpscaler>> {
-    Err(crate::error::RenderError::NoSuitableDevice(String::from(
+    Err(crate::error::RenderError::Upscaler(String::from(
         "the `fsr3` feature is not compiled in",
     )))
 }
@@ -343,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn choices_resolve_to_what_this_build_has() {
+    fn built_in_choices_resolve_to_what_this_build_has() {
         let fsr3 = if cfg!(feature = "fsr3") {
             UpscalerKind::Fsr3
         } else {
@@ -357,9 +593,78 @@ mod tests {
         assert_eq!(resolve(None), auto);
         assert_eq!(resolve(Some(UpscalerKind::Taau)), UpscalerKind::Taau);
         assert_eq!(resolve(Some(UpscalerKind::Fsr3)), fsr3);
-        // The vendor back ends are not wired until N1c.
+        // The vendor back ends are `create`'s; here they resolve to their fallback.
         for kind in [UpscalerKind::Dlss, UpscalerKind::Fsr4, UpscalerKind::Xess] {
             assert_eq!(resolve(Some(kind)), UpscalerKind::Taau);
         }
+    }
+
+    /// ADR-0021 §4b, amendment 5: `auto` takes DLSS wherever its probe passed, XeSS on Intel
+    /// only, and never FSR 4 before gate 5 on AMD hardware.
+    #[test]
+    fn auto_takes_dlss_and_xess_on_intel_but_not_fsr4_yet() {
+        use crate::vendor::pci::{AMD, INTEL, NVIDIA};
+        assert_eq!(auto_vendor("dlss", NVIDIA), Ok(Some(UpscalerKind::Dlss)));
+        assert_eq!(auto_vendor("xess", INTEL), Ok(Some(UpscalerKind::Xess)));
+        assert!(auto_vendor("xess", NVIDIA).is_err());
+        assert!(auto_vendor("xess", AMD).is_err());
+        let fsr4 = auto_vendor("fsr4", AMD).unwrap_err();
+        assert!(fsr4.contains("MOBA_UPSCALER=fsr4"), "{fsr4}");
+        assert_eq!(auto_vendor("builtin", NVIDIA), Ok(None));
+    }
+
+    /// ADR-0021 §3: the `sharpen` pass runs only for a back end without its own sharpening
+    /// and with a sharpness above 0 (DLSS and XeSS default to 0, so none by default).
+    #[test]
+    fn the_sharpen_pass_runs_only_when_needed() {
+        assert!(!needs_sharpen_pass(true, 0.25));
+        assert!(!needs_sharpen_pass(false, 0.0));
+        assert!(needs_sharpen_pass(false, 0.25));
+        assert_eq!(UpscalerKind::Dlss.default_sharpness(), 0.0);
+        assert_eq!(UpscalerKind::Xess.default_sharpness(), 0.0);
+        assert_eq!(
+            UpscalerKind::Fsr4.default_sharpness(),
+            crate::post::DEFAULT_SHARPNESS
+        );
+    }
+
+    /// ADR-0021 §4c, amendment 2 item 19: the render size is clamped to the back end's
+    /// range, and never beyond the allocation.
+    #[test]
+    fn render_sizes_clamp_to_the_back_end_range_and_the_allocation() {
+        let e = |width, height| Extent { width, height };
+        let range = (e(1280, 720), e(1708, 960));
+        let alloc = e(1707, 960);
+        assert_eq!(clamp_render(e(1000, 500), range, alloc), e(1280, 720));
+        assert_eq!(clamp_render(e(1500, 844), range, alloc), e(1500, 844));
+        // The range's maximum is above the allocation: the allocation wins.
+        assert_eq!(clamp_render(e(1708, 960), range, alloc), e(1707, 960));
+        // A fixed range (no dynamic resolution for the mode).
+        let fixed = (e(1708, 960), e(1708, 960));
+        assert_eq!(
+            clamp_render(e(1280, 720), fixed, e(2560, 1440)),
+            e(1708, 960)
+        );
+    }
+
+    /// ADR-0021 §4c, amendment 5: DLAA's range (1267x713..1280x720 at 720p, measured)
+    /// raises a 0.6 allocation to its minimum, and the controller's bounds follow the range.
+    #[test]
+    fn the_allocation_covers_the_back_end_minimum() {
+        let e = |width, height| Extent { width, height };
+        let output = e(1280, 720);
+        let dlaa = fit(output, e(768, 432), (e(1267, 713), e(1280, 720)));
+        assert_eq!(dlaa.alloc, e(1267, 713));
+        // The larger of the two sides' ratios (713/720 > 1267/1280), so both fit.
+        assert!((dlaa.scale.0 - 713.0 / 720.0).abs() < 1e-6);
+        assert!((dlaa.scale.1 - 1.0).abs() < 1e-6);
+        // A range inside the allocation changes nothing; the bounds are the range's.
+        let quality = fit(output, e(853, 480), (e(640, 360), e(1280, 720)));
+        assert_eq!(quality.alloc, e(853, 480));
+        assert!((quality.scale.0 - 0.5).abs() < 1e-6 && (quality.scale.1 - 1.0).abs() < 1e-6);
+        // A degenerate range never inverts the bounds or leaves the output.
+        let odd = fit(e(8, 8), e(4, 4), (e(16, 4), e(2, 2)));
+        assert_eq!(odd.alloc, e(8, 4));
+        assert!(odd.scale.0 <= odd.scale.1 && odd.scale.1 <= 1.0);
     }
 }

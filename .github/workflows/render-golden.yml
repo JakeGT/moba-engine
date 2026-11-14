@@ -58,6 +58,7 @@ jobs:
               - 'scripts/ghost-probe.sh'
               - 'scripts/overlay-invariance.sh'
               - 'scripts/tiered-goldens.sh'
+              - 'scripts/resize-smoke.sh'
               # ADR-0020 gate 3: the tiered smoke binaries.
               - 'crates/tools/src/tiered_smoke.rs'
               - 'crates/tools/src/bin/bindless-smoke.rs'
@@ -83,6 +84,12 @@ jobs:
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
           echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           echo "Using $ICD"
+      # llvmpipe compiles for the host CPU and GitHub's x64 runners mix CPU models, so the
+      # exact tiered hashes may differ between them: the log names the CPU for a mismatch.
+      - name: Host CPU
+        run: |
+          lscpu | grep -E '^Model name' || true
+          if grep -qw avx512f /proc/cpuinfo; then echo "avx512f: yes"; else echo "avx512f: no"; fi
       - name: Build client and tools
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
@@ -464,6 +471,12 @@ jobs:
         env:
           RUN: xvfb-run -a
           MOBA_RENDER_PATH: tiered
+      - name: Resize smoke, TAAU and Compat (ADR-0021 amendment 5)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/resize-smoke.sh ./target/release/moba-client resize-smoke
+        env:
+          RUN: xvfb-run -a
+          UPSCALERS: taau
       - name: Tiered goldens, TAAU (ADR-0021 gate 4)
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
@@ -541,6 +554,7 @@ jobs:
             ghost-probe
             overlay-invariance
             outline-probe-tiered
+            resize-smoke
             tiered-goldens
           if-no-files-found: ignore
 
@@ -581,6 +595,7 @@ jobs:
               - 'scripts/ghost-probe.sh'
               - 'scripts/overlay-invariance.sh'
               - 'scripts/tiered-goldens.sh'
+              - 'scripts/resize-smoke.sh'
               # ADR-0020 gate 3: the tiered smoke binaries.
               - 'crates/tools/src/tiered_smoke.rs'
               - 'crates/tools/src/bin/bindless-smoke.rs'
@@ -606,6 +621,12 @@ jobs:
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
           echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           echo "Using $ICD"
+      # llvmpipe compiles for the host CPU and GitHub's x64 runners mix CPU models, so the
+      # exact tiered hashes may differ between them: the log names the CPU for a mismatch.
+      - name: Host CPU
+        run: |
+          lscpu | grep -E '^Model name' || true
+          if grep -qw avx512f /proc/cpuinfo; then echo "avx512f: yes"; else echo "avx512f: no"; fi
       - name: Build client and tools
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
@@ -632,6 +653,12 @@ jobs:
         env:
           RUN: xvfb-run -a
           UPSCALERS: fsr3
+      - name: Resize smoke, FSR 3.1 (ADR-0021 amendment 5)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/resize-smoke.sh ./target/release/moba-client resize-smoke
+        env:
+          RUN: xvfb-run -a
+          UPSCALERS: fsr3
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -639,4 +666,5 @@ jobs:
           path: |
             ghost-probe
             overlay-invariance
+            resize-smoke
             tiered-goldens

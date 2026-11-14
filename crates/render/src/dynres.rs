@@ -40,6 +40,14 @@ impl DynamicResolution {
         }
     }
 
+    /// Narrows the controller to `min..=max` (a back end's accepted scales after creation or a
+    /// resize, ADR-0021 §4c); the current scale is clamped into it.
+    pub(crate) fn set_bounds(&mut self, min: f32, max: f32) {
+        self.max = max;
+        self.min = min.min(max);
+        self.scale = self.scale.clamp(self.min, self.max);
+    }
+
     /// The current scale.
     pub(crate) fn scale(&self) -> f32 {
         self.scale
@@ -107,6 +115,25 @@ pub(crate) fn render_extent(
 mod tests {
     use super::*;
     use ash::vk;
+
+    /// ADR-0021 §4c: a back end's accepted scales narrow the controller, and a fixed range
+    /// pins it.
+    #[test]
+    fn bounds_narrow_the_controller() {
+        let mut control = DynamicResolution::new(0.5, 1.0, 10.0);
+        control.set_bounds(0.99, 1.0);
+        for frame in 1..=200 {
+            control.observe(frame, 30.0);
+        }
+        // Under load it stays inside them (the 1/32 quantum rounds 0.99 up to 1).
+        assert!(
+            (0.99..=1.0).contains(&control.scale()),
+            "{}",
+            control.scale()
+        );
+        control.set_bounds(0.75, 0.75);
+        assert!((control.scale() - 0.75).abs() < 1e-6);
+    }
 
     #[test]
     fn steps_down_under_load_and_recovers_slowly() {

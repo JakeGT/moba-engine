@@ -142,7 +142,7 @@ pub(crate) fn motion_pixels(
 
 /// Which mip-bias formula a back end documents (ADR-0021 §1, "Texture LOD bias").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // XeSS's rule arrives with N1c; `Off` documents temporal off.
+#[allow(dead_code)] // `Off` documents temporal off.
 pub(crate) enum MipBiasRule {
     /// DLSS, FSR 3.1, FSR 4 and TAAU: `log2(render_w / output_w) - 1`.
     Standard,
@@ -150,6 +150,17 @@ pub(crate) enum MipBiasRule {
     Xess,
     /// Temporal off: 0.
     Off,
+}
+
+impl MipBiasRule {
+    /// The rule the back end `kind` documents (N1c: XeSS's differs).
+    #[must_use]
+    pub(crate) fn for_kind(kind: crate::post::UpscalerKind) -> Self {
+        match kind {
+            crate::post::UpscalerKind::Xess => Self::Xess,
+            _ => Self::Standard,
+        }
+    }
 }
 
 /// The material texture LOD bias for this frame.
@@ -343,6 +354,7 @@ mod tests {
 
     #[test]
     fn mip_bias_follows_each_back_end() {
+        use crate::post::UpscalerKind;
         let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
         assert!(close(mip_bias(MipBiasRule::Standard, 1707, 2560), -1.585));
         assert!(close(mip_bias(MipBiasRule::Standard, 1280, 2560), -2.0));
@@ -351,6 +363,15 @@ mod tests {
         assert!(close(mip_bias(MipBiasRule::Xess, 1280, 2560), -1.0));
         assert!(close(mip_bias(MipBiasRule::Xess, 1113, 2560), -1.202));
         assert_eq!(mip_bias(MipBiasRule::Off, 1280, 2560), 0.0);
+        assert_eq!(MipBiasRule::for_kind(UpscalerKind::Xess), MipBiasRule::Xess);
+        for kind in [
+            UpscalerKind::Taau,
+            UpscalerKind::Fsr3,
+            UpscalerKind::Dlss,
+            UpscalerKind::Fsr4,
+        ] {
+            assert_eq!(MipBiasRule::for_kind(kind), MipBiasRule::Standard);
+        }
     }
 
     #[test]

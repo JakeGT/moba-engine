@@ -100,6 +100,18 @@ impl UpscalerKind {
         }
     }
 
+    /// The back end's default sharpness (ADR-0021 §3): 0.25 for TAAU and FSR 3.1, whose RCAS
+    /// is built in, and for FSR 4, which takes the same FidelityFX sharpening; 0 for DLSS
+    /// (its own sharpening is deprecated) and XeSS (it has none), which get the renderer's
+    /// `sharpen` pass only when a sharpness is chosen.
+    #[must_use]
+    pub const fn default_sharpness(self) -> f32 {
+        match self {
+            Self::Taau | Self::Fsr3 | Self::Fsr4 => DEFAULT_SHARPNESS,
+            Self::Dlss | Self::Xess => 0.0,
+        }
+    }
+
     /// Parses a back-end name, ignoring ASCII case and surrounding whitespace. `auto` is not a
     /// back end: [`PostConfig::upscaler`] is `None` for it.
     #[must_use]
@@ -208,7 +220,7 @@ impl core::fmt::Display for UpscaleMode {
 
 /// Smallest render scale the temporal path accepts (Ultra Performance, 3×).
 pub const MIN_TEMPORAL_RENDER_SCALE: f32 = 1.0 / 3.0;
-/// Default [`PostConfig::sharpness`]: TAAU's and FSR 3.1's starting point (ADR-0021 §3).
+/// Default [`PostConfig::sharpness`]: TAAU's and FSR's starting point (ADR-0021 §3).
 pub const DEFAULT_SHARPNESS: f32 = 0.25;
 
 /// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5): what the temporal pass or the overlay draws instead of
@@ -354,8 +366,15 @@ pub struct PostConfig {
     /// [`AntiAliasing::Temporal`] (with [`Self::render_scale`] able to lower it).
     pub upscale_mode: Option<UpscaleMode>,
     /// Sharpening after the temporal pass, `0..=1` (`MOBA_SHARPNESS`), shared by every back
-    /// end ([`DEFAULT_SHARPNESS`]).
+    /// end. Used only when [`Self::sharpness_explicit`]; otherwise each back end takes its own
+    /// default ([`UpscalerKind::default_sharpness`]: [`DEFAULT_SHARPNESS`] for TAAU and FSR,
+    /// 0 for DLSS and XeSS, ADR-0021 §3). Set it with [`Self::with_sharpness`], which also
+    /// sets [`Self::sharpness_explicit`]: writing this field alone changes nothing, since
+    /// every back end then keeps its own default.
     pub sharpness: f32,
+    /// [`Self::sharpness`] was chosen ([`Self::with_sharpness`]) rather than left at the
+    /// default, so it overrides the back end's own default.
+    pub sharpness_explicit: bool,
 }
 
 impl PostConfig {
@@ -416,6 +435,7 @@ impl PostConfig {
             upscaler: None,
             upscale_mode: None,
             sharpness: DEFAULT_SHARPNESS,
+            sharpness_explicit: false,
         }
     }
 
@@ -440,6 +460,7 @@ impl PostConfig {
             upscaler: None,
             upscale_mode: None,
             sharpness: DEFAULT_SHARPNESS,
+            sharpness_explicit: false,
         }
     }
 
@@ -532,7 +553,19 @@ impl PostConfig {
     #[must_use]
     pub const fn with_sharpness(mut self, sharpness: f32) -> Self {
         self.sharpness = sharpness;
+        self.sharpness_explicit = true;
         self
+    }
+
+    /// The sharpness the `kind` back end runs with: [`Self::sharpness`] when it was chosen,
+    /// else the back end's default (ADR-0021 §3).
+    #[must_use]
+    pub fn sharpness_for(&self, kind: UpscalerKind) -> f32 {
+        if self.sharpness_explicit {
+            self.sharpness
+        } else {
+            kind.default_sharpness()
+        }
     }
 
     /// Returns this config with [`Self::screen_effects`] set.

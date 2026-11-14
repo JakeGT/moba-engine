@@ -30,25 +30,31 @@ render_p95_ms = 0.199
 gpu_total_p95_ms = 0.664
 render_p95_ms = 0.254
 
-# Tiered path (ADR-0021 amendment 2, item 16; docs/perf/0031-n1a-temporal.md). Recorded
-# 2026-11-03 on feat/n1a-temporal (N1a: temporal AA, TAAU Quality, the overlay; merged with
-# N1d's latency back ends, Reflex on by default) on the same
-# machine, from the medians of three interleaved rounds of the 5v5 teamfight replay
-# (tests/replays/teamfight-5v5.mbr, 3,000 frames, cold pipeline cache), not the 18,000-tick
-# perf-replay.sh run above: a perf-replay.sh run on Tiered is the re-recording step for the
-# next N1 part. **Report-only:** perf-gate prints a Tiered regression as a `report-only` note
-# (`TIERED_BASELINE_FAILS = false`) until the last N1 part re-records these and flips it;
-# Tiered's absolute per-tier budgets already fail. Tiered High runs the Ultra configuration,
-# so the two tables match.
+# Tiered path (ADR-0021 amendment 2 item 16, amendment 5 item 18;
+# docs/perf/0034-vendor-upscalers.md). Re-recorded 2026-11-14 by N1c, the last N1 part, on
+# feat/n1c-vendor-upscalers (code as 7bdff2e: N1a, N1b stage 2, N1c and N1d merged), with
+# scripts/perf-replay.sh's conditions (teamfight --ticks 18000, a physical 1920x1080, vsync
+# off, validation off, warm pipeline cache), the open build (no vendor features) and TAAU,
+# on the same GPU (driver 620.70.06, memory clock at P0, 14001 MHz, two displays): the
+# median of three interleaved rounds per tier, run under the GPU lock with no other client.
+# Since then a Tiered regression, a missing table, another GPU or another upscaler fails
+# perf-gate (`TIERED_BASELINE_FAILS = true`), as on Compat. Each table names its upscaler
+# (ADR-0021 §7, amendment 5): a run with another one (a DLSS build) is a breach, never
+# compared or re-recorded. Tiered High runs the Ultra configuration, so the two tables are
+# close. render_p95_ms is CPU render-thread time and moves with machine load (0.278-0.349 ms
+# across these rounds); the 0.05 ms noise floor and 25 % allowance cover that spread.
 
 [tiered.low]
-gpu_total_p95_ms = 0.551
-render_p95_ms = 0.338
+upscaler = "taau"
+gpu_total_p95_ms = 0.514
+render_p95_ms = 0.311
 
 [tiered.high]
-gpu_total_p95_ms = 0.598
-render_p95_ms = 0.344
+upscaler = "taau"
+gpu_total_p95_ms = 0.566
+render_p95_ms = 0.300
 
 [tiered.ultra]
-gpu_total_p95_ms = 0.599
-render_p95_ms = 0.327
+upscaler = "taau"
+gpu_total_p95_ms = 0.566
+render_p95_ms = 0.310

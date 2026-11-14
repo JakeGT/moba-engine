@@ -118,6 +118,19 @@ fn a_lower_priority_candidate_takes_over_and_later_ones_are_not_probed() {
     );
     assert_eq!(selection.backend(Slot::Upscaler), "xess");
     assert_eq!(selection.backend(Slot::Denoiser), "nrd");
+    // ADR-0021 amendment 5: once TAAU runs in the slot's place (auto passes XeSS over off
+    // Intel), the public view and the summary name what runs; the slot's choice stays.
+    let mut selection = selection;
+    selection.set_upscaler_in_use("builtin");
+    assert_eq!(selection.backends().upscaler, "builtin");
+    assert_eq!(selection.backend(Slot::Upscaler), "xess");
+    let summary = selection
+        .summary()
+        .expect("a summary with back ends compiled in");
+    assert!(
+        summary.starts_with("[vendor] selected: upscaler=builtin denoiser=nrd"),
+        "{summary}"
+    );
 }
 
 fn fixture(name: &str) -> DeviceCapabilities {

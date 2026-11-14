@@ -16,7 +16,7 @@ The features live on `moba-render` and are forwarded with the same names by `mob
 | `fsr3` (default) | upscaler | none fetched: FSR 3.1.6's MIT sources are vendored in `third_party/fidelityfx/` ([fsr3.md](fsr3.md)) | all | none (compiled into the build) |
 | `dlss` | upscaler (1st) | DLSS 310.9.16 | Linux, Windows | NGX loads `libnvidia-ngx-dlss.so.310.9.16` / `nvngx_dlss.dll` |
 | `fsr4` | upscaler (2nd) | FidelityFX SDK 2.4.0 | Linux, Windows (headers) | `amd_fidelityfx_{loader,upscaler}_vk.dll`, Windows only |
-| `xess` | upscaler (3rd) | XeSS 3.0.2 | Linux, Windows (headers) | `libxess.dll`, Windows only; never selected in N0 (see below) |
+| `xess` | upscaler (3rd) | XeSS 3.0.2 | Linux, Windows (headers) | `libxess.dll`, Windows only; its device features are enabled since N1c (see below) |
 | `nrd` | denoiser | NRD 4.18.0 (built from source with CMake) | Linux, Windows | none (static library) |
 | `rtxdi` | direct lighting | RTXDI 3.1.0 | all | none (shader library) |
 | `sharc` | radiance cache | SHaRC 1.8.3 | all | none (shader headers) |
@@ -150,16 +150,19 @@ In a `dlss` build NGX's instance list (before its core is loaded) is
 `VK_KHR_get_physical_device_properties2`, which the instance then enables. FSR 4's API has no
 requirement query.
 
-**XeSS is never selected in N0.** Its required device *features*
-(`xessVKGetRequiredDeviceFeatures`) can only be enabled at `vkCreateDevice`, and N0 does not
-enable them. N1 merges them before `vkCreateDevice`, through a `vendor::device_features` hook
-beside `vendor::device_extensions`, folding XeSS's standalone feature structures into the
-renderer's `VkPhysicalDeviceVulkan12Features`/`VkPhysicalDeviceVulkan13Features` (chaining
-them beside those is invalid, `VUID-VkDeviceCreateInfo-pNext-02830`). Until then, a probe that
-finds the library and all its extensions still rejects it:
+**XeSS's device features (since N1c).** Its required device *features*
+(`xessVKGetRequiredDeviceFeatures`) can only be enabled at `vkCreateDevice`. N0 did not
+enable them, so it never selected XeSS. Since N1c (ADR-0021 amendment 5) the tiered device
+folds them in before `vkCreateDevice` (`vendor::device_features`, beside
+`vendor::device_extensions`): XeSS's standalone feature structures are merged into the
+renderer's `VkPhysicalDeviceVulkan11/12/13Features` (chaining them beside those is invalid,
+`VUID-VkDeviceCreateInfo-pNext-02830`), and `mutableDescriptorType` is chained with its
+extension when the device supports both. The probe then checks those features against what
+the device was created with. On Linux the probe stops earlier, since XeSS ships Windows
+binaries only:
 
 ```text
-[vendor] xess unavailable: XeSS 3.0.2 needs its required device features (xessVKGetRequiredDeviceFeatures), which are merged into the device in N1; upscaler falls back to builtin
+[vendor] xess unavailable: …/libxess.so not found (XeSS 3.0.2 ships Windows binaries only); upscaler falls back to builtin
 ```
 
 **Streamline** must be loaded, and `slInit` called, before `vkCreateInstance`; it interposes
@@ -194,6 +197,37 @@ uses `cfg`.
 
 The RTX 5070 Ti run with every Linux-buildable back end is in
 [perf/0029](../perf/0029-vendor-sdks.md).
+
+## Upscalers (N1c)
+
+`dlss`, `fsr4` and `xess` builds each add a `TemporalUpscaler` back end for the tiered path
+(ADR-0021 §4 and amendment 5). `MOBA_UPSCALER=dlss|fsr4|xess` asks for one; it is probed on
+demand if the start-up selection did not pick it, and falls back to TAAU with one
+`[render] upscaler X cannot run here (why); using taau` line. `auto` takes DLSS where it runs
+and XeSS on an Intel GPU, never FSR 4 until it passes on an AMD card. The `[vendor] selected:`
+summary (logged once the upscaler exists) and `Renderer::vendor_backends().upscaler` name the
+upscaler that runs (`builtin` when TAAU runs in the slot's place). A vendor back end that cannot
+follow a window resize (DLSS refuses a few-pixel output) is replaced by TAAU with one line,
+for the rest of the session.
+The render allocation is raised to the back end's smallest render size for the mode (DLAA's
+is near native), and the memory an SDK allocates itself counts in the `[vram]` totals
+(`sdk_mb=`).
+
+- **DLSS** runs on Linux with NVIDIA's driver: copy `libnvidia-ngx-dlss.so.310.9.16` from the
+  fetched SDK (`target/vendor-sdks/dlss-v310.9.16/lib/Linux_x86_64/rel/`) beside the client before running a `dlss` build. The
+  `dev` and `rel` binaries are for development only; never ship them (see above).
+- **FSR 4** needs `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` beside the client on AMD's Windows driver and an RDNA
+  card; **XeSS** needs `libxess.dll` on Windows. Neither has been run yet (`windows-vm`).
+- **Perf runs pin the upscaler:** `scripts/perf-replay.sh` runs `UPSCALER` (default `taau`),
+  and perf-gate refuses to compare a run with a `[tiered.*]` baseline recorded with another
+  upscaler. Measure DLSS with `UPSCALER=dlss BASELINE= scripts/perf-replay.sh`.
+- **Resizes:** `UPSCALERS="taau dlss" scripts/resize-smoke.sh` (X11) resizes the window
+  mid-run for each listed back end, plus, for each one but TAAU, a resize to 8x8 that it may
+  refuse (it must then fall back to TAAU, never exit).
+- **Ghost probe and overlay invariance:** `UPSCALERS="taau dlss" scripts/ghost-probe.sh` and
+  `UPSCALERS="taau dlss" scripts/overlay-invariance.sh` add the listed back ends' Quality,
+  Performance and native cases; each case fails if the log does not name the back end it
+  asked for.
 
 ## Verification and CI
 
