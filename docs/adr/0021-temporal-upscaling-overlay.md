@@ -6,8 +6,8 @@
 ([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)), and FSR 3.1
 runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)); the
 tiered goldens' exact hashes are per CPU class
-([Amendment 6](#amendment-6-2026-11-14-the-tiered-exact-hashes-per-cpu-class)). Proposed 2026-10-31.
-This is phase N1 of the
+([Amendment 6](#amendment-6-2026-11-14-the-tiered-exact-hashes-per-cpu-class)).
+Proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
 - **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
@@ -1623,16 +1623,19 @@ the required `renderer-gate` on some attempts and passed it on others.
       its artifact (`render-golden`, `tiered-temporal`) holds `tiered-goldens/hashes-taau.txt`
       or `hashes-fsr3.txt`: the run's section (its `device … cpu=<class>` line and hashes,
       with failed captures as `# FAILED`). **A mismatching run's artifact already holds that
-      class's section**; no rerun is needed for it.
+      class's section** while its fingerprints pass; no rerun is needed for it. Regenerate
+      the fingerprints (`WRITE=1`, from CI's output) before collecting sections: a capture
+      that fails its fingerprint is `# FAILED` and gives no section (its raw hash is still in
+      the `# FAILED` line and the `sha256:` log line).
    2. For the class the PR's runs did not land on (usually Intel), dispatch the sampler once:
       `gh workflow run render-golden.yml --ref <branch> -f cpu_sample=true`. It runs only the
       tiered goldens, TAAU and FSR 3.1, on eight runners, and its `tiered-hash-sections` job
       merges them into one section per class (artifact `tiered-hash-sections`, also in the run
       summary). It fails, and prints no section for that class, if two runners of one class
-      disagree or a class lacks a capture another runner produced (a `# FAILED` capture
-      counts as missing); a runner whose probe named no device fails it too. If a class is
-      still missing, dispatch again. Rerunning a job until it lands on the other class also works but costs
-      far more.
+      disagree or a class lacks any of the eight captures (a `# FAILED` capture counts as
+      missing); a runner whose probe named no device fails it too. If a class is still
+      missing, dispatch again. Rerunning a job until it lands on the other class also works
+      but costs far more.
    3. Paste each class's lines into its section of `tests/golden/render-tiered-hashes.txt`
       (sorted, `LC_ALL=C`), checking them against `sha256sum tiered-goldens/*-1.ppm` of the
       downloaded artifact if in doubt.

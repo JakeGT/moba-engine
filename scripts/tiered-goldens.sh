@@ -200,9 +200,7 @@ for upscaler in $upscalers; do
       status=1
       continue
     fi
-    if [ "${WRITE_HASHES:-0}" = 1 ]; then
-      echo "$capture_name $hash" >> "$hashes.new"
-    elif [ "$exact" = 1 ]; then
+    if [ "${WRITE_HASHES:-0}" != 1 ] && [ "$exact" = 1 ]; then
       want=$(section "$key" | sed -n "s/^$capture_name //p")
       if [ "$hash" = "$want" ]; then
         echo "ok: tiered $capture_name: exact hash"
@@ -224,7 +222,9 @@ for upscaler in $upscalers; do
       status=1
       continue
     fi
+    # Only a capture that passed every check reaches the manifest or WRITE_HASHES's file.
     echo "$capture_name $hash" >> "$manifest"
+    if [ "${WRITE_HASHES:-0}" = 1 ]; then echo "$capture_name $hash" >> "$hashes.new"; fi
   done
 done
 if [ "${WRITE_HASHES:-0}" = 1 ]; then

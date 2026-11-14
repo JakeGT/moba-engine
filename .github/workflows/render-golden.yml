@@ -747,7 +747,10 @@ jobs:
           set -o pipefail
           python3 - legs <<'PY' | tee render-tiered-hashes.sections.txt
           import pathlib, sys
-          classes, cpus, names, status = {}, {}, set(), 0
+          classes, cpus, status = {}, {}, 0
+          # Every capture tiered-goldens.sh takes (its `cases` times TAAU and FSR 3.1); the
+          # union of what the legs produced is checked as well, in case the script grows.
+          names = {p + n for p in ("", "fsr3-") for n in ("low", "high", "native", "overlay")}
           def error(message):
               global status
               print(f"::error::{message}", file=sys.stderr)

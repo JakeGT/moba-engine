@@ -234,8 +234,11 @@ fingerprints that catch a broken frame on any lavapipe, and a mid-stream reset e
 frame under synchronization validation), all in CI's `tiered-temporal` job
 (`UPSCALERS=fsr3`). A change that alters FSR 3.1's (or TAAU's) output on purpose fills
 **both** CPU-class sections from CI before it merges (ADR-0021 amendment 6 item 5; never
-from a local run). A mismatching run's artifact (`tiered-goldens/hashes-fsr3.txt`) already
-holds the section for the class it ran on; for the other class, one dispatch of
+from a local run). Regenerate the fingerprints (`WRITE=1`, from CI's output) before
+collecting sections: a capture that fails its fingerprint is `# FAILED` and gives no section
+(its raw hash is still in the `# FAILED` line and the `sha256:` log line). A mismatching
+run's artifact (`tiered-goldens/hashes-fsr3.txt`) already holds the section for the class it
+ran on while its fingerprints pass; for the other class, one dispatch of
 `gh workflow run render-golden.yml --ref <branch> -f cpu_sample=true` samples eight runners
 and merges their sections per class (artifact `tiered-hash-sections`), so no rerun loop is
 needed. Run the ghost probe on a real GPU as well as lavapipe
