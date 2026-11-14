@@ -21,7 +21,8 @@ jobs:
     name: renderer-gate
     # Pinned (ubuntu-latest was 26.04 when pinned): the image's Mesa and LLVM key the exact
     # tiered hashes (tests/golden/render-tiered-hashes.txt), so an image change is a PR that
-    # regenerates them, not a surprise.
+    # regenerates them, not a surprise. They are also keyed on the runner's CPU vendor, which
+    # the image does not pin (ADR-0021 amendment 6): the file has an AMD and an Intel section.
     runs-on: ubuntu-26.04
     # Fifteen lavapipe captures (ADR-0019 added the distortion one and a bloom-off pair),
     # the outline probe, the R8 culling probe's five extra captures and ADR-0021's TAAU
@@ -32,8 +33,8 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
-      # The runner's CPU: llvmpipe JITs its shaders for the host CPU, so the exact tiered
-      # hashes are read against it (tests/golden/render-tiered-hashes.txt).
+      # The runner's CPU: llvmpipe's output depends on its vendor, which keys the exact tiered
+      # hashes (ADR-0021 amendment 6); the log says which section a run checked.
       - name: Runner CPU
         run: |
           lscpu
@@ -557,15 +558,16 @@ jobs:
   # (everything in one job ran about 64 minutes once FSR 3.1 joined it).
   tiered-temporal:
     name: tiered-temporal
-    # Pinned with renderer-gate (the exact tiered hashes are keyed on the image's lavapipe).
+    # Pinned with renderer-gate (the exact tiered hashes are keyed on the image's lavapipe and
+    # the runner's CPU vendor).
     runs-on: ubuntu-26.04
     # The FSR 3.1 ghost probe (three modes), four overlay cases (with TAAU Quality as the
     # reference) and eight tiered captures plus a reset run.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
-      # The runner's CPU: llvmpipe JITs its shaders for the host CPU, so the exact tiered
-      # hashes are read against it (tests/golden/render-tiered-hashes.txt).
+      # The runner's CPU: llvmpipe's output depends on its vendor, which keys the exact tiered
+      # hashes (ADR-0021 amendment 6); the log says which section a run checked.
       - name: Runner CPU
         run: |
           lscpu
@@ -711,21 +713,26 @@ jobs:
           RUN: xvfb-run -a
           MOBA_RENDER_PATH: tiered
           UPSCALERS: fsr3
-      # Does llvmpipe without AVX-512 (Mesa's GALLIUM_OVERRIDE_CPU_CAPS=avx clears avx512f)
-      # converge across CPUs? Evidence only.
-      - name: Tiered goldens, FSR 3.1, GALLIUM_OVERRIDE_CPU_CAPS=avx
-        continue-on-error: true
-        run: scripts/tiered-goldens.sh ./target/release/moba-client ./target/release/image-check tiered-goldens-noavx512
+      # The runner's own CPU class removed from the file must fail, loudly.
+      - name: A missing CPU class fails the check
+        run: |
+          class=amd; grep -q GenuineIntel /proc/cpuinfo && class=intel
+          awk -v c="cpu=$class" '/^device /{skip = ($NF == c)} !skip' \
+            tests/golden/render-tiered-hashes.txt > missing-class.txt
+          cat missing-class.txt
+          if TIERED_HASHES=missing-class.txt scripts/tiered-goldens.sh ./target/release/moba-client \
+            ./target/release/image-check tiered-goldens-missing > missing-class.log 2>&1; then
+            cat missing-class.log; echo "FAIL: a missing class passed"; exit 1
+          fi
+          grep -E 'no section for|::error::' missing-class.log
         env:
           RUN: xvfb-run -a
-          MOBA_RENDER_PATH: tiered
-          UPSCALERS: fsr3
-          GALLIUM_OVERRIDE_CPU_CAPS: avx
+          UPSCALERS: taau
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: tiered-cpu-sample-${{ matrix.sample }}
           path: |
             tiered-goldens
-            tiered-goldens-noavx512
+            missing-class.log
           if-no-files-found: ignore
