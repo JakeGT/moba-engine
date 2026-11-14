@@ -217,7 +217,8 @@ These rules are written so the review renders can check them ([silhouettes-and-s
 ## Ember Crossing: who stands where
 
 Today's map puts the blue spawn in the west (`[32, 128]`) and the red spawn in the east
-(`[224, 128]`), and the low sun comes from the west (`sun_dir = [-0.6, 0.35, 0.45]`).
+(`[224, 128]`), and the low sun comes from the west (today's `sun_dir = [-0.6, 0.35, 0.45]`;
+Golden Crossing's `[-0.885, 0.532, 0.465]`, [lighting-mood.md](lighting-mood.md#the-options)).
 
 **Decided (2026-11-14): Forge west, Void east.** The Forge sits with the low sun behind it;
 the Void holds the side where the long shadows fall, which suits it. Good key-art framing:

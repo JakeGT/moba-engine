@@ -19,10 +19,10 @@ review app under *Earlier rounds*.
 | | **1. The Kiln Warden** | **2. The Still Oracle** | **3. The Ash Strider** |
 |---|---|---|---|
 | Faction | Solar Forge | Void | Ashen (neutral nomads) |
-| Role, size class | Melee bruiser, **Hero M** (2.0 m) | Caster, **Hero M** (1.9 m, floats 0.2 m) | Marksman, **Hero S** (1.75 m) |
+| Role, size class | Melee bruiser, **Hero M** (2.0 m; the draft said M/L: derived, for the maintainer to confirm) | Caster, **Hero M** (1.9 m, floats 0.2 m) | Marksman, **Hero S** (1.75 m) |
 | Existing kit | **Blade** (760 HP, 2 m range) | **Mage** (500 HP, 8 m range) | **Ranger** (540 HP, 9 m range) |
 | One line | A guild-knight who carries a sun's collector array on his back and a fusion core in his hammer | A blind astronomer who folds space around her hands with gravity rings | A Crossing-born hunter armed with Builder relics scavenged from both empires |
-| 40 px tell (top third) | **Sun-disc collector halo** (≈ 1 m, radial fins) above stacked pauldrons; hammer head over the shoulder | **Crescent crown** of three hovering composite segments; **three slabs** hovering at the shoulders, angled down, with clear gaps | **Bone-white bow arc** held diagonally; hood and a scarf streaming sideways |
+| 40 px tell (top third) | **Sun-disc collector halo** (≈ 1 m, radial fins) above stacked pauldrons; hammer head over the shoulder | **Crescent crown** of three hovering Void-composite segments; **three slabs** hovering at the shoulders, angled down, with clear gaps | **Bone-white bow arc** held diagonally; hood and a scarf streaming sideways |
 | Silhouette | Base-heavy, wide stance, blocky | Tall, narrow, top-heavy, broken by gaps | Lean, asymmetric, a diagonal line of bow and scarf |
 | Materials | Sun-alloy plate, glazed heat-shield ceramic breastplate, an emitter lattice in the hammer head, leather; one thin white-gold seam glow | Void composite, gravity-ring alloy and tarnished silver wrist rings, violet-black cloth; **bone-white mask** with engraved star-map lines | Charcoal and ash-grey cloth, bone, a scavenged sun-alloy vambrace, Void composite plates, a bow of Builder alloy with a hard-light string |
 | Value read | Mid-light warm metal on mid ground | Dark body with **bone mask and silver rings** (≥ 10 % of area: see palette §5) | Mid-light cloth: **risk on sand** (see below) |
@@ -73,8 +73,8 @@ What they settled, and what is still for the modeller to decide:
 - One detail callout each for the Oracle and the Strider failed (the service returned no
   image, as in round G1); one of each survived.
 
-**Why the Kiln Warden.** The redesign made the case stronger: the most robust silhouette, hard-surface throughout (best for the AI-assisted
-pipeline), and the clearest "technology that looks like magic" read (a sun on his back, a
+**Why the Kiln Warden.** The redesign made the case stronger: the most robust silhouette, hard-surface throughout (best for hand modelling and
+baking), and the clearest "technology that looks like magic" read (a sun on his back, a
 contained star in his hammer).
 
 ### Earlier rounds (fantasy-era look)
@@ -150,7 +150,8 @@ as display names.
 ### Concept detail: the Still Oracle
 
 - **Read order at 40 px:** crescent crown → orbiting slabs (the gaps) → narrow robe.
-- **Crown:** five obsidian shards in a crescent, 15 cm above the head, not touching it.
+- **Crown:** three hovering Void-composite segments in a crescent, 15 cm above the head, not
+  touching it (one description with the table above; derived).
 - **Slabs:** three palm-sized basalt slabs on a slow orbit (period about 4 s) at shoulder
   height. They are the SIL-6 gaps, and they move to the casting hand on cast.
 - **Mask:** bone-white, smooth, with engraved star-chart lines and no eye holes.
@@ -174,7 +175,7 @@ as display names.
 
 ## Minions
 
-Rules: SIL-2 (≤ 0.8× the smallest hero, no capes, halos or orbiting parts); repeated by the
+Rules: SIL-2 (≤ 0.8× a Hero M, i.e. ≤ 1.6 m, siege judged by footprint and shape; no capes, halos or orbiting parts); repeated by the
 dozen, so they are VAT-animated and have a 1–2.5k triangle budget (roadmap §9.1); team
 identity from rims only.
 
@@ -222,7 +223,7 @@ Walker is the weakest; try a squatter, wider shape.
 - **Thrall C in brass is too saturated.** Measured, its body sits at median hue 77° with p90
   C 0.114. That is the centre of the enemy colour-blind zone and over the 0.11 accent cap
   (PAL-3). Bright brass is a PAL-3 risk for the whole Forge: keep it worn and dull, like
-  sun-brass `#A98C62` (C 0.067).
+  sun-alloy `#A98C62` (C 0.067).
 
 ## Structures
 

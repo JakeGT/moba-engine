@@ -50,7 +50,7 @@ the gameplay camera, at eight yaw angles.
 | Rule | What | Threshold |
 |---|---|---|
 | **SIL-1** | Height is within the unit's class range | as the table |
-| **SIL-2** | Minions are clearly smaller than heroes | Minion height ≤ **0.8×** the smallest hero; no capes, halos or orbiting parts on minions |
+| **SIL-2** | Minions are clearly smaller than heroes | Minion height ≤ **0.8×** a Hero M (≤ **1.6 m**); siege minions are exempt and judged by footprint and shape; no capes, halos or orbiting parts on minions. (Derived by the agent, for the maintainer to confirm: the draft's "0.8× the smallest hero" gave 1.28 m, which its own melee and ranged minion sizes break.) |
 | **SIL-3** | Heroes differ from each other | Silhouette IoU < **0.80** between any two heroes (best-aligned, 8 yaws), at 1080p |
 | **SIL-4** | Role reads in the top third | The top third of each hero's silhouette contains its role tell: a weapon head, shoulder mass, a staff tip or a bow arc |
 | **SIL-5** | The Forge tell | One radial element (crest, back-halo or shield boss) ≥ **8 %** of the silhouette area at 1440p |

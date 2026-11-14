@@ -27,7 +27,7 @@ Void force is gravity, Ashen force is pressure and hard light from scavenged Bui
 | Element | Fusion light and heat | Gravity and absence | Pressure, ash and hard light |
 | Visible source | Fusion lenses, lattice grilles, collector fins | Gravity rings, lensing cores, seams of floating parts | Scavenged Builder charms, hard-light bowstrings |
 | Core colour | White-gold `#FFF0C8` (C 0.05) | Violet-white `#D9CCFF` (C 0.07) | Pale ash `#D8D2C8` |
-| Accent | Thin amber edges, ≤ 5 % of the effect's area | Violet edge `#9F86D9`, thin | Dust ochre, low chroma |
+| Accent | Thin amber edges, ≤ 5 % of the effect's area | Violet edge `#A08CD0` (C 0.100), thin | Dust ochre, low chroma |
 | Light | Emits real light (RT/clustered lights): warm, hard-edged | Emits little light; **dark cores with bright rims**; screen-space lensing (distortion pass) | Little light: thin pale hard light only; reads by value against the ground |
 | Particles | Sparks falling with gravity, molten droplets, heat shimmer; **no smoke** | Debris and dust drifting **upwards**, slow orbits, faint glints, implosion | Sand ribbons, ash flakes, bone shards, dust trails |
 | Motion | Fast start, heavy fall-off: hammer blows | Slow wind-up, sudden collapse: a held breath | Swirls and gusts |
@@ -57,7 +57,7 @@ In round 1 ([review app](README.md#review-app), *VFX language*), the **Void lang
 generated true to the bible**: an implosion with a thin violet rim, a dark lens with a bright
 edge, and stones orbiting upwards. The **Forge hammer strike came out as orange fire and black
 smoke**, even though the prompt asked for white-gold. Generators (and artists) default "fire"
-to orange, which sits in the enemy hue zone (28°, PAL-5). Forge heat must be specified as
+to orange, which sits in the enemy hue zone (28°, PAL-4). Forge heat must be specified as
 near-white with a pale gold edge every time, and the review renders must check the hue of
 Forge effects. Round 3 retried it with an explicit "no orange" prompt. The shockwave
 ring became white-gold, but orange flames still appeared at the impact point
@@ -104,7 +104,7 @@ R5 rules stay: enemy telegraphs are exempt from every cull and budget and keep a
 
 | Rule | What | Threshold |
 |---|---|---|
-| **VFX-1** | Body colours obey PAL-4 and PAL-5 | Emissive C ≤ 0.06 inside team hue zones; ≤ 0.12 outside |
+| **VFX-1** | Body colours obey PAL-4 and PAL-5 | Emissive C ≤ 0.06 inside team hue zones; ≤ 0.12 outside (the draft's 0.13 aligned with PAL-5: derived) |
 | **VFX-2** | VFX light (RT or clustered) doesn't blow the board | Ground lit by ability light stays L ≤ **0.85** (VAL-4) after **0.3 s** |
 | **VFX-3** | Ally effects dimmed | R5 allied-VFX opacity setting; alpha ≤ **75 %** |
 | **VFX-4** | Overdraw and particle budgets | R5 per-tier budgets (Low 1.5 … Ultra 8 screens) unchanged |
