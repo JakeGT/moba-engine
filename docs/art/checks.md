@@ -58,7 +58,7 @@ enforced on every asset rather than remembered. No check is built yet.
 | PBR-WEAR-1 | Dust ≤ 20 % on units, lower body only | review renders | materials | approved |
 | PBR-FORGE-1 | Sun-alloy C ≤ 0.075 (measured brass is 0.072); in-play gilt and sun-glass tint C ≤ 0.07 | content-check | materials §3.1 | approved; the 0.075 check on sun-alloy derived by the agent, for the maintainer to confirm |
 | PBR-HEAT-1 | In playable space: temper colours straw to purple only (no blue); bronze patina statuary brown-black (no verdigris) | review renders | materials §3.1, §4 | approved |
-| PBR-VOID-1 | Void body materials median albedo luma ≥ 45 (p1 ≥ about 40 for weathering); ≥ 15 % of each Void hero's projected area in pewter, silver or bone | content-check + review renders | materials §3.2 | approved; median/p1 reading and projected area derived by the agent, for the maintainer to confirm |
+| PBR-VOID-1 | Void body materials median albedo luma ≥ 45 (p1 ≥ 40 for weathering, tighter than materials §4 rule 2); ≥ 15 % of each Void hero's projected area in pewter, silver or bone | content-check + review renders | materials §3.2 | approved; median/p1 reading and projected area derived by the agent, for the maintainer to confirm |
 | PBR-VOID-2 | Void emissive hue: violet 284–345° main, teal 167–211° minor | content-check | materials §3.2 | approved |
 | TINT-1 | Tiered renderer policy: `team_tint_policy = zero` once the rims pass CON-2 (ADR-0023 §8c); Compat keeps the team tint. Content-check only verifies the team mask is present | renderer setting + content-check (mask present) | materials §1.1 | approved |
 
@@ -77,7 +77,7 @@ enforced on every asset rather than remembered. No check is built yet.
 6. **With the HUD work, once the designer is engaged:** UI-1 to UI-4.
 
 Only the emissive caps (PBR-EMIT-1 to PBR-EMIT-3; materials §8, item 17) are tuned on the
-first real Ember Crossing captures. Every other threshold is approved; any change to it after
+first real Ember Crossing captures. Every other threshold is approved (UI-1 to UI-4 stay proposed until the designer is engaged); any change to it after
 the captures needs a maintainer decision recorded in the [decision log](README.md#decision-log).
 A rule moves from **approved** to **enforced** when its check is built and those captures
 confirm it doesn't fail good art.
