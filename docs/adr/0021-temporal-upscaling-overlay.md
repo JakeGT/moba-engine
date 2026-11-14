@@ -1556,13 +1556,16 @@ the required `renderer-gate` on some attempts and passed it on others.
 
    | Runner CPU | Family/model | AVX-512 | Runs | TAAU low | FSR 3.1 low | Set |
    |---|---|---|---|---|---|---|
-   | AMD EPYC 7763 (Zen 3) | 25 / 1 | no | 4 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
-   | AMD EPYC 9V74 (Zen 4) | 25 / 17 | yes | 5 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
-   | AMD EPYC 9V45 (Zen 5) | 26 / 2 | yes | 1 sampler, 2 `tiered-temporal` (FSR), 1 `renderer-gate` (TAAU) | `31b525c6…` | `3a0c1b01…` | AMD |
-   | Intel Xeon 6975P-C (Granite Rapids) | 6 / 173 | yes (+FP16) | 2 sampler, 1 `renderer-gate` (TAAU) | `5efbb97d…` | `49f1afa0…` | Intel |
+   | AMD EPYC 7763 (Zen 3) | 25 / 1 | no | 6 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
+   | AMD EPYC 9V74 (Zen 4) | 25 / 17 | yes | 7 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
+   | AMD EPYC 9V45 (Zen 5) | 26 / 2 | yes | 2 sampler, 2 `tiered-temporal` (FSR), 1 `renderer-gate` (TAAU) | `31b525c6…` | `3a0c1b01…` | AMD |
+   | Intel Xeon 6975P-C (Granite Rapids) | 6 / 173 | yes (+FP16) | 3 sampler, 1 `renderer-gate` (TAAU) | `5efbb97d…` | `49f1afa0…` | Intel |
+   | Intel Xeon Platinum 8573C (Emerald Rapids) | 6 / 207 | yes | 2 sampler | `5efbb97d…` | `49f1afa0…` | Intel |
    | not logged (#373's `renderer-gate`, job 132542577022) | – | – | 1 (TAAU) | `5efbb97d…` | – | Intel |
 
-   Runs 43627278470 and 43630461431. #373 changed no render code, so its failure was main's
+   Runs 43627278470, 43630461431 and 43634640902 (the dispatch-only sampler of item 5, at
+   `efb446e`: eight legs, five AMD and three Intel, whose merged sections are byte-identical
+   to the committed file). #373 changed no render code, so its failure was main's
    own Intel bytes. The AMD set is amendment 4's hashes (the file's only set until now).
    "Sampler" is a temporary six-runner matrix job in #374's draft (TAAU and FSR 3.1 on the
    same runner), removed before merge; item 5's dispatch-only `tiered-hash-sample` replaces
@@ -1576,8 +1579,8 @@ the required `renderer-gate` on some attempts and passed it on others.
    Zen 5 (with it). Supporting only: with Mesa's `GALLIUM_OVERRIDE_CPU_CAPS=avx` (which clears
    llvmpipe's `has_avx512f`; the caps were dumped without the override, `has_avx512f = 1`, not
    with it), each of run 43627278470's six sampler runners rendered the same FSR 3.1 bytes as
-   without it. **Only one Intel model has been seen** (the 6975P-C), so another Intel model
-   could still prove to be its own class.
+   without it. **Two Intel models have been seen** (the 6975P-C and the Platinum 8573C), and
+   they agree; another model could still prove to be its own class (item 4).
 2. **Why (most likely).** llvmpipe's JIT uses x86's approximate reciprocal square root
    (`llvm.x86.avx.rsqrt.ps.256` and `llvm.x86.sse.rsqrt.ps` are in the bundled local
    `libvulkan_lvp.so`; CI's Mesa 26.0.8 build was not inspected). RSQRTPS is specified only to

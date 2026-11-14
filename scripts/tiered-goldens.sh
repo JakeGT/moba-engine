@@ -17,7 +17,7 @@
 #     from /proc/cpuinfo): the same lavapipe renders other bytes on Intel than on AMD
 #     runners, most likely through llvmpipe's RSQRTPS, an approximation whose bits are the
 #     vendor's own. AVX-512 does not explain the split (Zen 3 without it matches Zen 4 and 5
-#     with it); only one Intel model has been seen. On CI (GITHUB_ACTIONS) every back end
+#     with it); two Intel models have been seen, and they agree. On CI (GITHUB_ACTIONS) every back end
 #     fails when vulkan-probe names no device, when the file has no section, when the device
 #     is in the file but this CPU class is not, or when the file predates the classes (a
 #     `device` line without cpu=). When the image's lavapipe itself changed (a device the
