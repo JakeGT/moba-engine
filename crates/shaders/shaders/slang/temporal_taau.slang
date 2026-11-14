@@ -44,7 +44,7 @@ struct TaauPush
     float2 jitter;          // render pixels, x right, y down
     uint2 prev_render_size; // the previous frame's render size (its depth's valid region)
     float2 history_scale;   // the history's valid uv region (1, 1: the whole output)
-    float p22;              // linear depth = p23 / (depth + p22)
+    float p22;              // linear depth = p23 / (depth + p22), reversed-Z depth
     float p23;
     float sharpness;        // RCAS amount 0..1 (0 = off)
     uint flags;             // 1 reset, 2 sharpen, debug view << 8
@@ -143,8 +143,8 @@ float3 resolve_pixel(int2 out_pixel, bool store)
     float confidence = 0.0;
     float3 m1 = float3(0.0, 0.0, 0.0);
     float3 m2 = float3(0.0, 0.0, 0.0);
-    // 1. The nearest depth of the 3x3 cross.
-    float nearest = 2.0;
+    // 1. The nearest depth of the 3x3 cross (reversed-Z, ADR-0023 §1c: larger is nearer).
+    float nearest = -1.0;
     int2 nearest_pixel = base;
     for (int y = -1; y <= 1; y++)
     {
@@ -164,7 +164,7 @@ float3 resolve_pixel(int2 out_pixel, bool store)
             if (x == 0 || y == 0)
             {
                 float z = depth.Load(int3(p, 0));
-                if (z < nearest)
+                if (z > nearest)
                 {
                     nearest = z;
                     nearest_pixel = p;

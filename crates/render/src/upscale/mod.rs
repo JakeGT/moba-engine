@@ -4,10 +4,11 @@
 //!
 //! **Inputs** ([`UpscaleInputs`]) are all at render resolution, in the render sub-rectangle
 //! at the top-left of their allocation: the jittered linear HDR colour, depth (`D32_SFLOAT`,
-//! not inverted, finite far plane), `motion` (`R16G16_SFLOAT`, render pixels from the current
-//! sample to its previous position, x right and y down, without jitter: every back end takes
-//! it with a scale of (1, 1)), `reactive` and `tc_mask` (`R8_UNORM`), a 1×1 `R32_SFLOAT`
-//! linear exposure multiplier, and the frame's scalars. The graph moves each input to
+//! reversed-Z with 1 near and 0 far, finite far plane: ADR-0023 §1c), `motion`
+//! (`R16G16_SFLOAT`, render pixels from the current sample to its previous position, x right
+//! and y down, without jitter: every back end takes it with a scale of (1, 1)), `reactive`
+//! and `tc_mask` (`R8_UNORM`), a 1×1 `R32_SFLOAT` linear exposure multiplier, and the frame's
+//! scalars. The graph moves each input to
 //! `SHADER_READ_ONLY_OPTIMAL` and the output ([`UpscaleOutput`], `RGBA16F` at output
 //! resolution) to `GENERAL` before the `temporal` pass; a back end records only its own work
 //! (its dispatches and the barriers of the resources it owns, such as its history).
@@ -42,7 +43,8 @@ pub(crate) struct UpscaleImage {
 pub(crate) struct UpscaleInputs {
     /// The jittered linear HDR colour.
     pub(crate) color: UpscaleImage,
-    /// Depth, `D32_SFLOAT`, 0 near, 1 far.
+    /// Depth, `D32_SFLOAT`, reversed-Z: 1 near, 0 far, finite far plane (ADR-0023 §1c; the
+    /// upscalers run only on Tiered, which is always reversed).
     pub(crate) depth: UpscaleImage,
     /// Motion vectors, `R16G16_SFLOAT`, render pixels to the previous position.
     pub(crate) motion: UpscaleImage,

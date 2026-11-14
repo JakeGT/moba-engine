@@ -15,6 +15,7 @@
 // Output: (visibility, distance to the eye) for the depth-aware blur, which clamps.
 
 #include "post.glsl"
+#include "depth.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D depth_texture;
 
@@ -34,11 +35,11 @@ layout(location = 0) out vec2 out_ao;
 const float PI = 3.14159265;
 const float HALF_PI = 1.57079633;
 
-// Linear view depth of an NDC depth (perspective, depth 0 at the near plane).
+// Linear view depth of an NDC depth (perspective; the depth convention of `depth.glsl`).
 float view_depth_of(float depth) {
     float near = push.planes.x;
     float far = push.planes.y;
-    return near * far / max(far - depth * (far - near), 1e-6);
+    return DEPTH_VIEW(depth, near, far);
 }
 
 // World position of the render pixel centred at `pixel_centre` with NDC depth `depth`.
@@ -62,7 +63,7 @@ void main() {
     ivec2 ao_pixel = ivec2(gl_FragCoord.xy);
     ivec2 pixel = ao_pixel * 2;
     float depth = depth_at(pixel);
-    if (depth >= 1.0) {
+    if (DEPTH_IS_FAR(depth)) {
         out_ao = vec2(1.0, 65000.0);
         return;
     }

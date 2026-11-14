@@ -1,6 +1,6 @@
 //! The shared driver of the tiered smoke binaries, `bindless-smoke`, `rt-smoke` (ADR-0020
-//! gate 3) and `fsr3-smoke` (ADR-0021 §4b): reads the environment, runs one test from
-//! `moba-render` and reports it.
+//! gate 3), `fsr3-smoke` (ADR-0021 §4b) and `gbuffer-smoke` (ADR-0023 gate 1): reads the
+//! environment, runs one test from `moba-render` and reports it.
 //!
 //! - `MOBA_RENDER_PATH` (default `auto`): the device choice. A CPU device (lavapipe) needs
 //!   `tiered`; on a GPU admitted to the tiered path `auto` picks it.

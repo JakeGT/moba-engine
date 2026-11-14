@@ -10,7 +10,9 @@
 //   view-projection (no fragment shader);
 // - `DEPTH_PREPASS` (R2b) writes the main view's depth before shading (High and up) and
 //   passes the instance's outline slot to prepass.frag (the screen-space outline ID target);
-// - `OUTLINE_HULL` (R2b) draws the inverted-hull outline of outlined instances (Low/Medium).
+// - `OUTLINE_HULL` (R2b) draws the inverted-hull outline of outlined instances (Low/Medium);
+// - `GBUFFER` (with `MOTION_VECTORS`, ADR-0023 §1e) is the tiered G-buffer prepass: the
+//   scene's varyings, the outline slot and the motion.
 //
 // `gl_Position` is invariant in every permutation, so the pre-pass and the scene pass
 // compute bit-identical depths for the same vertex (ADR-0016).
@@ -66,6 +68,11 @@ layout(location = 2) out vec3 out_world_pos;
 layout(location = 3) out vec2 out_uv;
 layout(location = 4) out vec4 out_world_tangent;
 #endif
+#ifdef GBUFFER
+// ADR-0023 §1e: the G-buffer prepass takes the scene's varyings, the outline slot (the unit
+// mask) and the motion (with MOTION_VECTORS).
+layout(location = 13) flat out uint out_outline_slot;
+#endif
 
 void main() {
     Instance instance = instance_data.instances[gl_InstanceIndex];
@@ -95,6 +102,16 @@ void main() {
     out_world_normal = normalize(mat3(transpose(inverse(instance.model))) * in_normal);
     out_color = instance.color.rgb;
     out_world_pos = world.xyz;
+#ifdef GBUFFER
+    out_outline_slot = instance.params.x;
+#ifdef MOTION_VECTORS
+    uint index = uint(gl_InstanceIndex);
+    vec3 previous = prev_valid(index)
+        ? (prev_model(index) * vec4(in_position, 1.0)).xyz
+        : world.xyz;
+    write_motion(world.xyz, previous);
+#endif
+#endif
 #endif
 #ifdef MATERIAL_TEXTURED
     out_uv = in_uv;

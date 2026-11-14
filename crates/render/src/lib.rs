@@ -17,6 +17,7 @@ pub mod bench_support;
 mod bindless;
 mod caps;
 mod cull;
+mod depth;
 mod descriptor_budget;
 mod device;
 pub mod distortion;
@@ -29,6 +30,7 @@ mod font_metrics;
 mod frame_graph;
 #[cfg(feature = "fsr3")]
 mod fsr3;
+mod gbuffer;
 mod graph;
 mod instance;
 mod lighting;
@@ -113,7 +115,7 @@ pub use scene::{
     VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
 pub use slang_smoke::{SlangSmoke, slang_smoke};
-pub use smoke::{SmokeReport, bindless_smoke, fsr3_smoke, rt_smoke};
+pub use smoke::{SmokeReport, bindless_smoke, fsr3_smoke, gbuffer_smoke, rt_smoke};
 
 /// Environment descriptor (SH-L2 diffuse, intensity) accepted by [`Renderer::set_environment`].
 pub use moba_assets::EnvironmentDesc;

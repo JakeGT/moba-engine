@@ -32,7 +32,25 @@ layout(location = 0) in vec3 in_normal;
 layout(location = 1) in vec3 in_world_pos;
 layout(location = 2) in float in_occlusion;
 
+#ifdef GBUFFER
+// ADR-0023 §1e: the tiered G-buffer prepass. The same surface as the forward shading,
+// encoded (gbuffer.glsl) next to the motion; the forward `scene` still shades in N2a.
+#include "gbuffer.glsl"
+#define MOTION_VECTORS_FRAGMENT
+#include "motion.glsl"
+layout(location = 14) in vec4 in_motion_current;
+layout(location = 15) in vec4 in_motion_previous;
+layout(location = 0) out vec4 out_motion;
+layout(location = 1) out vec4 out_gb0;
+layout(location = 2) out vec4 out_gb1;
+layout(location = 3) out vec4 out_gb2;
+// The surface `flat_terrain` or `splat_terrain` built, instead of its shading.
+Surface gbuffer_surface;
+#define TERRAIN_SHADE(s) (gbuffer_surface = (s), vec3(0.0))
+#else
 layout(location = 0) out vec4 out_color;
+#define TERRAIN_SHADE(s) shade(s)
+#endif
 
 // World-space pixel size for the decal edges (set in main, in uniform control flow).
 float decal_aa;
@@ -57,7 +75,7 @@ vec3 flat_terrain(vec3 normal) {
     vec3 albedo = apply_paint_decals(mix(grass, line, grid), in_world_pos, decal_aa);
     Surface surface = default_surface(albedo, normal, in_world_pos, camera.rim_color.w);
     surface.rim = 0.0;
-    return shade(surface);
+    return TERRAIN_SHADE(surface);
 }
 
 vec2 decode_normal(vec2 encoded) {
@@ -158,13 +176,27 @@ vec3 splat_terrain(vec3 geometric) {
     surface.occlusion = gtao ? mix(1.0, relief, 0.75) : 1.0;
     surface.geometric_normal = geometric;
     surface.rim = 0.0;
-    return shade(surface);
+    return TERRAIN_SHADE(surface);
 }
 
 void main() {
     decal_aa = decal_pixel(in_world_pos);
     vec3 geometric = normalize(in_normal);
     vec3 lit = terrain_block.params.x < 0.5 ? flat_terrain(geometric) : splat_terrain(geometric);
+#ifdef GBUFFER
+    out_motion = vec4(motion_pixels(in_motion_current, in_motion_previous), 0.0, 1.0);
+    SurfaceParams params;
+    params.base_color = gbuffer_surface.albedo;
+    params.metallic = gbuffer_surface.metallic;
+    params.normal = gbuffer_surface.normal;
+    params.roughness = gbuffer_surface.roughness;
+    params.model = GBUFFER_MODEL_STANDARD;
+    params.model_data = vec3(0.04, 0.0, 0.0);
+    params.ao = gbuffer_surface.occlusion;
+    params.flags = 0u; // The fog of war darkens the ground.
+    params.rim_slot = 0u;
+    encode_gbuffer(params, out_gb0, out_gb1, out_gb2);
+#else
 
     lit = apply_fog_of_war(lit, in_world_pos);
 
@@ -182,4 +214,5 @@ void main() {
     lit = apply_glow_decals(lit, in_world_pos, decal_aa, mark);
 
     out_color = vec4(lit, 1.0 - mark);
+#endif
 }

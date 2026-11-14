@@ -24,6 +24,7 @@
 #include "atmosphere.glsl"
 #include "decals.glsl"
 #include "environment.glsl"
+#include "depth.glsl"
 
 #ifdef WATER_REFRACTION
 layout(set = 2, binding = 1) uniform sampler2D refraction;
@@ -124,7 +125,7 @@ void main() {
     vec2 region = 1.0 / environment.screen.xy;
     ivec2 refracted = ivec2(clamp(gl_FragCoord.xy + offset * region, vec2(0.5), region - 0.5));
     // Rejected where the offset lands on geometry in front of the water.
-    if (texelFetch(scene_depth, refracted, 0).r < gl_FragCoord.z) {
+    if (DEPTH_NEARER(texelFetch(scene_depth, refracted, 0).r, gl_FragCoord.z)) {
         refracted = ivec2(gl_FragCoord.xy);
     }
     behind = texelFetch(refraction, refracted, 0).rgb;

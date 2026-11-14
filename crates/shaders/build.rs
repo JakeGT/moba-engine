@@ -198,12 +198,85 @@ const PERMUTATIONS: &[Permutation] = &[
     Permutation {
         source: "water.frag",
         output: "water_tiered.frag",
-        defines: &["MOBA_NO_GLOW_DECALS"],
+        defines: &["MOBA_NO_GLOW_DECALS", "MOBA_REVERSED_Z"],
     },
     Permutation {
         source: "water.frag",
         output: "water_refraction_tiered.frag",
-        defines: &["WATER_REFRACTION", "MOBA_NO_GLOW_DECALS"],
+        defines: &["WATER_REFRACTION", "MOBA_NO_GLOW_DECALS", "MOBA_REVERSED_Z"],
+    },
+    // The tiered G-buffer prepass (ADR-0023 §1e): the scene's surfaces encoded into gb0-gb2
+    // next to the motion; `PREPASS_IDS` also writes the unit outline slot.
+    Permutation {
+        source: "unit.vert",
+        output: "unit_gbuffer.vert",
+        defines: &["GBUFFER", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "unit.vert",
+        output: "unit_textured_gbuffer.vert",
+        defines: &["MATERIAL_TEXTURED", "GBUFFER", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "skinned.vert",
+        output: "skinned_gbuffer.vert",
+        defines: &["GBUFFER", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "skinned.vert",
+        output: "skinned_textured_gbuffer.vert",
+        defines: &["MATERIAL_TEXTURED", "GBUFFER", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "vat.vert",
+        output: "vat_gbuffer.vert",
+        defines: &["GBUFFER", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_gbuffer.frag",
+        defines: &["GBUFFER"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_gbuffer_ids.frag",
+        defines: &["GBUFFER", "PREPASS_IDS"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_textured_gbuffer.frag",
+        defines: &["MATERIAL_TEXTURED", "GBUFFER"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_textured_gbuffer_ids.frag",
+        defines: &["MATERIAL_TEXTURED", "GBUFFER", "PREPASS_IDS"],
+    },
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_gbuffer.frag",
+        defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS"],
+    },
+    Permutation {
+        source: "foliage.frag",
+        output: "foliage_gbuffer.frag",
+        defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS"],
+    },
+    // Reversed-Z depth consumers on Tiered (ADR-0023 §1c); Compat keeps the default builds.
+    Permutation {
+        source: "sky.vert",
+        output: "sky_reversed.vert",
+        defines: &["MOBA_REVERSED_Z"],
+    },
+    Permutation {
+        source: "gtao.frag",
+        output: "gtao_reversed.frag",
+        defines: &["MOBA_REVERSED_Z"],
+    },
+    Permutation {
+        source: "contact_shadows.frag",
+        output: "contact_shadows_reversed.frag",
+        defines: &["MOBA_REVERSED_Z"],
     },
     Permutation {
         source: "vfx.vert",
@@ -313,9 +386,9 @@ const FSR3_PASSES: &[VendorPass] = &[
 ];
 
 /// Every FSR pass's permutation: HLSL-style GPU code, 32-bit math (no `FFX_HALF`), linear HDR
-/// colour, render-resolution motion vectors without jitter, non-inverted depth (ADR-0021 §2a),
-/// and the reference Lanczos kernels (the SDK's choice on every device but 32/64-wide AMD
-/// ones, where it takes a lookup table instead). `FFX_HLSL_SM` and
+/// colour, render-resolution motion vectors without jitter, inverted (reversed-Z) depth
+/// (ADR-0021 §2a, ADR-0023 §1c), and the reference Lanczos kernels (the SDK's choice on every
+/// device but 32/64-wide AMD ones, where it takes a lookup table instead). `FFX_HLSL_SM` and
 /// `FFX_IMPLICIT_SHADER_REGISTER_BINDING_HLSL` are what the SDK's own build defines.
 const FSR3_DEFINES: &[&str] = &[
     "FFX_GPU=1",
@@ -326,7 +399,7 @@ const FSR3_DEFINES: &[&str] = &[
     "FFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=1",
     "FFX_FSR3UPSCALER_OPTION_LOW_RESOLUTION_MOTION_VECTORS=1",
     "FFX_FSR3UPSCALER_OPTION_JITTERED_MOTION_VECTORS=0",
-    "FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0",
+    "FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1",
     "FFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE=0",
 ];
 

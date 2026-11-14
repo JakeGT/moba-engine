@@ -42,6 +42,7 @@ use bytemuck::{Pod, Zeroable, bytes_of};
 use gpu_allocator::MemoryLocation;
 use moba_core::math::{Mat4, Vec3, Vec4};
 
+use crate::depth::DepthConvention;
 use crate::device::DeviceContext;
 use crate::distortion::{HazeBounds, HazeRegion};
 use crate::error::{RenderError, RenderResult};
@@ -517,6 +518,8 @@ pub(crate) struct VfxPass {
     temporal: bool,
     /// The overlay's target format (Tiered, ADR-0021 §5b).
     overlay_format: Option<vk::Format>,
+    /// The scene's depth convention (ADR-0023 §1c: reversed-Z on Tiered).
+    depth: DepthConvention,
     latest: Option<VfxStats>,
     next_sequence: u64,
 }
@@ -549,6 +552,7 @@ impl VfxPass {
         oit: bool,
         temporal: bool,
         overlay_format: Option<vk::Format>,
+        depth: DepthConvention,
     ) -> RenderResult<Self> {
         let capacity = budget.max_particles.max(WORKGROUP);
         let mesh_region = (capacity / 8).max(1);
@@ -758,6 +762,7 @@ impl VfxPass {
             &TargetFormats {
                 hdr: hdr_format,
                 depth: depth_format,
+                depth_compare: depth.compare(),
                 temporal,
                 overlay: overlay_format,
             },
@@ -818,6 +823,7 @@ impl VfxPass {
             depth_format,
             temporal,
             overlay_format,
+            depth,
             latest: None,
             next_sequence: 0,
         };
@@ -850,6 +856,7 @@ impl VfxPass {
             &TargetFormats {
                 hdr: self.hdr_format,
                 depth: self.depth_format,
+                depth_compare: self.depth.compare(),
                 temporal: self.temporal,
                 overlay: self.overlay_format,
             },
@@ -1134,8 +1141,11 @@ impl VfxPass {
 
         let camera = scene.camera;
         let (right, up) = camera_axes(camera.view_proj);
+        // ADR-0023 §1c: the GPU's matrices in the scene's depth convention (the linear depth
+        // `p23 / (d + p22)` holds for either).
+        let gpu = |m| self.depth.view_proj(m, camera.near, camera.far);
         let soft = if self.budget.soft_particles {
-            depth_params(camera.view_proj)
+            depth_params(gpu(camera.view_proj))
         } else {
             None
         };
@@ -1158,8 +1168,7 @@ impl VfxPass {
         let uniform = VfxUniform {
             // ADR-0021 §1: rasterised with the jittered matrix; the billboard basis above
             // stays the client's.
-            view_proj: temporal
-                .map_or(camera.view_proj, |temporal| temporal.jittered)
+            view_proj: gpu(temporal.map_or(camera.view_proj, |temporal| temporal.jittered))
                 .to_cols_array_2d(),
             camera_right: right.extend(dt).to_array(),
             camera_up: up.extend(self.allocator.clock as f32).to_array(),
@@ -1185,9 +1194,8 @@ impl VfxPass {
                 },
             ],
             mesh_indices,
-            view_proj_unjittered: camera.view_proj.to_cols_array_2d(),
-            prev_view_proj: temporal
-                .map_or(camera.view_proj, |temporal| temporal.previous)
+            view_proj_unjittered: gpu(camera.view_proj).to_cols_array_2d(),
+            prev_view_proj: gpu(temporal.map_or(camera.view_proj, |temporal| temporal.previous))
                 .to_cols_array_2d(),
             temporal: [width, height, 0.0, 0.0],
             overlay: extras
@@ -1856,6 +1864,8 @@ struct PipelineLayouts {
 struct TargetFormats {
     hdr: vk::Format,
     depth: vk::Format,
+    /// The depth test (ADR-0023 §1c).
+    depth_compare: vk::CompareOp,
     /// The colour draws add the reactive mask; the motion-only draw is built too (ADR-0021
     /// §2d, amendment 4 item 13).
     temporal: bool,
@@ -1873,6 +1883,7 @@ fn build_pipelines(
     meshes: bool,
 ) -> RenderResult<VfxPipelines> {
     let (hdr_format, depth_format, temporal) = (targets.hdr, targets.depth, targets.temporal);
+    let depth_compare = targets.depth_compare;
     let (layout, resolve_layout) = (layouts.particles, layouts.resolve);
     let module = |name| shaders.module(device, name);
     let compute = module("vfx_simulate.comp")?;
@@ -1930,6 +1941,7 @@ fn build_pipelines(
             formats: &formats[..count],
             blends: &blends[..count],
             depth_format,
+            depth_compare,
             mesh_input: false,
         },
     )?;
@@ -1944,6 +1956,7 @@ fn build_pipelines(
                 formats: &formats[..count],
                 blends: &blends[..count],
                 depth_format,
+                depth_compare,
                 mesh_input: true,
             },
         )?)
@@ -1960,6 +1973,7 @@ fn build_pipelines(
             formats: &[crate::frame_graph::MOTION_FORMAT],
             blends: &[Blend::Motion],
             depth_format,
+            depth_compare,
             mesh_input,
         };
         let sprite = particle_pipeline(device, &spec(sprite_vertex.handle(), false))?;
@@ -1985,6 +1999,7 @@ fn build_pipelines(
                 formats: &[hdr_format],
                 blends: &[Blend::Over],
                 depth_format: vk::Format::UNDEFINED,
+                depth_compare: vk::CompareOp::ALWAYS,
                 mesh_input: false,
             },
         )?)
@@ -2011,6 +2026,7 @@ fn build_pipelines(
                     formats: &formats[..count],
                     blends: &blends[..count],
                     depth_format,
+                    depth_compare,
                     mesh_input: false,
                 },
             )?)
@@ -2031,6 +2047,7 @@ fn build_pipelines(
                     blends: &[Blend::Premultiplied],
                     // The overlay depth has the main depth's format.
                     depth_format,
+                    depth_compare,
                     mesh_input: false,
                 },
             )?)
@@ -2079,6 +2096,8 @@ struct ParticleSpec<'a> {
     blends: &'a [Blend],
     /// `UNDEFINED` for no depth attachment (the resolve).
     depth_format: vk::Format,
+    /// The depth test with a depth attachment (ADR-0023 §1c).
+    depth_compare: vk::CompareOp,
     /// Static mesh vertices (position, normal) at binding 0.
     mesh_input: bool,
 }
@@ -2179,7 +2198,7 @@ fn particle_pipeline(
         .depth_test_enable(depth_test)
         .depth_write_enable(false)
         .depth_compare_op(if depth_test {
-            vk::CompareOp::LESS_OR_EQUAL
+            spec.depth_compare
         } else {
             vk::CompareOp::ALWAYS
         });

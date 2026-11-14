@@ -353,8 +353,10 @@ pub const REQUIRED_LIMITS: &[(&str, u64)] = &[
     ("maxPerStageUpdateAfterBindResources", BINDLESS_TOTAL),
     // ADR-0021 Amendment 2 item 15: OIT with the temporal prepass outputs writes five colour
     // attachments at once (Vulkan only guarantees four); the fragment stage must be able to
-    // output to all five, and they count against its combined output resources.
-    ("maxColorAttachments", 5),
+    // output to all five, and they count against its combined output resources. ADR-0023
+    // §1d: the G-buffer pass binds five too (motion, gb0–gb2 and the unit mask), and 8 (the
+    // Roadmap 2024 / Vulkan 1.4 value, which the tier-floor GPUs report) leaves N3 room.
+    ("maxColorAttachments", 8),
     ("maxFragmentOutputAttachments", 5),
     ("maxFragmentCombinedOutputResources", 5),
 ];
