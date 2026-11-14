@@ -1,0 +1,25 @@
+CONTENT CREDITS
+
+Generated from the provenance.toml manifests by `content-check --provenance`. Do not edit.
+
+Original content
+  Sentinel animation set - MOBA Engine contributors - MIT OR Apache-2.0
+  Lighting environments (meadow, ember, frost) - MOBA Engine contributors - MIT OR Apache-2.0
+  Colour-grading LUTs (ember, frost, meadow) - MOBA Engine contributors - MIT OR Apache-2.0
+  Map visuals descriptors (ember, frost, grass) - MOBA Engine contributors - MIT OR Apache-2.0
+  Baked map ambient occlusion (ember, frost) - MOBA Engine contributors - MIT OR Apache-2.0
+  Sentinel sample material descriptor - MOBA Engine contributors - MIT OR Apache-2.0
+  Sentinel sample hero model - MOBA Engine contributors - MIT OR Apache-2.0
+  Sentinel sample hero model, rigged and animated - MOBA Engine contributors - MIT OR Apache-2.0
+  Sample map meshes (crystal prop, rampart wall) - MOBA Engine contributors - MIT OR Apache-2.0
+  Sentinel sample material textures - MOBA Engine contributors - MIT OR Apache-2.0
+  Terrain layer textures (grass, dirt, rock, moss, pebbles) - MOBA Engine contributors - MIT OR Apache-2.0
+  Minion vertex-animation texture - MOBA Engine contributors - MIT OR Apache-2.0
+  Particle sprite atlas - MOBA Engine contributors - MIT OR Apache-2.0
+  Effect descriptors and bindings - MOBA Engine contributors - MIT OR Apache-2.0
+
+Third-party content
+  (none)
+
+AI-generated content
+  (none)

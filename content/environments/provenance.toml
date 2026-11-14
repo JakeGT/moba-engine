@@ -1,0 +1,11 @@
+# Provenance of every file in this directory (A0, ADR-0022). `content-check --provenance`
+# checks it and generates THIRD_PARTY.md's content section, content/CREDITS.txt and
+# content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
+
+[[asset]]
+files = ["ember.ktx2", "frost.ktx2", "meadow.ktx2", "*.toml"]
+title = "Lighting environments (meadow, ember, frost)"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Analytic skies (crates/tools/src/bin/env-bake/sky.rs) baked by env-bake (scripts/bake-sample-environments.sh); no external HDRI"
