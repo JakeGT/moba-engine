@@ -19,8 +19,22 @@ default = ["sim", "net"]
 sim = ["dep:moba-sim", "dep:moba-core", "dep:moba-ecs", "dep:moba-game", "dep:moba-nav"]
 # UDP transport, protocol, prediction and snapshots.
 net = ["dep:moba-net", "sim"]
-# Vulkan renderer and winit platform. Pulls GPU/windowing dependencies.
-render = ["dep:moba-render", "dep:moba-platform"]
+# Vulkan renderer and winit platform. Pulls GPU/windowing dependencies. Includes the open
+# build's `fsr3` upscaler feature, which is on by default in moba-render.
+render = ["dep:moba-render", "dep:moba-platform", "moba-render/fsr3"]
+# moba-render's vendor SDK features, forwarded by name under `render` (ADR-0020 §6a). All
+# but `fsr3` need the pinned SDKs (scripts/fetch-sdks.sh); see docs/dev/vendor-sdks.md.
+fsr3 = ["render"]
+dlss = ["render", "moba-render/dlss"]
+streamline = ["render", "moba-render/streamline"]
+nrd = ["render", "moba-render/nrd"]
+rtxdi = ["render", "moba-render/rtxdi"]
+sharc = ["render", "moba-render/sharc"]
+fsr4 = ["render", "moba-render/fsr4"]
+xess = ["render", "moba-render/xess"]
+nvidia = ["dlss", "nrd", "rtxdi", "sharc"]
+vendor-sdks = ["nvidia", "fsr4", "xess"]
+dlss-fg = ["dlss", "streamline"]
 
 [dependencies]
 moba-core = { workspace = true, optional = true }

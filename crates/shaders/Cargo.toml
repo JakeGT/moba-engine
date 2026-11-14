@@ -16,4 +16,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# AMD FSR 3.1.6 upscaler passes (ADR-0020 §6a, ADR-0021 §4b): the vendored MIT HLSL in
+# `third_party/fidelityfx/`, compiled by the pinned `slangc`. `moba-render/fsr3` turns it on.
+fsr3 = []
+
 [dependencies]
+
+[dev-dependencies]
+serde_json.workspace = true

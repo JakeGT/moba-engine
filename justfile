@@ -39,7 +39,7 @@ doc:
 features:
     cargo check -p moba-engine --no-default-features --locked
     cargo check -p moba-engine --no-default-features --features render --locked
-    cargo check -p moba-engine --all-features --locked
+    cargo check -p moba-engine --features sim,net,render,fsr3 --locked
 
 deny:
     cargo deny check

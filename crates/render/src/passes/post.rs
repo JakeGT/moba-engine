@@ -141,8 +141,11 @@ impl Region {
 /// This frame's inputs to the post passes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PostFrame {
-    /// The render-resolution region (scene, composite, FXAA).
+    /// The render-resolution region (scene, AO, FXAA).
     pub(crate) render: Region,
+    /// The post chain's region (bloom, exposure metering, composite): the render region, or
+    /// the whole output after the temporal pass (ADR-0021 §5a).
+    pub(crate) post: Region,
     /// The swapchain extent (upscale target).
     pub(crate) swapchain: vk::Extent2D,
     /// Exposure adaptation this frame (a reset clears the image and takes the metered value).
@@ -431,6 +434,14 @@ impl PostPass {
         self.base_exposure
     }
 
+    /// What `exposure_linear` (ADR-0021 §4a) writes: the composite's push exposure and the
+    /// adapted-EV image's view when the composite adds it.
+    pub(crate) fn linear_exposure(&self) -> (f32, Option<vk::ImageView>) {
+        let exposure = self.base_exposure * self.look.exposure_ev.exp2();
+        let adapted = self.exposure_view().filter(|_| self.auto_exposure_active());
+        (exposure, adapted)
+    }
+
     /// The persistent exposure image, with auto exposure.
     pub(crate) fn exposure_image(&self) -> Option<vk::Image> {
         self.exposure_image.as_ref().map(GpuImage::image)
@@ -692,11 +703,11 @@ impl PostPass {
         let Some(pipeline) = &self.pipelines.bloom_down else {
             return;
         };
-        let dst = frame.render.shifted(mip_shift(level));
+        let dst = frame.post.shifted(mip_shift(level));
         let src = if level == 0 {
-            frame.render
+            frame.post
         } else {
-            frame.render.shifted(mip_shift(level - 1))
+            frame.post.shifted(mip_shift(level - 1))
         };
         let push = BloomPush {
             region: RegionPush::new(dst, src),
@@ -726,8 +737,8 @@ impl PostPass {
         let Some(pipeline) = &self.pipelines.bloom_up else {
             return;
         };
-        let dst = frame.render.shifted(mip_shift(level));
-        let src = frame.render.shifted(mip_shift(level + 1));
+        let dst = frame.post.shifted(mip_shift(level));
+        let src = frame.post.shifted(mip_shift(level + 1));
         let push = BloomPush {
             region: RegionPush::new(dst, src),
             extra: [BLOOM_RADIUS.to_bits(), 0],
@@ -758,7 +769,7 @@ impl PostPass {
         let Some(pipeline) = &self.pipelines.exposure else {
             return;
         };
-        let source = frame.render.shifted(mip_shift(BLOOM_LEVELS - 1));
+        let source = frame.post.shifted(mip_shift(BLOOM_LEVELS - 1));
         let (min_ev, max_ev, factor) = if self.auto_exposure_active() {
             (
                 self.look.exposure_min,
@@ -823,7 +834,7 @@ impl PostPass {
             device,
             command_buffer,
             target,
-            frame.render.actual,
+            frame.post.actual,
             vk::AttachmentLoadOp::DONT_CARE,
             &self.pipelines.composite,
             SetIndex::Composite,
@@ -833,7 +844,7 @@ impl PostPass {
 
     fn composite_push(&self, swapchain: bool, frame: &PostFrame) -> CompositePush {
         let look = self.look;
-        let bloom = frame.render.shifted(mip_shift(0));
+        let bloom = frame.post.shifted(mip_shift(0));
         let (lut_size, grading) = match &self.lut {
             Some((_, size)) if self.config.grading => (*size, look.grading_strength),
             _ => (2, 0.0),
@@ -853,10 +864,10 @@ impl PostPass {
         if !swapchain {
             flags |= COMPOSITE_LUMA_ALPHA;
         }
-        let actual = frame.render.actual;
+        let actual = frame.post.actual;
         let color = effects.vignette_color;
         CompositePush {
-            dst_inv: frame.render.inverse(),
+            dst_inv: frame.post.inverse(),
             bloom_scale: bloom.scale(),
             bloom_texel: bloom.texel(),
             exposure: self.base_exposure * look.exposure_ev.exp2(),
@@ -911,12 +922,14 @@ impl PostPass {
         );
     }
 
-    /// The upscale from the render-resolution LDR image into the swapchain.
+    /// The upscale from the render-resolution LDR image into `target`: the swapchain
+    /// (`swapchain` true) or the overlay's output-resolution LDR image.
     pub(crate) fn record_upscale(
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
         target: vk::ImageView,
+        swapchain: bool,
         frame: &PostFrame,
     ) {
         let Some(pipeline) = &self.pipelines.upscale else {
@@ -929,7 +942,7 @@ impl PostPass {
         let push = UpscalePush {
             region: RegionPush::new(dst, frame.render),
             mode: u32::from(self.config.upscale == UpscaleFilter::Bicubic),
-            srgb_target: u32::from(super::composite::is_srgb(self.swapchain_format)),
+            srgb_target: u32::from(swapchain && super::composite::is_srgb(self.swapchain_format)),
         };
         self.draw(
             device,
@@ -1061,12 +1074,19 @@ fn build_pipelines(
     let optional = |on: bool, fragment: &str, format, blend| {
         on.then(|| build(fragment, format, blend)).transpose()
     };
-    let composite_format = if spec.fxaa || spec.upscale {
+    // With the overlay (ADR-0021 §5a) every post pass writes an LDR image the overlay reads.
+    let (fxaa, upscale) = (spec.has_fxaa(), spec.has_upscale());
+    let composite_format = if fxaa || upscale || spec.overlay {
         LDR_FORMAT
     } else {
         swapchain_format
     };
-    let fxaa_format = if spec.upscale {
+    let fxaa_format = if upscale || spec.overlay {
+        LDR_FORMAT
+    } else {
+        swapchain_format
+    };
+    let upscale_format = if spec.overlay {
         LDR_FORMAT
     } else {
         swapchain_format
@@ -1091,11 +1111,11 @@ fn build_pipelines(
             spec.exposure_format,
             FullscreenBlend::Constant,
         )?,
-        fxaa: optional(spec.fxaa, "fxaa.frag", fxaa_format, FullscreenBlend::None)?,
+        fxaa: optional(fxaa, "fxaa.frag", fxaa_format, FullscreenBlend::None)?,
         upscale: optional(
-            spec.upscale,
+            upscale,
             "upscale.frag",
-            swapchain_format,
+            upscale_format,
             FullscreenBlend::None,
         )?,
         gtao: optional(
@@ -1193,11 +1213,13 @@ mod tests {
         let fov = 0.9_f32;
         let view_proj =
             perspective_rh(fov, 16.0 / 9.0, 0.5, 600.0) * look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let render = Region {
+            actual: extent(1600, 900),
+            alloc: extent(1920, 1080),
+        };
         let frame = PostFrame {
-            render: Region {
-                actual: extent(1600, 900),
-                alloc: extent(1920, 1080),
-            },
+            render,
+            post: render,
             swapchain: extent(1920, 1080),
             adaptation: crate::post::AdaptationStep {
                 factor: 1.0,

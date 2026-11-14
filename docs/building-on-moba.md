@@ -13,6 +13,23 @@ The workspace is layered so you can embed only what you need.
 | `moba-render` / `moba-platform` | Vulkan renderer and window/input |
 | `moba-engine` | umbrella crate with `sim`, `net`, `render` features |
 
+## The renderer and the `ash` pin
+
+`moba-render`, and `moba-engine` with the `render` feature, build against a pinned `ash`
+master revision ([ADR-0020](adr/0020-next-gen-foundations.md) §1). Cargo applies
+`[patch.crates-io]` only in the root workspace. So a project outside this workspace that
+depends on the renderer must copy the pin into its own root `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+ash        = { git = "https://github.com/ash-rs/ash", rev = "8844f6b4eefb16d08cd73c8f3d340e1ac12deb16" }
+ash-window = { git = "https://github.com/ash-rs/ash", rev = "8844f6b4eefb16d08cd73c8f3d340e1ac12deb16" }
+```
+
+Without it, Cargo resolves crates.io `ash` 0.38.0, which lacks the `provisional` feature and
+the API the renderer uses. Keep the revision equal to this workspace's `Cargo.toml`. Headless
+embedders (`sim`, `net`) do not depend on `ash` and need nothing.
+
 ## Headless simulation
 
 ```rust

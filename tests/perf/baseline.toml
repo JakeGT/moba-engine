@@ -29,3 +29,26 @@ render_p95_ms = 0.199
 [ultra]
 gpu_total_p95_ms = 0.664
 render_p95_ms = 0.254
+
+# Tiered path (ADR-0021 amendment 2, item 16; docs/perf/0031-n1a-temporal.md). Recorded
+# 2026-11-03 on feat/n1a-temporal (N1a: temporal AA, TAAU Quality, the overlay; merged with
+# N1d's latency back ends, Reflex on by default) on the same
+# machine, from the medians of three interleaved rounds of the 5v5 teamfight replay
+# (tests/replays/teamfight-5v5.mbr, 3,000 frames, cold pipeline cache), not the 18,000-tick
+# perf-replay.sh run above: a perf-replay.sh run on Tiered is the re-recording step for the
+# next N1 part. **Report-only:** perf-gate prints a Tiered regression as a `report-only` note
+# (`TIERED_BASELINE_FAILS = false`) until the last N1 part re-records these and flips it;
+# Tiered's absolute per-tier budgets already fail. Tiered High runs the Ultra configuration,
+# so the two tables match.
+
+[tiered.low]
+gpu_total_p95_ms = 0.551
+render_p95_ms = 0.338
+
+[tiered.high]
+gpu_total_p95_ms = 0.598
+render_p95_ms = 0.344
+
+[tiered.ultra]
+gpu_total_p95_ms = 0.599
+render_p95_ms = 0.327

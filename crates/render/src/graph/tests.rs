@@ -10,7 +10,7 @@ use super::{Access, GraphBuilder, GraphError, ImageDesc, ImageSize, ImportState,
 const HDR: ImageDesc = ImageDesc {
     format: vk::Format::R16G16B16A16_SFLOAT,
     aspect: vk::ImageAspectFlags::COLOR,
-    size: ImageSize::Swapchain,
+    size: ImageSize::Output { shift: 0 },
     samples: vk::SampleCountFlags::TYPE_1,
     extra_usage: vk::ImageUsageFlags::empty(),
 };
@@ -18,7 +18,7 @@ const HDR: ImageDesc = ImageDesc {
 const DEPTH: ImageDesc = ImageDesc {
     format: vk::Format::D32_SFLOAT,
     aspect: vk::ImageAspectFlags::DEPTH,
-    size: ImageSize::Swapchain,
+    size: ImageSize::Output { shift: 0 },
     samples: vk::SampleCountFlags::TYPE_1,
     extra_usage: vk::ImageUsageFlags::SAMPLED,
 };

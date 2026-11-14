@@ -6,6 +6,7 @@
 use core::ptr::NonNull;
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 use bytemuck::Pod;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
@@ -25,6 +26,8 @@ pub(crate) struct GpuBuffer {
     mapped: Option<NonNull<u8>>,
     /// Bytes counted in `crate::memory` (the allocation's size), released on drop.
     tracked: u64,
+    /// The usage it was created with ([`Self::device_address`] checks it).
+    usage: vk::BufferUsageFlags,
 }
 
 impl GpuBuffer {
@@ -100,6 +103,7 @@ impl GpuBuffer {
             size,
             mapped,
             tracked: requirements.size,
+            usage,
         })
     }
 
@@ -113,6 +117,13 @@ impl GpuBuffer {
         self.size
     }
 
+    /// Device memory this buffer holds: its allocation's size (at least [`Self::size`]).
+    #[inline]
+    #[cfg(feature = "fsr3")]
+    pub(crate) fn allocated_bytes(&self) -> u64 {
+        self.tracked
+    }
+
     /// Copies bytes into a mapped buffer.
     ///
     /// # Panics
@@ -120,7 +131,7 @@ impl GpuBuffer {
     pub(crate) fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
         let mapped = self.mapped.expect("buffer was not created host-visible");
         assert!(
-            offset + bytes.len() <= self.size as usize,
+            offset + bytes.len() <= usize::try_from(self.size).unwrap_or(usize::MAX),
             "write out of bounds"
         );
         // SAFETY: the range is bounds-checked and the caller has exclusive access.
@@ -131,12 +142,53 @@ impl GpuBuffer {
         }
     }
 
+    /// The buffer's device address (ADR-0020 §3a).
+    ///
+    /// # Safety
+    /// The device must be a tiered one: `bufferDeviceAddress` enabled, and its allocator
+    /// allocating every block with `DEVICE_ADDRESS`. Compat devices have neither.
+    ///
+    /// # Panics
+    /// Panics if the buffer was not created with `SHADER_DEVICE_ADDRESS`.
+    pub(crate) unsafe fn device_address(&self) -> vk::DeviceAddress {
+        assert!(
+            self.usage
+                .contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS),
+            "device_address on a buffer without SHADER_DEVICE_ADDRESS"
+        );
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        // SAFETY: the buffer is live, bound to memory of this device and has the usage flag
+        // (asserted); the caller guarantees the feature and the allocation flag.
+        unsafe { self.device.get_buffer_device_address(&info) }
+    }
+
+    /// Copies `out.len()` bytes from `offset` of a mapped buffer (readbacks), or returns
+    /// `false` when the buffer is not host visible or the range is out of bounds. The caller
+    /// has made the device's writes visible to the host first.
+    pub(crate) fn read_bytes(&self, offset: usize, out: &mut [u8]) -> bool {
+        let Some(mapped) = self.mapped else {
+            return false;
+        };
+        if offset
+            .checked_add(out.len())
+            .is_none_or(|end| end > usize::try_from(self.size).unwrap_or(usize::MAX))
+        {
+            return false;
+        }
+        // SAFETY: the range was bounds-checked against the mapping just above.
+        let source = unsafe { mapped.as_ptr().add(offset) };
+        // SAFETY: `source..source + out.len()` lies inside the coherent mapping, `out` is a
+        // distinct, writable slice of that length, and no GPU work writes the buffer now.
+        unsafe { core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), out.len()) };
+        true
+    }
+
     /// Returns the mapped memory as a typed slice.
     pub(crate) fn mapped_slice_mut<T: Pod>(&mut self, count: usize) -> Option<&mut [T]> {
         let mapped = self.mapped?;
         let bytes = core::mem::size_of::<T>()
             .checked_mul(count)
-            .filter(|bytes| *bytes <= self.size as usize)?;
+            .filter(|bytes| *bytes <= usize::try_from(self.size).unwrap_or(usize::MAX))?;
         if bytes == 0 || !(mapped.as_ptr() as usize).is_multiple_of(core::mem::align_of::<T>()) {
             return None;
         }
@@ -446,6 +498,12 @@ impl GpuImage {
     pub(crate) fn view(&self) -> vk::ImageView {
         self.view
     }
+
+    /// Device memory this image holds: its allocation's size.
+    #[inline]
+    pub(crate) fn allocated_bytes(&self) -> u64 {
+        self.tracked.1
+    }
 }
 
 impl Drop for GpuImage {
@@ -583,9 +641,92 @@ impl DescriptorSetLayout {
         let handle = unsafe { device.create_descriptor_set_layout(&create_info, None) }?;
         Ok(Self { device, handle })
     }
+
+    /// A layout with create `flags` and one `binding_flags` entry per binding (descriptor
+    /// indexing: the tiered bindless set, ADR-0020 §3a).
+    ///
+    /// # Safety
+    /// - The device must have the descriptor-indexing features the flags need enabled (a
+    ///   tiered device does; a Compat device does not), including the per-type
+    ///   `descriptorBinding*UpdateAfterBind` feature of every update-after-bind binding's type.
+    /// - The create info must be valid:
+    ///   - `flags` contains `UPDATE_AFTER_BIND_POOL` whenever any binding is
+    ///     `UPDATE_AFTER_BIND` (VUID-VkDescriptorSetLayoutCreateInfo-flags-03000);
+    ///   - only the binding with the highest binding number is `VARIABLE_DESCRIPTOR_COUNT`
+    ///     (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03004);
+    ///   - no `UNIFORM_BUFFER_DYNAMIC` or `STORAGE_BUFFER_DYNAMIC` binding is
+    ///     `UPDATE_AFTER_BIND` (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03015).
+    ///
+    /// Debug builds assert the three create-info rules.
+    pub(crate) unsafe fn with_binding_flags(
+        device: ash::Device,
+        bindings: &[vk::DescriptorSetLayoutBinding<'_>],
+        flags: vk::DescriptorSetLayoutCreateFlags,
+        binding_flags: &[vk::DescriptorBindingFlags],
+    ) -> RenderResult<Self> {
+        assert_eq!(
+            bindings.len(),
+            binding_flags.len(),
+            "one flag set per binding"
+        );
+        debug_assert!(
+            flags.contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                || !binding_flags
+                    .iter()
+                    .any(|f| f.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)),
+            "an update-after-bind binding needs UPDATE_AFTER_BIND_POOL"
+        );
+        debug_assert!(
+            bindings.iter().zip(binding_flags).all(|(binding, f)| {
+                !f.contains(vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT)
+                    || bindings
+                        .iter()
+                        .all(|other| other.binding <= binding.binding)
+            }),
+            "only the highest binding may have a variable descriptor count"
+        );
+        debug_assert!(
+            bindings.iter().zip(binding_flags).all(|(binding, f)| {
+                !f.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)
+                    || !matches!(
+                        binding.descriptor_type,
+                        vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                            | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
+                    )
+            }),
+            "dynamic buffers cannot be update-after-bind"
+        );
+        let mut flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(binding_flags);
+        let create_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .flags(flags)
+            .bindings(bindings)
+            .push(&mut flags_info);
+        // SAFETY: the device is live, the binding and flag arrays are valid for the call, and
+        // the caller guarantees the descriptor-indexing features and a valid create info (see
+        // `# Safety`).
+        let handle = unsafe { device.create_descriptor_set_layout(&create_info, None) }?;
+        Ok(Self { device, handle })
+    }
 }
 
 impl DescriptorPool {
+    /// A pool with create `flags` (`UPDATE_AFTER_BIND` for the bindless set, ADR-0020 §3a).
+    pub(crate) fn with_flags(
+        device: ash::Device,
+        pool_sizes: &[vk::DescriptorPoolSize],
+        max_sets: u32,
+        flags: vk::DescriptorPoolCreateFlags,
+    ) -> RenderResult<Self> {
+        let create_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(flags)
+            .pool_sizes(pool_sizes)
+            .max_sets(max_sets);
+        // SAFETY: the device is live and the pool-size array is valid for the call.
+        let handle = unsafe { device.create_descriptor_pool(&create_info, None) }?;
+        Ok(Self { device, handle })
+    }
+
     pub(crate) fn new(
         device: ash::Device,
         pool_sizes: &[vk::DescriptorPoolSize],
@@ -637,6 +778,22 @@ impl Semaphore {
     pub(crate) fn new(device: ash::Device) -> RenderResult<Self> {
         let create_info = vk::SemaphoreCreateInfo::default();
         // SAFETY: the device is live and the create info has no external pointers.
+        let handle = unsafe { device.create_semaphore(&create_info, None) }?;
+        Ok(Self { device, handle })
+    }
+
+    /// A timeline semaphore starting at 0.
+    ///
+    /// # Safety
+    /// The device must enable the `timelineSemaphore` feature (the tiered path does; Compat
+    /// may not).
+    pub(crate) unsafe fn timeline(device: ash::Device) -> RenderResult<Self> {
+        let mut kind = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let create_info = vk::SemaphoreCreateInfo::default().push(&mut kind);
+        // SAFETY: the device is live and enables `timelineSemaphore` (the caller's contract),
+        // and the create info's chain (`kind`) outlives the call.
         let handle = unsafe { device.create_semaphore(&create_info, None) }?;
         Ok(Self { device, handle })
     }

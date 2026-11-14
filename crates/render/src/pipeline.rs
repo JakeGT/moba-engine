@@ -4,6 +4,7 @@
 //! persistent pipeline cache, and is built when the renderer is created.
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 
 use crate::device::DeviceContext;
 use crate::error::RenderResult;
@@ -228,7 +229,7 @@ pub(crate) fn create_blended(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(spec.layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Statistics for the perf check of the terrain shader's registers (ADR-0017 §1).
     let create_info = if device.pipeline_stats {
         create_info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR)
@@ -331,7 +332,7 @@ pub(crate) fn create_depth_only(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shader.
     device.create_graphics_pipeline(&create_info)
 }
@@ -426,7 +427,143 @@ pub(crate) fn create_prepass(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
+    // Every referenced struct outlives the call; the layout matches the shaders.
+    device.create_graphics_pipeline(&create_info)
+}
+
+/// How a [`ColorTarget`] combines with the attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TargetBlend {
+    /// Overwrite (within the write mask).
+    None,
+    /// `MAX` of source and destination (the temporal masks, ADR-0021 §2d).
+    Max,
+}
+
+/// One colour attachment of a [`TargetsSpec`] pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ColorTarget {
+    pub(crate) format: vk::Format,
+    /// Empty for an attachment this pipeline leaves as it is (it still declares it, so it
+    /// matches the pass's attachments).
+    pub(crate) write_mask: vk::ColorComponentFlags,
+    pub(crate) blend: TargetBlend,
+}
+
+/// A pipeline into several colour attachments with per-attachment write masks and blending
+/// (the temporal prepass, `tc_mask` and the overlay prepass, ADR-0021). Different states per
+/// attachment need `independentBlend`, which the Tiered path requires (ADR-0021 §2e).
+pub(crate) struct TargetsSpec<'a> {
+    pub(crate) layout: vk::PipelineLayout,
+    /// `None`: no vertex input (the shader builds its geometry, like the foliage and the sky).
+    pub(crate) vertex_layout: Option<VertexLayout>,
+    pub(crate) vertex: vk::ShaderModule,
+    /// `None`: depth only (every colour attachment then needs an empty write mask).
+    pub(crate) fragment: Option<vk::ShaderModule>,
+    /// At most four.
+    pub(crate) colors: &'a [ColorTarget],
+    pub(crate) depth_format: vk::Format,
+    /// Test `LESS_OR_EQUAL` and write; otherwise test only.
+    pub(crate) depth_write: bool,
+    pub(crate) samples: vk::SampleCountFlags,
+}
+
+/// Creates a [`TargetsSpec`] pipeline: no culling, no depth bias, depth tested
+/// `LESS_OR_EQUAL`, like the scene pipelines.
+pub(crate) fn create_targets(
+    device: &DeviceContext,
+    spec: &TargetsSpec<'_>,
+) -> RenderResult<vk::Pipeline> {
+    const MAX_TARGETS: usize = 4;
+    assert!(
+        spec.colors.len() <= MAX_TARGETS,
+        "at most four colour targets"
+    );
+    let vertex_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(spec.vertex)
+        .name(c"main");
+    let mut stages = [vertex_stage, vertex_stage];
+    let stage_count = match spec.fragment {
+        Some(fragment) => {
+            stages[1] = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment)
+                .name(c"main");
+            2
+        }
+        None => 1,
+    };
+    let stride = spec.vertex_layout.map_or(0, VertexLayout::stride);
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(stride)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let vertex_input = match spec.vertex_layout {
+        Some(layout) => vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&bindings)
+            .vertex_attribute_descriptions(layout.attributes()),
+        None => vk::PipelineVertexInputStateCreateInfo::default(),
+    };
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .primitive_restart_enable(false);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .depth_bias_enable(false)
+        .line_width(1.0);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(spec.samples);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(spec.depth_write)
+        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+        .depth_bounds_test_enable(false)
+        .stencil_test_enable(false);
+    let mut attachments = [vk::PipelineColorBlendAttachmentState::default(); MAX_TARGETS];
+    let mut formats = [vk::Format::UNDEFINED; MAX_TARGETS];
+    for (index, target) in spec.colors.iter().enumerate() {
+        let max = target.blend == TargetBlend::Max;
+        attachments[index] = vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(max)
+            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .dst_color_blend_factor(vk::BlendFactor::ONE)
+            .color_blend_op(vk::BlendOp::MAX)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+            .alpha_blend_op(vk::BlendOp::MAX)
+            .color_write_mask(target.write_mask);
+        formats[index] = target.format;
+    }
+    let count = spec.colors.len();
+    let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .attachments(&attachments[..count]);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&formats[..count])
+        .depth_attachment_format(spec.depth_format);
+    let create_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages[..stage_count])
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&color_blend)
+        .dynamic_state(&dynamic)
+        .layout(spec.layout)
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }
@@ -544,7 +681,7 @@ pub(crate) fn create_ui(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }
@@ -657,7 +794,7 @@ pub(crate) fn create_fullscreen(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }
@@ -764,7 +901,7 @@ pub(crate) fn create_vertexless(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }

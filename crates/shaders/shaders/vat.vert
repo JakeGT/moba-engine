@@ -27,6 +27,12 @@ invariant gl_Position;
 #ifdef OUTLINE_HULL
 #include "outline.glsl"
 #endif
+#ifdef MOTION_VECTORS
+// ADR-0021 §2b: the temporal prepass's motion (with DEPTH_PREPASS).
+#define MOTION_VECTORS_VERTEX
+#define MOTION_PREV_INSTANCES
+#include "motion.glsl"
+#endif
 
 #if defined(SHADOW_PASS) || defined(DEPTH_PREPASS)
 #define VAT_POSITION_ONLY
@@ -86,6 +92,21 @@ void sample_clip(float frame, float next, float t, uint vertex, out vec3 positio
     }
 }
 
+// The pose's position of `vertex`: (from frame, next, t, blend) blended towards (to frame,
+// next, t) as `main` does.
+vec3 pose_position(vec4 from_sample, vec4 to_sample, uint vertex, vec3 fallback) {
+    vec3 position = fallback;
+    vec3 normal;
+    sample_clip(from_sample.x, from_sample.y, from_sample.z, vertex, position, normal);
+    if (from_sample.w > 0.0) {
+        vec3 to_position;
+        vec3 to_normal;
+        sample_clip(to_sample.x, to_sample.y, to_sample.z, vertex, to_position, to_normal);
+        position = mix(position, to_position, from_sample.w);
+    }
+    return position;
+}
+
 void main() {
     Instance instance = instance_data.instances[gl_InstanceIndex];
     vec3 position = in_position;
@@ -112,6 +133,26 @@ void main() {
 #elif defined(DEPTH_PREPASS)
     gl_Position = camera.view_proj * world;
     out_outline = instance.params.x;
+#ifdef MOTION_VECTORS
+    // ADR-0021 §2b: the previous pose is sampled a second time here (the scene's VAT shader
+    // does not).
+    uint index = uint(gl_InstanceIndex);
+    vec3 previous = world.xyz;
+    if (prev_valid(index)) {
+        vec3 prev_position = in_position;
+        if (vat.vertex_count > 0u && vat.frame_count > 0u) {
+            uvec4 pose = prev_instance_data.prev_instances[index].pose;
+            vec2 t = unpackUnorm2x16(pose.z);
+            float blend = unpackUnorm2x16(pose.w & 0xFFFFu).x;
+            vec4 from_sample = vec4(float(pose.x & 0xFFFFu), float(pose.x >> 16u), t.x, blend);
+            vec4 to_sample = vec4(float(pose.y & 0xFFFFu), float(pose.y >> 16u), t.y, 0.0);
+            uint vertex = min(uint(gl_VertexIndex), vat.vertex_count - 1u);
+            prev_position = pose_position(from_sample, to_sample, vertex, in_position);
+        }
+        previous = (prev_model(index) * vec4(prev_position, 1.0)).xyz;
+    }
+    write_motion(world.xyz, previous);
+#endif
 #elif defined(OUTLINE_HULL)
     // VAT meshes are smooth-shaded skins: extrude along the animated normal.
     gl_Position = outline_hull_position(world.xyz, mat3(transpose(inverse(instance.model))) * normal,

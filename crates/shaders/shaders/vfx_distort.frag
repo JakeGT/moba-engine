@@ -29,6 +29,10 @@ layout(location = 3) flat in float in_seed;
 layout(location = 4) flat in float in_age;
 
 layout(location = 0) out vec4 out_hdr;
+#ifdef VFX_TEMPORAL
+// ADR-0021 §2d: the haze's share of the reactive mask, `|offset| / cap` (MAX blended).
+layout(location = 1) out vec4 out_reactive;
+#endif
 
 // Integer hash of a lattice cell, in [0, 1].
 float hash(vec2 cell) {
@@ -71,6 +75,9 @@ void main() {
     if (texelFetch(unit_ids, pixel, 0).r != 0u
         || !(texelFetch(scene_copy, pixel, 0).a >= MARK_BELOW)) {
         out_hdr = vec4(0.0);
+#ifdef VFX_TEMPORAL
+        out_reactive = vec4(0.0);
+#endif
         return;
     }
     // 2. Strength with the soft edge, the soft-depth fade and the view-distance fade.
@@ -109,8 +116,14 @@ void main() {
     }
     if (rejected || weight <= 0.0) {
         out_hdr = vec4(0.0);
+#ifdef VFX_TEMPORAL
+        out_reactive = vec4(0.0);
+#endif
         return;
     }
+#ifdef VFX_TEMPORAL
+    out_reactive = vec4(min(length(offset) / max(cap, 1e-4), 0.9), 0.0, 0.0, 0.0);
+#endif
     vec3 color = textureLod(scene_copy, tap_uv, 0.0).rgb;
     // Source-alpha blend: overlapping sprites cross-fade at their soft edges.
     out_hdr = vec4(color, clamp(weight * 8.0, 0.0, 1.0));

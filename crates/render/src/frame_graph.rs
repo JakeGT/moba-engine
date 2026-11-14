@@ -45,6 +45,29 @@
 //! capture       swapchain → readback buffer (only in the capture variant)
 //! ```
 //!
+//! **The tiered frame from N1** (ADR-0021 §5a) changes the middle of that chain. With temporal
+//! AA ([`FrameSpec::temporal`]) the prepass also writes `motion` (jittered, render
+//! resolution), `mask_clear` clears `reactive` and `tc_mask`, the distortion and the particles
+//! add to `reactive` (a second, motion-only particle draw writes the motion of fragments
+//! with coverage from 0.1, ADR-0021 amendment 4), then:
+//!
+//! ```text
+//! tc_mask         water surfaces, depth-tested → tc_mask (MAX)
+//! exposure_linear compute: push exposure × 2^(adapted EV of the previous frame) → 1×1 R32F
+//! temporal        compute: the upscaler (TAAU …) → hdr_out (output resolution)
+//! bloom_d*, exposure, bloom_u*, composite   as above, from hdr_out at output resolution
+//! ```
+//!
+//! With the overlay ([`FrameSpec::overlay`], every tiered frame), the last post pass writes an
+//! LDR image (`ldr`, or `ldr_out` after the upscale) instead of the swapchain, R2b's `outline`
+//! pass is gone, and before the UI:
+//!
+//! ```text
+//! overlay_prepass output resolution, unjittered: terrain, water, units → overlay depth + IDs
+//! overlay         LDR image + overlay depth/IDs + decals → swapchain: Glow decals, outlines
+//! overlay_vfx     enemy-telegraph particles, depth-tested against the overlay depth
+//! ```
+//!
 //! The offscreen images are imports owned by the renderer, not transients: their contents
 //! survive the frame, they start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, and their
 //! passes appear only in the variants for frames that re-render them. Every combination
@@ -97,6 +120,14 @@ pub(crate) const AO_FORMAT: vk::Format = vk::Format::R8_UNORM;
 pub(crate) const OUTLINE_ID_FORMAT: vk::Format = vk::Format::R8_UINT;
 /// R2b's contact-shadow target.
 pub(crate) const CONTACT_FORMAT: vk::Format = vk::Format::R8_UNORM;
+/// Motion vectors (ADR-0021 §2a): render pixels to the previous position.
+pub(crate) const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
+/// The reactive and transparency-and-composition masks (ADR-0021 §2d).
+pub(crate) const MASK_FORMAT: vk::Format = vk::Format::R8_UNORM;
+/// The linear exposure multiplier the upscaler reads (ADR-0021 §4a).
+pub(crate) const EXPOSURE_LINEAR_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
+/// The upscaler's output (ADR-0021 §4a).
+pub(crate) const HDR_OUT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// What a compiled pass records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +167,20 @@ pub(crate) enum PassKind {
     Distortion,
     /// Renders the offscreen image of this [`UiImage`](crate::UiImage) slot.
     Offscreen(u8),
+    /// Clears the reactive and transparency-and-composition masks (ADR-0021 §2d).
+    MaskClear,
+    /// Water surfaces into the transparency-and-composition mask (ADR-0021 §2d).
+    TcMask,
+    /// The one-texel linear exposure multiplier the upscaler reads (ADR-0021 §4a).
+    ExposureLinear,
+    /// The temporal upscaler: TAAU, FSR 3.1 or a vendor back end (ADR-0021 §3, §4).
+    Temporal,
+    /// The output-resolution, unjittered overlay depth and IDs (ADR-0021 §5c).
+    OverlayPrepass,
+    /// Glow decals and outlines over the LDR image into the swapchain (ADR-0021 §5b).
+    Overlay,
+    /// Enemy-telegraph particles at output resolution (ADR-0021 §5b).
+    OverlayVfx,
 }
 
 /// Resource ids of one offscreen image: colour (sampled by the UI), depth and its bones.
@@ -204,6 +249,32 @@ pub(crate) struct FogResources {
     pub(crate) history: ResourceId,
 }
 
+/// Resource ids of the temporal passes (ADR-0021 §2, §4).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TemporalResources {
+    /// `R16G16_SFLOAT` motion vectors, render resolution.
+    pub(crate) motion: ResourceId,
+    /// `R8_UNORM` reactive mask, render resolution.
+    pub(crate) reactive: ResourceId,
+    /// `R8_UNORM` transparency-and-composition mask, render resolution.
+    pub(crate) tc_mask: ResourceId,
+    /// 1×1 `R32_SFLOAT` linear exposure multiplier.
+    pub(crate) exposure_linear: ResourceId,
+    /// The upscaler's output, `RGBA16F` at output resolution.
+    pub(crate) hdr_out: ResourceId,
+}
+
+/// Resource ids of the overlay passes (ADR-0021 §5).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OverlayResources {
+    /// The main depth's format at output resolution, unjittered.
+    pub(crate) depth: ResourceId,
+    /// `R8_UINT` IDs at output resolution: 0 nothing, 1–7 outline slots, 8 occluder, 9 ground.
+    pub(crate) ids: ResourceId,
+    /// The LDR image the overlay composites over (the last post pass's output).
+    pub(crate) source: ResourceId,
+}
+
 /// Resource ids of the engine frame graph.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FrameResources {
@@ -239,6 +310,12 @@ pub(crate) struct FrameResources {
     pub(crate) refraction: Option<ResourceId>,
     /// The heat haze's copy of the HDR target; `None` without distortion (ADR-0019).
     pub(crate) distortion: Option<ResourceId>,
+    /// The temporal passes' images; `None` without temporal AA (ADR-0021).
+    pub(crate) temporal: Option<TemporalResources>,
+    /// The overlay's images; `None` without the overlay (Compat).
+    pub(crate) overlay: Option<OverlayResources>,
+    /// The upscale's output-resolution LDR image when the overlay reads it.
+    pub(crate) ldr_out: Option<ResourceId>,
 }
 
 /// The shadow map a frame renders, when shadows are on.
@@ -293,6 +370,17 @@ pub(crate) struct FrameSpec {
     /// The heat haze's copy and draw passes (ADR-0019). Needs the particles and the outline
     /// IDs (its unit mask); [`build_variant`] ignores it without them.
     pub(crate) distortion: bool,
+    /// Temporal AA and upscaling (ADR-0021 §3, §4; Tiered only): the prepass writes motion,
+    /// the masks and the `temporal` pass follow the particles, and bloom, exposure and the
+    /// composite run at output resolution on its output. Implies the prepass; the `fxaa`
+    /// and `upscale` switches are ignored with it.
+    pub(crate) temporal: bool,
+    /// `TRANSFER_SRC` on the temporal depth and motion, for the motion probe's readback only
+    /// (`RenderConfig::readback`).
+    pub(crate) readback: bool,
+    /// The post-upscale gameplay overlay (ADR-0021 §5; Tiered only): replaces R2b's
+    /// `outline` pass, and the last post pass writes an LDR image the overlay reads.
+    pub(crate) overlay: bool,
 }
 
 impl FrameSpec {
@@ -323,13 +411,35 @@ impl FrameSpec {
             upscale: false,
             water: false,
             distortion: false,
+            temporal: false,
+            readback: false,
+            overlay: false,
         }
     }
 
-    /// Whether the depth prepass runs: asked for, or needed by AO, contact shadows or the
-    /// outline IDs.
+    /// Whether the depth prepass runs: asked for, or needed by AO, contact shadows, the
+    /// outline IDs or the motion vectors.
     pub(crate) const fn has_prepass(&self) -> bool {
-        self.prepass || self.ambient_occlusion || self.outline_ids || self.contact_shadows
+        self.prepass
+            || self.ambient_occlusion
+            || self.outline_ids
+            || self.contact_shadows
+            || self.temporal
+    }
+
+    /// Whether the FXAA pass runs (never with temporal AA).
+    pub(crate) const fn has_fxaa(&self) -> bool {
+        self.fxaa && !self.temporal
+    }
+
+    /// Whether the upscale pass runs (never with temporal AA, which upscales itself).
+    pub(crate) const fn has_upscale(&self) -> bool {
+        self.upscale && !self.temporal
+    }
+
+    /// Whether R2b's render-resolution outline pass runs (the overlay replaces it).
+    pub(crate) const fn has_outline_pass(&self) -> bool {
+        self.outline_ids && !self.overlay
     }
 
     /// Whether the bloom down-chain runs (bloom, or metering for auto exposure).
@@ -385,6 +495,14 @@ pub(crate) fn build_variant(
 ) -> Result<FramePlan, GraphError> {
     let render = ImageSize::Render { shift: 0 };
     let half = ImageSize::Render { shift: 1 };
+    // ADR-0021 §5a: after the temporal pass the post chain runs at output resolution.
+    let post_size = |shift: u8| {
+        if spec.temporal {
+            ImageSize::Output { shift }
+        } else {
+            ImageSize::Render { shift }
+        }
+    };
     let mut graph = GraphBuilder::new();
     // The acquire semaphore is waited on at COLOR_ATTACHMENT_OUTPUT; the last post pass
     // writes every pixel, so the previous contents are discarded.
@@ -405,7 +523,12 @@ pub(crate) fn build_variant(
             aspect: spec.depth_aspect,
             size: render,
             samples: vk::SampleCountFlags::TYPE_1,
-            extra_usage: vk::ImageUsageFlags::SAMPLED,
+            // TRANSFER_SRC only for the motion probe's readback (ADR-0021 gate 2).
+            extra_usage: if spec.temporal && spec.readback {
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC
+            } else {
+                vk::ImageUsageFlags::SAMPLED
+            },
         },
     );
     let msaa = spec.msaa.then(|| MsaaResources {
@@ -502,7 +625,7 @@ pub(crate) fn build_variant(
             let shift = u8::try_from(level + 1).unwrap_or(u8::MAX);
             graph.transient_image(
                 BLOOM_MIP_NAMES[level],
-                image(spec.bloom_format, ImageSize::Render { shift }),
+                image(spec.bloom_format, post_size(shift)),
             )
         })
     });
@@ -554,10 +677,68 @@ pub(crate) fn build_variant(
     // lifetimes it never overlaps, so it shares their slot (no extra VRAM).
     let distortion = (spec.distortion && vfx.is_some() && outline_ids.is_some())
         .then(|| graph.transient_image("distortion-copy", image(spec.hdr_format, render)));
-    let ldr = (spec.fxaa || spec.upscale)
-        .then(|| graph.transient_image("ldr", image(LDR_FORMAT, render)));
-    let ldr2 = (spec.fxaa && spec.upscale)
+    let (fxaa, upscale) = (spec.has_fxaa(), spec.has_upscale());
+    let ldr = (fxaa || upscale || spec.overlay)
+        .then(|| graph.transient_image("ldr", image(LDR_FORMAT, post_size(0))));
+    let ldr2 = (fxaa && (upscale || spec.overlay))
         .then(|| graph.transient_image("ldr2", image(LDR_FORMAT, render)));
+    // The upscale's output when the overlay, not the swapchain, comes next (ADR-0021 §5a).
+    let ldr_out = (spec.overlay && upscale).then(|| {
+        graph.transient_image("ldr_out", image(LDR_FORMAT, ImageSize::Output { shift: 0 }))
+    });
+    // ADR-0021 §2, §4: render-resolution motion and masks, the one-texel exposure multiplier
+    // and the upscaler's output-resolution HDR image.
+    let temporal = spec.temporal.then(|| TemporalResources {
+        // TRANSFER_SRC only for the motion probe's readback (ADR-0021 gate 2).
+        motion: graph.transient_image(
+            "motion",
+            ImageDesc {
+                extra_usage: if spec.readback {
+                    vk::ImageUsageFlags::TRANSFER_SRC
+                } else {
+                    vk::ImageUsageFlags::empty()
+                },
+                ..image(MOTION_FORMAT, render)
+            },
+        ),
+        reactive: graph.transient_image("reactive", image(MASK_FORMAT, render)),
+        tc_mask: graph.transient_image("tc_mask", image(MASK_FORMAT, render)),
+        exposure_linear: graph.transient_image(
+            "exposure_linear",
+            image(
+                EXPOSURE_LINEAR_FORMAT,
+                ImageSize::Fixed {
+                    width: 1,
+                    height: 1,
+                },
+            ),
+        ),
+        hdr_out: graph.transient_image(
+            "hdr_out",
+            image(HDR_OUT_FORMAT, ImageSize::Output { shift: 0 }),
+        ),
+    });
+    // ADR-0021 §5c: the overlay's own unjittered depth and IDs at output resolution.
+    let overlay_targets = spec.overlay.then(|| {
+        (
+            graph.transient_image(
+                "overlay_depth",
+                ImageDesc {
+                    // The main depth's format, which `choose_depth_format` admitted as a
+                    // sampled depth attachment (D32 or D16), ADR-0021 amendment 2 item 20.
+                    format: spec.depth_format,
+                    aspect: spec.depth_aspect,
+                    size: ImageSize::Output { shift: 0 },
+                    samples: vk::SampleCountFlags::TYPE_1,
+                    extra_usage: vk::ImageUsageFlags::SAMPLED,
+                },
+            ),
+            graph.transient_image(
+                "overlay_ids",
+                image(OUTLINE_ID_FORMAT, ImageSize::Output { shift: 0 }),
+            ),
+        )
+    });
     let capture_buffer = capture.then(|| {
         // Every capture waits for the device to idle before reading the buffer back, so no
         // earlier submission still touches it when the next capture frame starts.
@@ -649,7 +830,7 @@ pub(crate) fn build_variant(
             None => pass.access(depth, Access::DepthWrite),
         };
         // R2b's outline IDs: written with the depth (and resolved, sample 0, with MSAA).
-        let _ = match outline_ids {
+        let pass = match outline_ids {
             Some(OutlineIdResources {
                 ids,
                 msaa: Some(msaa_ids),
@@ -659,6 +840,19 @@ pub(crate) fn build_variant(
             Some(OutlineIdResources { ids, msaa: None }) => pass.access(ids, Access::ColorWrite),
             None => pass,
         };
+        // ADR-0021 §2b: every opaque main-view draw writes its motion with its depth.
+        let _ = match temporal {
+            Some(temporal) => pass.access(temporal.motion, Access::ColorWrite),
+            None => pass,
+        };
+    }
+    if let Some(temporal) = temporal {
+        // ADR-0021 §2d: both masks start at 0 every frame; the distortion, the particles and
+        // `tc_mask` add to them.
+        let _ = graph
+            .pass("mask_clear", PassKind::MaskClear)
+            .access(temporal.reactive, Access::TransferWrite)
+            .access(temporal.tc_mask, Access::TransferWrite);
     }
     if let Some(contact) = contact {
         let _ = graph
@@ -766,6 +960,11 @@ pub(crate) fn build_variant(
             .access(vfx.particles, Access::VertexStorageRead)
             .access(vfx.alive, Access::VertexStorageRead)
             .access(vfx.args, Access::IndirectRead);
+        // ADR-0021 §2d: the haze writes `|offset| / cap` into the reactive mask.
+        let pass = match temporal {
+            Some(temporal) => pass.access(temporal.reactive, Access::ColorReadWrite),
+            None => pass,
+        };
         if !haze {
             let _ = pass.reserved();
         }
@@ -783,6 +982,13 @@ pub(crate) fn build_variant(
                 .access(accum, Access::ColorWrite)
                 .access(reveal, Access::ColorWrite);
         }
+        // ADR-0021 §2d: the reactive mask (MAX) and the covered fragments' motion
+        // (amendment 4).
+        if let Some(temporal) = temporal {
+            pass = pass
+                .access(temporal.motion, Access::ColorReadWrite)
+                .access(temporal.reactive, Access::ColorReadWrite);
+        }
         let _ = pass;
         if let (Some(accum), Some(reveal)) = (vfx.accum, vfx.reveal) {
             let _ = graph
@@ -792,9 +998,40 @@ pub(crate) fn build_variant(
                 .access(hdr, Access::ColorReadWrite);
         }
     }
+    if let Some(temporal) = temporal {
+        // ADR-0021 §2d: water surfaces, depth-tested, into the T&C mask.
+        let _ = graph
+            .pass("tc_mask", PassKind::TcMask)
+            .access(temporal.tc_mask, Access::ColorReadWrite)
+            .access(depth, Access::DepthReadSampled);
+        // ADR-0021 §4a: the previous frame's adapted exposure (it is metered from hdr_out,
+        // after the temporal pass) times the push exposure.
+        let mut exposure_pass = graph
+            .pass("exposure_linear", PassKind::ExposureLinear)
+            .access(temporal.exposure_linear, Access::StorageImageWrite);
+        if let Some(exposure) = exposure {
+            exposure_pass = exposure_pass.access(exposure, Access::SampledCompute);
+        }
+        let _ = exposure_pass;
+        let _ = graph
+            .pass("temporal", PassKind::Temporal)
+            .access(hdr, Access::SampledCompute)
+            .access(depth, Access::SampledCompute)
+            .access(temporal.motion, Access::SampledCompute)
+            .access(temporal.reactive, Access::SampledCompute)
+            .access(temporal.tc_mask, Access::SampledCompute)
+            .access(temporal.exposure_linear, Access::SampledCompute)
+            .access(temporal.hdr_out, Access::StorageImageWrite);
+    }
+    // The post chain's HDR input: the upscaler's output with temporal AA.
+    let post_hdr = temporal.map_or(hdr, |temporal| temporal.hdr_out);
     if let Some(mips) = bloom {
         for (level, &mip) in mips.iter().enumerate() {
-            let source = if level == 0 { hdr } else { mips[level - 1] };
+            let source = if level == 0 {
+                post_hdr
+            } else {
+                mips[level - 1]
+            };
             let _ = graph
                 .pass(
                     BLOOM_DOWN_NAMES[level],
@@ -823,7 +1060,7 @@ pub(crate) fn build_variant(
     }
     let mut composite = graph
         .pass("composite", PassKind::Composite)
-        .access(hdr, Access::SampledFragment)
+        .access(post_hdr, Access::SampledFragment)
         .access(ldr.unwrap_or(swapchain), Access::ColorWrite);
     if let (Some(mips), true) = (bloom, spec.bloom) {
         composite = composite.access(mips[0], Access::SampledFragment);
@@ -834,26 +1071,53 @@ pub(crate) fn build_variant(
     let _ = composite;
     // R2b: outlines on the tonemapped image at render resolution, so FXAA and the upscale
     // treat them like any other edge.
-    if let Some(outline_ids) = outline_ids {
+    if let (Some(outline_ids), true) = (outline_ids, spec.has_outline_pass()) {
         let _ = graph
             .pass("outline", PassKind::Outline)
             .access(outline_ids.ids, Access::SampledFragment)
             .access(ldr.unwrap_or(swapchain), Access::ColorReadWrite);
     }
-    if let (true, Some(ldr)) = (spec.fxaa, ldr) {
+    if let (true, Some(ldr)) = (fxaa, ldr) {
         let _ = graph
             .pass("fxaa", PassKind::Fxaa)
             .access(ldr, Access::SampledFragment)
             .access(ldr2.unwrap_or(swapchain), Access::ColorWrite);
     }
-    if spec.upscale
-        && let Some(source) = ldr2.or(ldr)
-    {
+    if upscale && let Some(source) = ldr2.or(ldr) {
         let _ = graph
             .pass("upscale", PassKind::Upscale)
             .access(source, Access::SampledFragment)
-            .access(swapchain, Access::ColorWrite);
+            .access(ldr_out.unwrap_or(swapchain), Access::ColorWrite);
     }
+    // ADR-0021 §5: the overlay over the last LDR image, at output resolution.
+    let overlay = overlay_targets.and_then(|(overlay_depth, overlay_ids)| {
+        let source = ldr_out.or(if fxaa { ldr2 } else { ldr })?;
+        let _ = graph
+            .pass("overlay_prepass", PassKind::OverlayPrepass)
+            .access(overlay_depth, Access::DepthWrite)
+            .access(overlay_ids, Access::ColorWrite)
+            .access(bones, Access::VertexStorageRead);
+        let _ = graph
+            .pass("overlay", PassKind::Overlay)
+            .access(source, Access::SampledFragment)
+            .access(overlay_depth, Access::SampledFragment)
+            .access(overlay_ids, Access::SampledFragment)
+            .access(swapchain, Access::ColorWrite);
+        if let Some(vfx) = vfx {
+            let _ = graph
+                .pass("overlay_vfx", PassKind::OverlayVfx)
+                .access(swapchain, Access::ColorReadWrite)
+                .access(overlay_depth, Access::DepthReadSampled)
+                .access(vfx.particles, Access::VertexStorageRead)
+                .access(vfx.alive, Access::VertexStorageRead)
+                .access(vfx.args, Access::IndirectRead);
+        }
+        Some(OverlayResources {
+            depth: overlay_depth,
+            ids: overlay_ids,
+            source,
+        })
+    });
     // The UI samples every offscreen image in every variant (its descriptors always name
     // them), so each read is ordered after this frame's write, if any.
     let mut ui = graph
@@ -897,6 +1161,9 @@ pub(crate) fn build_variant(
             contact,
             refraction,
             distortion,
+            temporal,
+            overlay,
+            ldr_out,
         },
     })
 }
@@ -1991,5 +2258,176 @@ mod tests {
         }
         // The largest frame: 33 of 40 passes (ADR-0019).
         assert_eq!(largest, 33);
+    }
+
+    /// The tiered frames (ADR-0021 §5a): every post topology with temporal AA and the overlay.
+    fn tiered_specs() -> Vec<FrameSpec> {
+        post_specs()
+            .into_iter()
+            .filter(|spec| !spec.msaa)
+            .flat_map(|spec| {
+                [false, true].map(|water| FrameSpec {
+                    temporal: true,
+                    overlay: true,
+                    outline_ids: true,
+                    water,
+                    distortion: true,
+                    ..spec
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_temporal_frame_masks_upscales_then_posts_and_overlays_at_output_resolution() {
+        let mut largest = 0;
+        for spec in tiered_specs() {
+            let base = build(&spec, false, 0).expect("compiles");
+            for haze in [false, true] {
+                for capture in [false, true] {
+                    for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
+                        let frame = build_variant(&spec, capture, offscreen, haze)
+                            .expect("variant compiles");
+                        assert!(frame.graph.shares_transients_with(&base.graph), "{spec:?}");
+                        assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
+                        largest = largest.max(frame.graph.passes().len());
+                    }
+                }
+            }
+            let passes = kinds(&base);
+            let at = |kind| passes.iter().position(|&pass| pass == kind);
+            // Temporal replaces FXAA, the upscale and R2b's outline pass.
+            for gone in [PassKind::Fxaa, PassKind::Upscale, PassKind::Outline] {
+                assert!(at(gone).is_none(), "{spec:?}: {gone:?}");
+            }
+            let prepass = at(PassKind::Prepass).expect("prepass");
+            let clear = at(PassKind::MaskClear).expect("mask clear");
+            let scene = at(PassKind::Scene).expect("scene");
+            let tc = at(PassKind::TcMask).expect("tc mask");
+            let exposure = at(PassKind::ExposureLinear).expect("exposure_linear");
+            let temporal = at(PassKind::Temporal).expect("temporal");
+            let composite = at(PassKind::Composite).expect("composite");
+            let overlay_prepass = at(PassKind::OverlayPrepass).expect("overlay prepass");
+            let overlay = at(PassKind::Overlay).expect("overlay");
+            let ui = at(PassKind::Ui).expect("ui");
+            assert!(prepass < clear && clear < scene, "{spec:?}");
+            // The masks are complete (distortion, particles, water) before the upscaler.
+            for writer in [PassKind::Distortion, PassKind::VfxDraw, PassKind::Water] {
+                assert!(
+                    at(writer).is_none_or(|pass| pass < tc),
+                    "{spec:?}: {writer:?}"
+                );
+            }
+            assert!(tc < exposure && exposure < temporal, "{spec:?}");
+            // The whole post chain reads the upscaler's output.
+            assert!(at(PassKind::BloomDown(0)).is_none_or(|down| down > temporal));
+            assert!(at(PassKind::Exposure).is_none_or(|meter| meter > temporal));
+            assert!(temporal < composite && composite < overlay_prepass);
+            assert_eq!(overlay, overlay_prepass + 1);
+            match spec.vfx {
+                VfxMode::Off => assert!(at(PassKind::OverlayVfx).is_none()),
+                _ => assert_eq!(at(PassKind::OverlayVfx), Some(overlay + 1), "{spec:?}"),
+            }
+            assert!(at(PassKind::OverlayVfx).unwrap_or(overlay) < ui);
+            let temporal_ids = base.resources.temporal.expect("temporal resources");
+            let overlay_ids = base.resources.overlay.expect("overlay resources");
+            // The composite writes the LDR image the overlay reads, at output resolution.
+            assert_eq!(Some(overlay_ids.source), base.resources.ldr, "{spec:?}");
+            assert!(base.resources.ldr2.is_none() && base.resources.ldr_out.is_none());
+            let size = |resource| {
+                base.graph
+                    .slot_of(resource)
+                    .map(|slot| base.graph.slots()[slot].desc.size)
+            };
+            let output = Some(ImageSize::Output { shift: 0 });
+            for resource in [
+                temporal_ids.hdr_out,
+                overlay_ids.depth,
+                overlay_ids.ids,
+                overlay_ids.source,
+            ] {
+                assert_eq!(size(resource), output, "{spec:?}");
+            }
+            let render = Some(ImageSize::Render { shift: 0 });
+            for resource in [
+                temporal_ids.motion,
+                temporal_ids.reactive,
+                temporal_ids.tc_mask,
+            ] {
+                assert_eq!(size(resource), render, "{spec:?}");
+            }
+            if let Some(mips) = base.resources.bloom {
+                assert_eq!(size(mips[0]), Some(ImageSize::Output { shift: 1 }));
+            }
+            // The upscaler's inputs are sampled by compute; its output is a storage image.
+            let passes = base.graph.passes();
+            let output = barrier(&passes[temporal], temporal_ids.hdr_out);
+            assert_eq!(output.new_layout, L::GENERAL);
+            let motion = barrier(&passes[temporal], temporal_ids.motion);
+            assert_eq!(motion.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+            // Only the overlay and the UI write the swapchain.
+            let writers = base
+                .graph
+                .passes()
+                .iter()
+                .filter(|pass| pass.uses(base.resources.swapchain))
+                .count();
+            assert_eq!(
+                writers,
+                2 + usize::from(spec.vfx != VfxMode::Off),
+                "{spec:?}"
+            );
+        }
+        assert!(largest <= crate::graph::MAX_PASSES, "{largest}");
+    }
+
+    #[test]
+    fn temporal_off_on_tiered_keeps_the_render_resolution_chain_under_the_overlay() {
+        for (fxaa, upscale) in [(false, false), (true, false), (false, true), (true, true)] {
+            let spec = FrameSpec {
+                temporal: false,
+                overlay: true,
+                outline_ids: true,
+                fxaa,
+                upscale,
+                vfx: VfxMode::Unsorted,
+                ..plain()
+            };
+            let frame = build(&spec, false, 0).expect("compiles");
+            let passes = kinds(&frame);
+            let at = |kind| passes.iter().position(|&pass| pass == kind);
+            assert!(at(PassKind::Temporal).is_none() && at(PassKind::MaskClear).is_none());
+            assert!(
+                at(PassKind::Outline).is_none(),
+                "the overlay draws the outlines"
+            );
+            assert_eq!(at(PassKind::Fxaa).is_some(), fxaa);
+            assert_eq!(at(PassKind::Upscale).is_some(), upscale);
+            let overlay = frame.resources.overlay.expect("overlay");
+            // The overlay reads the last LDR image: the upscale's output, else FXAA's, else
+            // the composite's; never the swapchain.
+            let expected = if upscale {
+                frame.resources.ldr_out
+            } else if fxaa {
+                frame.resources.ldr2
+            } else {
+                frame.resources.ldr
+            };
+            assert_eq!(Some(overlay.source), expected, "{fxaa} {upscale}");
+            let last_post = [PassKind::Upscale, PassKind::Fxaa, PassKind::Composite]
+                .into_iter()
+                .find_map(at)
+                .expect("a post pass");
+            assert_eq!(at(PassKind::OverlayPrepass), Some(last_post + 1));
+        }
+    }
+
+    #[test]
+    fn compat_frames_have_no_temporal_or_overlay_resources() {
+        for spec in post_specs() {
+            let frame = build(&spec, false, 0).expect("compiles");
+            assert!(frame.resources.temporal.is_none() && frame.resources.overlay.is_none());
+            assert!(frame.resources.ldr_out.is_none());
+        }
     }
 }

@@ -69,6 +69,14 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 baked_ao;         // xy AO map origin (world x, z), z 1 / map size, w height falloff
     vec4 contact;          // x ray steps, y ray length, z thickness, w fade-out distance
     vec4 outline_palette[MOBA_OUTLINE_SLOTS]; // rgb linear display colour, w width (pixels)
+    // N1 temporal (ADR-0021 §1, §2). On Compat and with temporal AA off the two matrices equal
+    // `view_proj` and the rest is zero; `view_proj` and `inv_view_proj` above are jittered.
+    mat4 view_proj_unjittered; // motion vectors (the current position without jitter)
+    mat4 prev_view_proj;       // the previous presented frame's unjittered matrix
+    vec4 jitter;               // xy this frame's jitter, zw the previous frame's (render px,
+                               // x right, y down)
+    vec4 temporal;             // x material mip bias, yz render size (px) of the motion
+                               // vectors, w 1 = temporal (motion and jitter live)
 } camera;
 
 #endif

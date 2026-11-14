@@ -1,0 +1,209 @@
+# Pinned vendor SDKs behind moba-render's optional features (ADR-0020 §6).
+#
+# Nothing listed here is vendored. `scripts/fetch-sdks.sh` (`scripts/fetch-sdks.ps1` on Windows)
+# downloads each archive from the official GitHub release or tag/commit archive below into
+# `${MOBA_SDK_DIR:-target/vendor-sdks}/<dir>/`, checks the archive's SHA-256, unpacks it and
+# checks the SHA-256 of its licence file. A changed licence text fails the fetch: re-read the
+# licence (roadmap §7), record the re-read in the PR, then update `licence_sha256`.
+# `crates/render/build.rs` reads this file and the `.moba-sdk-sha256` stamp the fetch writes;
+# it never downloads.
+#
+# Fields:
+#   name             the entry's name (`--only` accepts entry and feature names)
+#   features         the moba-render features that need it (sub-entries inherit the parent's)
+#   parent           for a git submodule or CMake download: the entry it is unpacked into
+#   version          upstream version label
+#   repository       the GitHub repository the archive comes from
+#   tag              the git tag ("" for an untagged commit pin)
+#   commit           the full commit the archive was made from
+#   url              the archive (an official GitHub release asset or tag/commit archive)
+#   sha256           SHA-256 of the archive
+#   github_digest    the `digest` GitHub's releases API publishes for a release asset, which
+#                    must equal sha256; "" for tag and commit archives (GitHub publishes none)
+#   strip            the archive's top-level directory, removed when unpacking ("" for none)
+#   dir              where it is unpacked, relative to MOBA_SDK_DIR
+#   licence          the licence file, relative to `dir`
+#   licence_sha256   SHA-256 of that file, exactly as unpacked
+#   licence_name     what the licence is (read in full when pinned)
+#   platforms        where the SDK ships run-time binaries or builds (headers are used on every
+#                    platform the feature compiles on; see docs/dev/vendor-sdks.md)
+#   status           "verified" (archive and licence hashed and the licence read) or
+#                    "unverified" (not fetchable without a login or click-through; skipped)
+#
+# Pinned and verified 2026-11-01. The release-asset digests were cross-checked against
+# `gh api repos/<repo>/releases/tags/<tag>` on that date.
+
+schema = 1
+
+[[sdk]]
+name = "dlss"
+features = ["dlss"]
+version = "310.9.16"
+repository = "https://github.com/NVIDIA/DLSS"
+tag = "v310.9.16"
+commit = "9981c6350dc58c0ce21f024fd65e31e851c31689"
+url = "https://github.com/NVIDIA/DLSS/archive/refs/tags/v310.9.16.zip"
+sha256 = "418d6c685b062855f970d55d1e172eff834658a17b3483aaffddf44d5b0cb026"
+github_digest = ""
+strip = "DLSS-310.9.16"
+dir = "dlss-v310.9.16"
+licence = "LICENSE.txt"
+licence_sha256 = "d4216e39ebef5f9b50a6712ebb37beeb5379862a67733a9999c651f21592aaf0"
+licence_name = "NVIDIA RTX SDKs License (v. March 14, 2024) and the NVIDIA RTX supplement"
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "verified"
+
+[[sdk]]
+name = "streamline"
+features = ["streamline"]
+version = "2.14.16"
+repository = "https://github.com/NVIDIA-RTX/Streamline"
+tag = "v2.14.16"
+commit = "625db07d4bca5abc67d781c42af7e7fb0761f1b6"
+url = "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip"
+sha256 = "32041e51db0cab709a271b72a352281b690c2abbd669a827809401a5dd23956b"
+github_digest = "sha256:32041e51db0cab709a271b72a352281b690c2abbd669a827809401a5dd23956b"
+strip = ""
+dir = "streamline-v2.14.16"
+licence = "license.txt"
+licence_sha256 = "7b6f23e7d6f3ad6292f9308d2b42cdc3d82ae4e9b2abb55f230279d83bedd43d"
+licence_name = "MIT (Streamline); names sl_nvperf.h and sl.nvperf.dll as under the Nsight Perf SDK License; the bundled DLSS binaries carry bin/x64/nvngx_dlss.license.txt (NVIDIA RTX SDKs License)"
+platforms = ["windows-x86_64"]
+status = "verified"
+
+[[sdk]]
+name = "nrd"
+features = ["nrd"]
+version = "4.18.0"
+repository = "https://github.com/NVIDIA-RTX/NRD"
+tag = "v4.18.0"
+commit = "8f12a22fc90e6a3c7f5da4c9c3103633c842963a"
+url = "https://github.com/NVIDIA-RTX/NRD/archive/refs/tags/v4.18.0.zip"
+sha256 = "d9cb9476c11a8773bfe32d99d26e7038bac0ef3e09957f63e35c3b0fe9f29790"
+github_digest = ""
+strip = "NRD-4.18.0"
+dir = "nrd-v4.18.0"
+licence = "LICENSE.txt"
+licence_sha256 = "0f74d24da3082b666de48eea9ec7ff835657575a71576281e383901f3d7c08c2"
+licence_name = "NVIDIA RTX SDKs License (v. April 12, 2021) and the NVIDIA RTX supplement"
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "verified"
+
+# NRD v4.18.0's CMakeLists.txt FetchContent-downloads this exact archive URL; build.rs points
+# FETCHCONTENT_SOURCE_DIR_SHADERMAKE at it with FETCHCONTENT_FULLY_DISCONNECTED=ON.
+[[sdk]]
+name = "nrd-shadermake"
+parent = "nrd"
+version = "3f01623a76b0"
+repository = "https://github.com/NVIDIA-RTX/ShaderMake"
+tag = ""
+commit = "3f01623a76b092ac127d2debd79a672f55d77665"
+url = "https://github.com/NVIDIA-RTX/ShaderMake/archive/3f01623a76b092ac127d2debd79a672f55d77665.zip"
+sha256 = "becdd4593f09f42b191c3a9579569d6497869ad624fdb0275f7708508bfcadd7"
+github_digest = ""
+strip = "ShaderMake-3f01623a76b092ac127d2debd79a672f55d77665"
+dir = "nrd-v4.18.0/_deps/shadermake-src"
+licence = "LICENSE.txt"
+licence_sha256 = "9a15ad379b80dd0cf5df71dc394ca940fb31f58aa6098f6e74c499a845edfc32"
+licence_name = "MIT"
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "verified"
+
+# Likewise for MathLib (FETCHCONTENT_SOURCE_DIR_MATHLIB).
+[[sdk]]
+name = "nrd-mathlib"
+parent = "nrd"
+version = "11"
+repository = "https://github.com/NVIDIA-RTX/MathLib"
+tag = "v11"
+commit = "aa432ad9a80691eb8c3ec4d576bbad5ac100fdc8"
+url = "https://github.com/NVIDIA-RTX/MathLib/archive/refs/tags/v11.zip"
+sha256 = "4a0772103fd7ef832f8c2fb3ec7fb6bf5b3bebbd41ecafc476671d11eca28a06"
+github_digest = ""
+strip = "MathLib-11"
+dir = "nrd-v4.18.0/_deps/mathlib-src"
+licence = "LICENSE.txt"
+licence_sha256 = "7c5e43e9fe07dd6f50cc6e000df7980640706d6278b4c6e4d3126a31e9ff1c93"
+licence_name = "MIT"
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "verified"
+
+# RTXDI v3.1.0 (NVIDIA-RTX/RTXDI, tag commit a6efab966b7c) keeps its shader library in the
+# submodule Libraries/Rtxdi -> NVIDIA-RTX/RTXDI-Library at this commit ("3.1 Update"). The
+# feature pins the library directly, not the sample repository (ADR-0020 §6b).
+[[sdk]]
+name = "rtxdi"
+features = ["rtxdi"]
+version = "3.1.0"
+repository = "https://github.com/NVIDIA-RTX/RTXDI-Library"
+tag = ""
+commit = "f12037fa8e97ebc08e9e3edfd2de528ed1772a4b"
+url = "https://github.com/NVIDIA-RTX/RTXDI-Library/archive/f12037fa8e97ebc08e9e3edfd2de528ed1772a4b.zip"
+sha256 = "f91de92d7c27f9824915ee5fcf62b0da664a6eb294edb659056ff3c462823f75"
+github_digest = ""
+strip = "RTXDI-Library-f12037fa8e97ebc08e9e3edfd2de528ed1772a4b"
+dir = "rtxdi-v3.1.0"
+licence = "LICENSE.txt"
+licence_sha256 = "120a5af845068454e8498718e230689660abd96b15f48a19858c56f0e3ecfb4c"
+licence_name = "NVIDIA RTX SDKs License (v. January 31, 2025) and the NVIDIA RTX supplement"
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "verified"
+
+# SHaRC 1.8.3 is the untagged commit "v1.8.3" of NVIDIA-RTX/SHARC; RTXGI v2.8.0's
+# Libraries/Sharc submodule points at it (ADR-0020 §6b).
+[[sdk]]
+name = "sharc"
+features = ["sharc"]
+version = "1.8.3"
+repository = "https://github.com/NVIDIA-RTX/SHARC"
+tag = ""
+commit = "4e21b585c33c83d723ca9a1e11bbb1090d145793"
+url = "https://github.com/NVIDIA-RTX/SHARC/archive/4e21b585c33c83d723ca9a1e11bbb1090d145793.zip"
+sha256 = "2fce446623df71f6cb6217da300422a0b4cfb7d7dca92d8111708dc030d60b4c"
+github_digest = ""
+strip = "SHARC-4e21b585c33c83d723ca9a1e11bbb1090d145793"
+dir = "sharc-v1.8.3"
+licence = "License.md"
+licence_sha256 = "5575ad921bfe6027dc830887ff51ceb4097e31c2d538b6932cd4bbdf5c1899a9"
+licence_name = "NVIDIA RTX SDKs License (v. February 23, 2024) and the NVIDIA RTX supplement"
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "verified"
+
+# FSR 4.1.2 (signed amd_fidelityfx_*_vk.dll). The kit's licence lists the signed DLLs under
+# MIT while its default terms are binary-only; `fsr4` stays development-only (ADR-0020 Q6).
+# The repository root's docs/license.md (sha256 410f9c13...) has the same terms and lists.
+[[sdk]]
+name = "fidelityfx"
+features = ["fsr4"]
+version = "2.4.0"
+repository = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK"
+tag = "v2.4.0"
+commit = "7539ae8b6568ad29ed78a753404351daf3b5cca7"
+url = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/archive/refs/tags/v2.4.0.zip"
+sha256 = "27120e3bbe0d0b30213825ad40f19077563f04f04572e252109a392d5fb522cb"
+github_digest = ""
+strip = "FidelityFX-SDK-2.4.0"
+dir = "fidelityfx-v2.4.0"
+licence = "Kits/FidelityFX/docs/license.md"
+licence_sha256 = "32357259b965d6a8001e9e508ba60eda6034027c5923a7d226ffbaff813c2bfb"
+licence_name = "AMD FidelityFX SDK licence: binary-only redistribution by default, MIT for the listed files (which include the signed DLLs)"
+platforms = ["windows-x86_64"]
+status = "verified"
+
+[[sdk]]
+name = "xess"
+features = ["xess"]
+version = "3.0.2"
+repository = "https://github.com/intel/xess"
+tag = "v3.0.2"
+commit = "8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0"
+url = "https://github.com/intel/xess/releases/download/v3.0.2/XeSS_SDK_3.0.2.zip"
+sha256 = "88b8a373f30e33f3558a77a93e634f11b8132fc3047ea1a8edeead32b8471990"
+github_digest = "sha256:88b8a373f30e33f3558a77a93e634f11b8132fc3047ea1a8edeead32b8471990"
+strip = ""
+dir = "xess-v3.0.2"
+licence = "LICENSE.txt"
+licence_sha256 = "784be42c39a4a4d03cf85d88e15e59d75828fca773ce45b8dbfffbd7eaf208df"
+licence_name = "Intel Simplified Software License (October 2022); the headers carry Intel's proprietary notice under the same licence"
+platforms = ["windows-x86_64"]
+status = "verified"

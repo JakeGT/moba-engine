@@ -1,0 +1,24 @@
+name: Set up the pinned slangc
+description: >-
+  Restores or fetches the Slang compiler pinned in crates/shaders/slang-version.txt into
+  target/tools/slang-<version>/ (ADR-0020 §4c), cached by version. spirv-val, which the Slang
+  modules require, comes from each job's own install step: spirv-tools (apt or brew) or the
+  Vulkan SDK on Windows. Use it after actions/checkout and after Swatinem/rust-cache: post
+  steps run in reverse, so this cache is saved before rust-cache prunes target/.
+runs:
+  using: composite
+  steps:
+    - name: Cache slangc
+      uses: actions/cache@v6
+      with:
+        path: target/tools/slang-*
+        # `-pruned`: the fetch scripts now drop the unused LLVM back end (ADR-0020 §4c).
+        key: slang-pruned-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/shaders/slang-version.txt') }}
+    - name: Fetch slangc (Linux, macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: scripts/fetch-slang.sh
+    - name: Fetch slangc (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: scripts/fetch-slang.ps1

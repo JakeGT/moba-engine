@@ -1,6 +1,7 @@
 //! Swapchain creation and surface format selection. Depth and HDR targets are render-graph
 //! transients ([`crate::targets`]), not per-image swapchain resources.
 
+use ash::vk::TaggedStructure as _;
 use ash::{Device, khr, vk};
 
 use crate::device::DeviceContext;
@@ -32,6 +33,7 @@ impl Swapchain {
         desired_extent: vk::Extent2D,
         vsync: bool,
         old: Option<vk::SwapchainKHR>,
+        low_latency: bool,
     ) -> RenderResult<Self> {
         // SAFETY: surface/physical device belong to this instance.
         let capabilities = unsafe {
@@ -103,8 +105,14 @@ impl Swapchain {
             create_info = create_info.image_sharing_mode(vk::SharingMode::EXCLUSIVE);
         }
 
+        // ADR-0021 §6a: Reflex needs the swapchain created for it.
+        let mut latency = vk::SwapchainLatencyCreateInfoNV::default().latency_mode_enable(true);
+        if low_latency {
+            create_info = create_info.push(&mut latency);
+        }
+
         let loader =
-            khr::swapchain::Device::new(&instance_context.instance, &device_context.device);
+            khr::swapchain::Device::load(&instance_context.instance, &device_context.device);
         // SAFETY: the surface is live, the device supports the swapchain extension, and all
         // create-info pointers are valid for the call.
         let handle = unsafe { loader.create_swapchain(&create_info, None) }?;
@@ -192,16 +200,25 @@ impl Swapchain {
         queue: vk::Queue,
         image_index: u32,
         wait_semaphore: vk::Semaphore,
+        present_id: Option<u64>,
     ) -> RenderResult<bool> {
         let swapchains = [self.handle];
         let wait_semaphores = [wait_semaphore];
         let image_indices = [image_index];
-        let present_info = vk::PresentInfoKHR::default()
+        let mut present_info = vk::PresentInfoKHR::default()
             .wait_semaphores(&wait_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
+        // The frame's present ID (Reflex's markers name frames by it, ADR-0021 §6b).
+        let present_ids = [present_id.unwrap_or(0)];
+        let mut ids = vk::PresentIdKHR::default().present_ids(&present_ids);
+        if present_id.is_some() {
+            present_info = present_info.push(&mut ids);
+        }
         // SAFETY: the queue belongs to this device, the swapchain is live, and the wait
-        // semaphore is signalled by the frame's submit.
+        // semaphore is signalled by the frame's submit. A present ID is chained only on a
+        // device that enables `VK_KHR_present_id` with `presentId` (Reflex needs both), and
+        // the renderer's IDs grow with every present.
         let result = unsafe { self.loader.queue_present(queue, &present_info) };
         match result {
             Ok(false) => Ok(true),

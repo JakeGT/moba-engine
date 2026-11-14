@@ -22,10 +22,12 @@ moba-sim.workspace = true
 moba-game.workspace = true
 moba-net.workspace = true
 moba-netsim.workspace = true
-moba-render.workspace = true
+# `fsr3` as moba-client has it, so the two share one moba-render build.
+moba-render = { workspace = true, features = ["fsr3"] }
 moba-assets = { workspace = true, features = ["glb", "bc-decode"] }
 bcdec_rs.workspace = true
 png.workspace = true
+serde_json.workspace = true
 # The mesh LOD baker's meshoptimizer (C++) is optional, so the released tools
 # (content-check, replay, ...) do not compile it (R8).
 meshopt = { workspace = true, optional = true }

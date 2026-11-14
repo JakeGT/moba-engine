@@ -198,7 +198,7 @@ impl LightingConfig {
             QualityTier::Low => (ShadowFilter::Hard, 1024, false, 16),
             QualityTier::Medium => (ShadowFilter::Pcf, 2048, true, 16),
             QualityTier::High => (ShadowFilter::Pcss, 2048, true, 16),
-            QualityTier::Ultra => (ShadowFilter::Pcss, 4096, true, 32),
+            QualityTier::Ultra | QualityTier::Overdrive => (ShadowFilter::Pcss, 4096, true, 32),
         };
         let (max_lights, lights_per_cell, outlines, contact_shadow_steps) = match tier {
             // Per-column caps: a column is about 4.6 m at the default camera, so a teamfight's
@@ -206,7 +206,7 @@ impl LightingConfig {
             QualityTier::Low => (16, 8, OutlineMode::Hull, 0),
             QualityTier::Medium => (64, 12, OutlineMode::Hull, 0),
             QualityTier::High => (128, 16, OutlineMode::Screen, 8),
-            QualityTier::Ultra => (256, 16, OutlineMode::Screen, 16),
+            QualityTier::Ultra | QualityTier::Overdrive => (256, 16, OutlineMode::Screen, 16),
         };
         Self {
             shadows,
@@ -1395,6 +1395,11 @@ impl LightingResources {
 
     /// Writes this frame's decals into main-view set `frame`'s buffer. The frame's fence
     /// must have been waited on.
+    /// Each frame slot's decal buffer (the overlay binds them too, ADR-0021 §5b).
+    pub(crate) fn decal_buffers(&self) -> [vk::Buffer; MAIN_SETS] {
+        core::array::from_fn(|frame| self.decals[frame].handle())
+    }
+
     pub(crate) fn write_decals(&mut self, frame: usize, upload: &crate::environment::DecalUpload) {
         self.decals[frame % MAIN_SETS].write_bytes(0, upload.bytes());
     }

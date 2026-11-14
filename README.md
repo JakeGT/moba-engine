@@ -25,12 +25,14 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol (v42): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing, compute GPU-particle VFX bound to presentation events) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, MSDF text, 3D hero portraits and a baked minimap rendered to texture, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 882 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 1003 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
-Requirements: Rust 1.88+, a Vulkan 1.3 driver, and `glslc` (Vulkan SDK or
-`glslang-tools`) to build shaders. Linux, Windows and macOS (MoltenVK) are supported.
+Requirements: Rust 1.88+, a Vulkan 1.3 driver, `glslc` (Vulkan SDK or `glslang-tools`) and
+`spirv-val` (`spirv-tools`) to build shaders, plus the pinned Slang compiler, fetched once with
+`scripts/fetch-slang.sh` (Windows: `scripts/fetch-slang.ps1`; see
+[docs/dev/slang.md](docs/dev/slang.md)). Linux, Windows and macOS (MoltenVK) are supported.
 
 ```bash
 # 1. Headless match (no GPU required)
@@ -59,11 +61,24 @@ Arrows/F1–F5/1–8`; invalid or duplicate values fall back to defaults. `ui_sc
 `MOBA_UI_SCALE` overrides it for one run; HUD text is a signed-distance-field font, so it
 stays sharp at any scale. `team_palette` (`standard` or `colorblind`, default `standard`) picks
 the health-bar and minimap team colours; `colorblind` uses Okabe-Ito yellow/sky-blue/orange,
-and `MOBA_TEAM_PALETTE` overrides it. `quality` (`low`/`medium`/`high`/`ultra`, default
-`high`) is the rendering quality tier; `MOBA_QUALITY` overrides it. Today it picks the HDR
+and `MOBA_TEAM_PALETTE` overrides it. `quality` (`auto`/`low`/`medium`/`high`/`ultra`/`overdrive`,
+default `auto`) is the rendering quality tier; `MOBA_QUALITY` overrides it. On the tiered
+path `auto` is detected on every interactive start from the GPU's reference table (ADR-0020
+§2b), and nothing is written to the file; on Compat it is High, as before. Automated runs
+(smoke frames, captures) never detect and use High. A tier the device cannot run is capped at
+its `max_tier`. A file without `settings_version = 1` was written before the tiered path, so
+its tier is re-detected on the tiered path and kept on Compat. `overdrive` is the tiered
+path's top tier and runs as `ultra` on Compat.
+On the tiered path dynamic resolution aims at the tier's GPU budget (§5c). With temporal AA
+(the tiered default since N1a) it runs between the upscale mode's scale and the tier's floor;
+with temporal AA off it is off unless `MOBA_DYNRES=on` (or a target in ms) turns it on. Today it picks the HDR
 target format (Low uses the packed 32-bit format) and the hero-portrait rate (static on Low,
 re-rendered only when the heroes change; `MOBA_PORTRAITS=off|static|animated|<hz>` and `MOBA_MINIMAP_BAKE=off|once` switch
-the portraits and the baked minimap). `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
+the portraits and the baked minimap). `render_path` (`auto`/`tiered`/`compat`, default `auto`)
+picks the renderer ([ADR-0020](docs/adr/0020-next-gen-foundations.md) §2): `auto` runs the
+tiered path on a GPU with hardware ray tracing and the bindless limits, and Compat elsewhere
+(macOS, CPU devices, older GPUs); `MOBA_RENDER_PATH` overrides it. The `[render]` start-up
+line and the frame log name the path (`path=`, `max_tier=`, `missing=`). `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
 (70–420), `attack_button` (`left`/`right`) and spectator camera keys are also configurable.
 `MOBA_SAVE_SETTINGS=1` writes defaults; `MOBA_RESET_SETTINGS=1` resets the file.
 `MOBA_FRAME_LOG=/tmp/frames.log MOBA_VSYNC=0` records raw frame intervals and writes
@@ -271,6 +286,8 @@ moba-engine = { version = "0.2", default-features = false, features = ["sim", "n
 ```
 
 or take individual crates (`moba-sim`, `moba-net`, …) for a narrower dependency graph.
+To embed the renderer, copy the workspace's `[patch.crates-io]` `ash` pin into your own root
+`Cargo.toml` ([details](docs/building-on-moba.md#the-renderer-and-the-ash-pin)).
 Runnable examples live in `crates/engine/examples`:
 
 ```bash
