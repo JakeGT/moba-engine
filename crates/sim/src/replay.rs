@@ -347,18 +347,18 @@ impl Replay {
                 return Err(ReplayError::BadData);
             }
             let mut inputs = TickInputs::new();
-            for slot in 0..MAX_PLAYERS {
+            for (slot, player) in inputs.players.iter_mut().enumerate() {
                 if present & (1 << slot) != 0 {
-                    inputs.players[slot] = Some(decode_command(&mut reader)?);
+                    *player = Some(decode_command(&mut reader)?);
                 }
             }
             let purchases = reader.u16()?;
             if purchases & !0x03FF != 0 {
                 return Err(ReplayError::BadData);
             }
-            for slot in 0..MAX_PLAYERS {
+            for (slot, purchase) in inputs.purchases.iter_mut().enumerate() {
                 if purchases & (1 << slot) != 0 {
-                    inputs.purchases[slot] = Some(reader.u8()?);
+                    *purchase = Some(reader.u8()?);
                 }
             }
             frames.push(inputs);

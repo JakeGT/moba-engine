@@ -260,8 +260,8 @@ fn reload_team_size_reassigns_connected_slots() {
     content.rules.team_size = 1;
     server.content = Arc::new(content);
     let addr = server.local_addr().expect("addr");
-    for slot in 0..4 {
-        server.clients[slot] = Some(test_client(
+    for (slot, client) in server.clients[..4].iter_mut().enumerate() {
+        *client = Some(test_client(
             addr,
             slot as u8,
             if slot < 2 {
