@@ -1,8 +1,9 @@
 # Heroes, minions and structures (v0)
 
-**Status:** v0 draft, 2026-10-31. **Lead:** maintainer. **Decided:** the maintainer picks the
-vertical-slice hero from three concepts covering both factions and different roles. Every
-concept here maps onto an **existing kit**, so the slice needs new art, not new gameplay.
+**Status:** v0 approved 2026-11-14. **Lead:** maintainer. **Decided (2026-11-14):** the
+vertical-slice hero is the **Kiln Warden**, picked from three concepts covering both factions
+and different roles; the neutral camp is the **ember scarabs**. Every concept here maps onto
+an **existing kit**, so the slice needs new art, not new gameplay.
 
 Names are working names. Concept art for every option is in the review app (several
 variants per concept, plus 30 px and 40 px silhouettes); the best are in [boards/](boards/).
@@ -18,7 +19,7 @@ review app under *Earlier rounds*.
 | | **1. The Kiln Warden** | **2. The Still Oracle** | **3. The Ash Strider** |
 |---|---|---|---|
 | Faction | Solar Forge | Void | Ashen (neutral nomads) |
-| Role, size class | Melee bruiser, **Hero M/L** (2.0 m) | Caster, **Hero M** (1.9 m, floats 0.2 m) | Marksman, **Hero S** (1.75 m) |
+| Role, size class | Melee bruiser, **Hero M** (2.0 m) | Caster, **Hero M** (1.9 m, floats 0.2 m) | Marksman, **Hero S** (1.75 m) |
 | Existing kit | **Blade** (760 HP, 2 m range) | **Mage** (500 HP, 8 m range) | **Ranger** (540 HP, 9 m range) |
 | One line | A guild-knight who carries a sun's collector array on his back and a fusion core in his hammer | A blind astronomer who folds space around her hands with gravity rings | A Crossing-born hunter armed with Builder relics scavenged from both empires |
 | 40 px tell (top third) | **Sun-disc collector halo** (≈ 1 m, radial fins) above stacked pauldrons; hammer head over the shoulder | **Crescent crown** of three hovering composite segments; **three slabs** hovering at the shoulders, angled down, with clear gaps | **Bone-white bow arc** held diagonally; hood and a scarf streaming sideways |
@@ -31,14 +32,11 @@ review app under *Earlier rounds*.
 | AI-pipeline fit (roadmap §9.3) | **Good:** hard-surface armour decimates and bakes well | Medium: floating parts are separate meshes (easy); the robe needs hand topology | Hard: layered cloth needs hand topology and sim |
 | Main risk | Looks generic "paladin" unless the collector halo and ceramic stay prominent | Dark blob on basalt without the bone/silver rule; slabs read as wings | Blends into sand and ash (CON-1): the charcoal cloak is required |
 
-**Recommendation: the Kiln Warden for the slice.** It is the cheapest to produce well
-through the pipeline. It tests the thing only a human can sign off (animation feel and
-impact), it suits the Golden Crossing mood and the Forge's west base, and its silhouette is
-the most robust at 30 px. The Still Oracle is the strongest identity and the best
-second hero for A4.
-
-> **Decision needed (maintainer): the slice hero** — Warden (recommended), Oracle or Strider.
-> Pick in the review app; comments there feed v1.
+**Decided (2026-11-14): the Kiln Warden is the slice hero.** It is the cheapest to produce
+well. It tests the thing only a human can sign off (animation feel and impact), it suits the
+Golden Crossing mood and the Forge's west base, and its silhouette is the most robust at
+30 px. The Still Oracle is the strongest identity and the best second hero for A4; the Ash
+Strider stays an A4 candidate.
 
 ### Round G4: the advanced-tech redesigns
 
@@ -61,8 +59,8 @@ from the fantasy-era rounds, and **every 40 px tell now survives**:
 **Model sheets (round G5, Nano Banana Pro;** [boards/g5-sheets.jpg](boards/g5-sheets.jpg)): three
 turnarounds, two front A-poses and up to two detail callouts each, sent g1 (Warden), g2
 (Oracle) and g2 (Strider) as references, with the corrections above written into the prompt.
-They are the modeller's starting point once the slice hero is picked. What they settled, and
-what is still for the modeller to decide:
+The Warden's sheet is the modeller's starting point for the slice; the other two wait for A4.
+What they settled, and what is still for the modeller to decide:
 
 - **Warden:** the cream ceramic breastplate and tabard are back, and the design holds across
   all four views. The collector fins are flat blades in the front A-pose but **still spikes in
@@ -75,8 +73,7 @@ what is still for the modeller to decide:
 - One detail callout each for the Oracle and the Strider failed (the service returned no
   image, as in round G1); one of each survived.
 
-**Recommendation unchanged: the Kiln Warden for the slice.** The redesign makes the case
-stronger: the most robust silhouette, hard-surface throughout (best for the AI-assisted
+**Why the Kiln Warden.** The redesign made the case stronger: the most robust silhouette, hard-surface throughout (best for the AI-assisted
 pipeline), and the clearest "technology that looks like magic" read (a sun on his back, a
 contained star in his hammer).
 
@@ -130,8 +127,9 @@ Each concept also has a **take B** in the review app, so the pick isn't tied to 
   sideways (the generator ignores "angled down"), and the crown drops out in several cut-outs.
   The slab placement is a model-sheet decision, not a prompt one.
 
-> **Decision needed (maintainer): does the slice hero keep its old name?** Blade, Mage and
-> Ranger are kit names today. **Recommendation:** new display names; kit IDs unchanged.
+**Decided (2026-11-14): new display names; kit IDs unchanged.** Blade, Mage and Ranger stay
+the kit names, so the Kiln Warden plays the `blade` kit. *Considered:* keeping the kit names
+as display names.
 
 ### Concept detail: the Kiln Warden
 
@@ -191,7 +189,7 @@ identity from rims only.
 
 **Round G4 (advanced tech):**
 
-18 images, drawn with the recommended faction readings' soldiers as style references (review
+18 images, drawn with the chosen faction readings' (Forge rec, Void rec) soldiers as style references (review
 app *Minions*; [boards/g4-units.jpg](boards/g4-units.jpg)).
 
 - **The Thrall is ready for a model sheet:** a squat bronze-alloy automaton with a fusion core
@@ -237,7 +235,7 @@ Walker is the weakest; try a squatter, wider shape.
 
 **Round G4 (advanced tech):**
 
-18 images, drawn with the recommended readings' towers and architecture as style references
+18 images, drawn with the chosen readings' towers and architecture as style references
 (review app *Structures*; [boards/g4-structures.jpg](boards/g4-structures.jpg)).
 
 - **The Forge tower is solved:** a stepped heat-shield pylon whose lens crown fires a
@@ -260,16 +258,16 @@ the shape language closely and are the strongest structures. The Forge tower (a 
 obelisk) and core (a domed foundry drum) are serviceable but less distinctive. Push the
 stepped Sun-Kiln forms (Forge B).
 
-> **Decision needed (maintainer): the neutral monsters.** The slice needs at least one camp.
-> **Recommendation:** **ember scarabs**, small Builder maintenance machines shaped like
-> beetles, with ember-crystal backs, that graze on the ember shards (small camp), plus a dormant
-> **Builder warden machine** as the large objective (A4, not the slice). This keeps the
-> Builders as machines only.
+**Decided (2026-11-14): the neutral monsters are ember scarabs**, small Builder maintenance
+machines shaped like beetles, with ember-crystal backs, that graze on the ember shards (the
+slice's small camp), plus a dormant **Builder warden machine** as the large objective (A4, not
+the slice). This keeps the Builders as machines only.
 
-## Next steps after the pick
+## Next steps (the Kiln Warden)
 
-1. Turn the chosen concept into a **model sheet** (front, side, back and top-down at 54°):
-   round G5 made Pro sheets for all three redesigns, so this starts from the picked one.
-   Write down the answer to every inconsistency between the views.
-2. Run it through the §9.4 pipeline: image → TRELLIS.2 → remesh and bake → review renders.
+1. Start from the Warden's G5 **model sheet** (front, side, back and top-down at 54°) and
+   write down the answer to every inconsistency between the views (the collector fins are
+   flat blades: front A-pose g1).
+2. **Model it by hand in Blender** from the sheet ([README](README.md#concept-generation),
+   step 3), then remesh and bake, and make the review renders.
 3. Readability sign-off at 46 m (the human checkpoint) against SIL and CON rules.

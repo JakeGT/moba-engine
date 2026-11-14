@@ -1,8 +1,10 @@
 # UI, HUD and typography: brief for the graphic designer
 
-**Status:** v0 brief, 2026-10-31. **Lead:** graphic designer. This is a short brief, not a
-design. Agents wrote down the constraints the HUD has to meet and the open questions; the
-designer decides the look.
+**Status:** v0 brief, 2026-10-31; **open**. **Lead:** graphic designer, not yet engaged. This
+is a short brief, not a design. Agents wrote down the constraints the HUD has to meet and the
+open questions; the designer decides the look. The maintainer's approval of the rest of the
+bible (2026-11-14) does not settle the designer's questions below; it did keep the team
+colours for v0 (last item).
 
 ## What exists today
 
@@ -48,24 +50,25 @@ The two factions can flavour the UI frame without touching the team layer:
 
 ## Open questions for the designer
 
-> **Decision needed (designer): faction-skinned HUD or a neutral HUD?** Agents' lean: neutral
+> **Open (designer): faction-skinned HUD or a neutral HUD?** Agents' lean: neutral
 > HUD (one design to maintain, no confusion for players switching sides), with
 > faction-skinned loading, victory and defeat screens.
 
-> **Decision needed (designer): the display face.** Keep Open Sans Condensed for body and
+> **Open (designer): the display face.** Keep Open Sans Condensed for body and
 > numbers, and choose an OFL display face for titles in the science-fantasy register
 > (candidates to evaluate: Cinzel, Marcellus, Cormorant (serif, "ancient"), or Rajdhani,
 > Saira, Chakra Petch ("relic tech")). Check each licence on the font's own repository.
 
-> **Decision needed (designer): icon style.** Ability icons have to read at 48–64 px: painted
+> **Open (designer): icon style.** Ability icons have to read at 48–64 px: painted
 > illustrative vs flat glyph. The pipeline (roadmap §9.3) can produce painted drafts; a
 > glyph style is easier to keep consistent.
 
-> **Decision needed (designer + maintainer): keep green/blue/red?** See palette §1.
+> **Decided for v0 (maintainer, 2026-11-14): keep green/blue/red** (palette §1). The designer
+> may propose a change in the UI pass; that would be a new maintainer decision.
 
 ## Checks this becomes
 
-| Rule | What | Proposed |
+| Rule | What | Proposed (open until the designer is engaged) |
 |---|---|---|
 | **UI-1** | Text contrast against its plate | ≥ 4.5:1 (WCAG AA) |
 | **UI-2** | Icon and bar contrast against its plate | ≥ 3:1 |

@@ -1,15 +1,14 @@
 # Art bible: material vocabulary
 
-**Status:** v0 draft, 2026-10-31. Not approved.
+**Status:** v0 approved 2026-11-14 by the maintainer, with every recommendation.
 **Owner and approver:** the maintainer. **Drafted by:** an agent, from physicallybased.info
 (CC0) and the constraints in the [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md)
 §2, §4, §6.6, §9.1, §9.4 and §9.6, and [ADR-0011](../adr/0011-art-style-lighting.md).
 
 This part of the art bible lists the materials the game may use and the numeric ranges they
-must stay in. Once approved, each range becomes a `content-check` PBR rule (roadmap §9.6). Every
-number here is **proposed** until the maintainer signs it off. Items marked
-**Decision needed (maintainer)** are real choices with options and a recommendation; they are
-collected in [§8](#8-decisions-needed).
+must stay in. Each range becomes a `content-check` PBR rule (roadmap §9.6). The maintainer
+approved every number here on 2026-11-14. The choices that were open are marked **Decided**,
+with the options considered in a short note, and collected in [§8](#8-decisions).
 
 ## How to read this document
 
@@ -56,9 +55,9 @@ that only reads through its micro-detail is the wrong material for gameplay spac
 | G8 | **No saturated hues near the team colours** in playable space. | Team identity comes only from rims, outlines and the HUD (roadmap §1, §4). Materials must not imitate them. |
 | G9 | **Dust, wear and history on everything**, within the ranges above. | The tone is epic and weathered. Clean, new surfaces are the exception and are called out. |
 
-### 1.1 Proposed numbers
+### 1.1 Numbers
 
-| Quantity | Proposed value | Notes |
+| Quantity | Value | Notes |
 |---|---|---|
 | Dielectric albedo | luma p1 ≥ 30, p99 ≤ 240 over dielectric texels | Percentiles, so a few texels of filtering overshoot do not fail an asset. |
 | Metal albedo | luma p1 ≥ 180 over metal texels (metalness ≥ 0.5) | Checked on luma, not per channel: measured Brass has B = 174 and Gold B = 150, so a per-channel floor would reject real metals. |
@@ -76,38 +75,38 @@ that only reads through its micro-detail is the wrong material for gameplay spac
 
 **`L_ref`, the reference luminance.** Under ADR-0011's units a white Lambert surface facing the
 sun shows `albedo × sun`. `L_ref` is the map's lane material in direct sun:
-`L_ref = lane albedo (linear) × sun_intensity × sin(sun elevation)`. For Ember Crossing with the
-lane target below (linear 0.11) and a low sun at 25° elevation, `L_ref ≈ 0.047 × sun_intensity`,
-so a faction accent may emit at most about `0.093 × sun_intensity` (linear). A low sun dims the
-ground, so the same emissive reads brighter on a low-sun map; checking against every shipped
-map's `[lighting]` table covers that. As an illustration only: with a physical sun of about
-100,000 lux at normal incidence (about 42,000 lux on flat ground at 25°) the sunlit lane is
-about 1,500 cd/m², so +1 EV is about 3,000 cd/m².
+`L_ref = lane albedo (linear) × sun_intensity × sin(sun elevation)`. For Ember Crossing with a
+lane albedo of linear 0.11 and Golden Crossing's sun at 28° elevation,
+`L_ref ≈ 0.052 × sun_intensity`, so a faction accent may emit at most about
+`0.10 × sun_intensity` (linear). (The lifted lane target in §3.3, linear about 0.17, raises
+`L_ref` in proportion; the check computes it from the shipped lane material.) A low sun dims
+the ground, so the same emissive reads brighter on a low-sun map; checking against every
+shipped map's `[lighting]` table covers that. As an illustration only: with a physical sun of
+about 100,000 lux at normal incidence (about 47,000 lux on flat ground at 28°) the sunlit lane
+is about 1,600 cd/m², so +1 EV is about 3,300 cd/m².
 
-**Decision needed (maintainer): how the albedo ranges are measured.**
-Options: (a) per-texel luma with p1/p99 percentiles; (b) every channel of every texel;
-(c) the mean only. Recommendation: **(a)**. Option (b) rejects measured brass and gold; (c)
-lets dark smears and blown highlights through.
+**Decided (2026-11-14): albedo ranges are measured per texel as luma, at the p1/p99
+percentiles.** *Considered:* every channel of every texel (rejects measured brass and gold),
+and the mean only (lets dark smears and blown highlights through).
 
-**Decision needed (maintainer): the metal floor.** Measured Titanium is luma `171` and the
-database's "Cast Iron" entry is a metal at luma `45` (a dark surface finish, measured by
-spectrophotometer). Options: (a) keep 180 and model dark metals as a dielectric oxide layer;
-(b) lower the floor to 165; (c) keep 180 with a named exception list. Recommendation: **(a)**.
-No material in this vocabulary needs titanium, and treating scale, soot and tarnish as their
-own dielectric layer is how they behave physically.
+**Decided (2026-11-14): the metal floor stays at luma 180; dark metals are modelled as a
+dielectric oxide layer.** Measured Titanium is luma `171` and the database's "Cast Iron" entry
+is a metal at luma `45` (a dark surface finish, measured by spectrophotometer). No material in
+this vocabulary needs titanium, and treating scale, soot and tarnish as their own dielectric
+layer is how they behave physically. *Considered:* a 165 floor, or 180 with an exception list.
 
-**Decision needed (maintainer): the chroma caps.** Options: (a) C ≤ 0.06 ground / 0.08
-elsewhere, as above; (b) a single 0.10 cap; (c) 0.06 everywhere. Recommendation: **(a)**.
-(b) admits terracotta-orange and gold close to the enemy red and CB orange; (c) makes brass,
-skin and rust read grey.
+**Decided (2026-11-14): chroma caps C ≤ 0.06 on the ground and ≤ 0.08 elsewhere** (PAL-1,
+PAL-2). *Considered:* a single 0.10 cap (admits terracotta-orange and gold close to the enemy
+red and CB orange) and 0.06 everywhere (makes brass, skin and rust read grey).
 
-**Decision needed (maintainer): `team_tint` and the team mask on photoreal content.** Today's
-format and `docs/content-authoring.md` tell artists to keep large team-coloured mask areas,
-and ADR-0011 rule 1 puts team colour in albedo. The 2026-10-30 decision moves team identity to
-rims, outlines and the HUD. Options: (a) `team_tint = 0` for all photoreal content, the mask
-kept only for Compat; (b) a small tinted accent (≤ 10 % of the hero) on top of rims;
-(c) keep large masks. Recommendation: **(a)**, with ADR-0011 rule 1 amended when the §4 rim
-and outline work lands. Tinted albedo would also break G8 for the faction materials.
+**Decided (2026-11-14): `team_tint = 0` for all photoreal content; the team mask is kept only
+for Compat** (TINT-1). Today's format and `docs/content-authoring.md` tell artists to keep
+large team-coloured mask areas, and ADR-0011 rule 1 puts team colour in albedo; the
+2026-10-30 decision moves team identity to rims, outlines and the HUD, and tinted albedo would
+also break G8 for the faction materials. ADR-0011 rule 1 is amended for Tiered, and the
+renderer's default switches to `zero`, when the rims pass CON-2
+([ADR-0023](../adr/0023-frame-architecture-materials.md) §8c). *Considered:* a small tinted
+accent (≤ 10 % of the hero) on top of rims, or keeping large masks.
 
 ## 2. Material classes
 
@@ -147,12 +146,12 @@ Notes on the classes:
 - **Every material declares its class.** `PBR-CLASS-1` (see §6) needs to know which class each
   texel belongs to, because one hero texture set holds skin, cloth and metal.
 
-**Decision needed (maintainer): how a material declares its classes.** Options: (a) a
-source-side class-ID map (an 8-bit index texture kept in the asset's source manifest, never
-shipped) that `content-check` reads with the textures; (b) a `class` key per material TOML,
-with mixed-class assets checked only against the dielectric/metal rules; (c) split every
-asset into single-class materials. Recommendation: **(a)**. It costs one extra bake output and
-checks every texel against the right class; (c) multiplies draw calls.
+**Decided (2026-11-14): a material declares its classes with a source-side class-ID map**
+(an 8-bit index texture kept in the asset's source manifest, never shipped) that
+`content-check` reads with the textures. It costs one extra bake output and checks every texel
+against the right class. *Considered:* a `class` key per material TOML (mixed-class assets
+checked only against the dielectric/metal rules), and splitting every asset into
+single-class materials (multiplies draw calls).
 
 ## 3. Named material vocabulary
 
@@ -202,35 +201,31 @@ the CB orange and yellow stay unique.
 |---|---|---|---|---|---|---|---|
 | Emitter lattice | A fine machined grille of dark alloy with a contained white-gold glow behind it: the visible source of Forge light | `METAL` + emissive | Forge dark alloy, scaled; emissive `#FFE6BE` behind the grille | 0.35–0.60 | 1 | emissive (behind) | counts towards the emissive budget; lit only in gameplay states |
 
-**Decision needed (maintainer): how saturated the Forge's sun-alloy may be.** Brass (its stand-in, h 93°) sits
-between the CB orange (77°) and CB yellow (105°). Options: (a) measured brass chroma
-(≈ 0.07) as the ceiling, with a rich look coming from roughness and reflection; (b) a warmer,
-more golden brass up to C 0.10; (c) a pale, almost silver "white brass" at C ≤ 0.04.
-Recommendation: **(a)**. It is the real metal, it stays below the 0.08 cap, and on High+ the
-RT reflections of the warm sky give it richness without extra chroma.
+**Decided (2026-11-14): sun-alloy chroma is capped at measured brass, C ≈ 0.07** (PBR-FORGE-1),
+with the rich look coming from roughness and reflection. Brass (its stand-in, h 93°) sits
+between the CB orange (77°) and CB yellow (105°); the real metal stays below the 0.08 cap, and
+on High+ the RT reflections of the warm sky give it richness without extra chroma.
+*Considered:* a warmer brass up to C 0.10, or a pale "white brass" at C ≤ 0.04.
 
-**Decision needed (maintainer): gilt leaf.** Measured Gold is C 0.101, above the cap.
-Options: (a) a desaturated, worn gilt at C ≤ 0.07 on small areas; (b) real gold, allowed
-only outside playable space (showcase, menus); (c) no gilt. Recommendation: **(a)** in play,
-**(b)** for showcase variants.
+**Decided (2026-11-14): gilt leaf is a desaturated, worn gilt at C ≤ 0.07 on small areas in
+play** (PBR-FORGE-1); real gold (measured C 0.101, above the cap) only outside playable space,
+on showcase variants and menus. *Considered:* no gilt.
 
-**Decision needed (maintainer): sun-glass tint.** Measured Amber is a transmissive
-`#EB9235` at C 0.148, close to the CB orange. Options: (a) pale honey tint C ≤ 0.07 with a
-low-chroma white-gold emissive core; (b) real amber colour, small areas only; (c) clear glass
-with only the core coloured. Recommendation: **(a)**.
+**Decided (2026-11-14): sun-glass has a pale honey tint, C ≤ 0.07, with a low-chroma
+white-gold emissive core** (PBR-FORGE-1). Measured Amber is a transmissive `#EB9235` at
+C 0.148, close to the CB orange. *Considered:* real amber on small areas, or clear glass with
+only the core coloured.
 
-**Decision needed (maintainer): the Forge's emissive colour (molten seams, sun-glass cores).**
-The fiction wants orange heat, but saturated orange-red is the enemy colour and the CB
-orange. Options: (a) **white-gold** (blackbody-hot, C ≤ 0.06), with heat conveyed by the
-surrounding slag and scale rather than the glow's hue; (b) saturated orange, but capped at
-+1 EV and 1 % screen area; (c) a shift to pale gold-yellow. Recommendation: **(a)**. It
-passes G8 in both colour-blind and normal team palettes, and white-hot reads as hotter than
-orange anyway.
+**Decided (2026-11-14): the Forge's emissive colour (molten seams, sun-glass cores) is
+white-gold** (blackbody-hot, C ≤ 0.06: PAL-4), with heat conveyed by the surrounding slag and
+scale rather than the glow's hue. It passes G8 in both colour-blind and normal team palettes,
+and white-hot reads as hotter than orange anyway. *Considered:* saturated orange capped at
++1 EV and 1 % screen area, or a pale gold-yellow.
 
-**Decision needed (maintainer): heat tint and the blue band.** Real temper colours run straw,
-bronze, purple, then blue, which falls near the ally blue (259°) and CB sky (236°). Options:
-(a) straw to purple only in playable space; (b) all temper colours, blue kept at C ≤ 0.04;
-(c) no temper colours. Recommendation: **(a)**; blue tempering only on showcase assets.
+**Decided (2026-11-14): heat tint runs straw to purple only in playable space** (PBR-HEAT-1);
+blue tempering only on showcase assets. Real temper colours end in blue, which falls near the
+ally blue (259°) and CB sky (236°). *Considered:* all temper colours with blue at C ≤ 0.04,
+or no temper colours.
 
 ### 3.2 The Void
 
@@ -254,18 +249,21 @@ the free bands (violet 284–345°, teal 167–211°) and only in small accents.
 | Void felt | Matte padding and hoods, charcoal-violet | `CLOTH` | `#3A3440` (luma 54, C 0.022) | 0.85–1.0 | 0 | sheen (low) | all tiers alike |
 | Bone-white inlay | Polished bone or nacre lines set into black ceramic and stone | `BONE` | `#DCD6C6` (luma 214), near measured Bone | 0.40–0.65 | 0 | none (Pearl-like iridescence: showcase only) | all tiers alike |
 
-**Decision needed (maintainer): the Void's emissive hue.** Options: (a) violet 284–345° as
-the main accent with teal 167–211° as a secondary; (b) teal main, violet secondary; (c) one
-hue only. Recommendation: **(a)**. Violet is the furthest band from every team hue in both
-palettes and from the Forge's warm family; teal sits 43° from the self green and 51° from the
-CB sky, so it should stay the minor accent.
+**Decided (2026-11-14): the Void's emissive hue is violet 284–345° as the main accent, with
+teal 167–211° as a minor one** (PBR-VOID-2). Violet is the furthest band from every team hue
+in both palettes and from the Forge's warm family; teal sits 43° from the self green and 51°
+from the CB sky. *Considered:* teal main, or one hue only.
 
-**Decision needed (maintainer): how dark the Void may go.** Its body materials sit at luma
-39–58, near the G1 floor. In the shade of an Ember Crossing cliff, a Void hero could merge
-with basalt (`71`). Options: (a) keep them dark and rely on rims and outlines; (b) raise the
-Void floor to luma 45 and give every Void hero at least 15 % of its area in a light material
-(pewter, silver, bone inlay); (c) both. Recommendation: **(c)**. Shape and material should
-separate the factions without leaning entirely on team rims.
+**Decided (2026-11-14): how dark the Void may go, option (c), both:** Void heroes keep their
+dark bodies and the rims and outlines, **and** their body materials have an albedo floor of
+luma 45, with **at least 15 % of each Void hero's surface area in a light material** (pewter,
+silver, bone inlay) (PBR-VOID-1). Every Void unit also carries the palette's pale element
+(≥ 10 % of projected area: VOID-1, [palette §5](palette-and-value.md#5-faction-palettes)).
+Body materials sit at luma 39–58, near the G1 floor, and in the shade of an Ember Crossing
+cliff a Void hero could otherwise merge with basalt (`71`). Shape and material should
+separate the factions without leaning entirely on team rims. **Open:** two targets in the
+table above sit below the floor, obsidian metamaterial (`42`) and Void lacquer (`39`); whether
+they rise to 45 or are kept off heroes is for the maintainer ([README](README.md#open)).
 
 ### 3.3 Environment: Ember Crossing
 
@@ -279,7 +277,7 @@ lane and ember crystals, under a low warm sun. The ground stays matte (C ≤ 0.0
 | Basalt, wet | Seeps and the rare rain variant; darker and glossy | `STONE-1` + wet mask | dry albedo × 0.7 | 0.10–0.30 where wet | 0 | puddle and streak masks (feature matrix: weather) | ripples and streaks from Medium |
 | Scorched ash ground | The basin floor: grey-brown ash, burnt patches, footprints | `CHAR` | engine target `#6B6560` (luma 102); burnt patches `#4E4945` (74) | 0.90–1.0 | 0 | none | all tiers alike |
 | Packed desert soil | Brown ground between ash fields; cracked crust | `SOIL` | engine target `#8C7A66` (luma 125, C 0.037) | 0.85–1.0 | 0 | none | all tiers alike |
-| Rust-red lane grit | The trodden lane: iron-oxide grit, compacted, rutted | `SOIL` | engine target `#7A5444`–`#84604C` (luma 93–104, C 0.055–0.057, h 44–50); hue from measured Rust | 0.85–0.98 | 0 | none | all tiers alike |
+| Rust-red lane grit | The trodden lane: iron-oxide grit, compacted, rutted | `SOIL` | engine target `#8C6654`–`#956F5D` (luma 110–119, C 0.056, h 46–48), lifted a value step above the ash; hue from measured Rust | 0.85–0.98 | 0 | none | all tiers alike |
 | Desert sand | Wind-blown drifts against cliffs and ruins | `SOIL` | engine target `#BDAE8C` (luma 175, C 0.050); measured Sand `#B1A784` is the anchor | 0.90–1.0 | 0 | none | all tiers alike |
 | Ember crystal | Clusters of dark smoky crystal with a white-gold glow deep inside | `GLASS` | body `#4A3430` (luma 57, C 0.033); emissive core `#FFE6BE` | 0.08–0.25 | 0 | transmission; emissive core | transmission from Medium; Low and Compat: opaque body + core |
 | Builder alloy | The fallen sky-engine's ribs and the Builder machines: seamless pale grey, fine precise seams, dead emitter rings | `METAL` | engine target `#AEB0B2` (luma 175, C ≤ 0.01); stand-in: titanium | 0.30–0.55; dust 0.85+ | 1 | dust layer on up-facing surfaces | all tiers alike |
@@ -289,20 +287,19 @@ lane and ember crystals, under a low warm sun. The ground stays matte (C ≤ 0.0
 | Charred wood | Burnt beams and stumps; alligator-cracked | `CHAR` | engine target `#2F2B29` (luma 44) | 0.85–1.0 | 0 | none (no glow: G7) | all tiers alike |
 | Dry scrub | Sparse olive-grey desert plants | `WOOD` / foliage | engine target `#7C7A62` (luma 121, C 0.035); measured Grass (C 0.068, h 120) is too green | 0.60–0.85 | 0 | thin-sheet translucency (foliage) | all tiers alike |
 
-**Decision needed (maintainer): how red the lane may be.** The enemy red is h 28°, C 0.216.
-Measured Rust is h 52°, C 0.083. Options: (a) a brown-red at C ≤ 0.06, h 44–55° (the
-targets above): clearly "rust" against grey ash, a 3.5× chroma gap to the enemy colour;
-(b) the measured Rust chroma, C ≈ 0.08; (c) a near-neutral brown lane, with the lane
-told apart by value and texture only. Recommendation: **(a)**. The value contrast between the
-lane (luma ~100) and the ash (~100) is small, so add a value step: either lift the lane to
-luma ~115 or darken the burnt ash patches that border it.
+**Decided (2026-11-14): the lane is a brown-red at C ≤ 0.06, h 44–55°, lifted to luma about
+115** (LANE-1; the targets above). It reads clearly as "rust" against grey ash, with a 3.5×
+chroma gap to the enemy red (h 28°, C 0.216). The draft lane (luma ~100) matched the ash
+(~102), so the lane gets a value step; lifting the lane was the leading option, and the
+maintainer's approval gave no other, so it is taken. *Considered:* measured Rust chroma
+(h 52°, C ≈ 0.08), a near-neutral brown lane told apart by value and texture only, and (for
+the value step) darkening the burnt ash patches beside the lane instead.
 
-**Decision needed (maintainer): ember crystals.** They are the map's signature feature and the
-one place the fiction asks for a large warm glow. Options: (a) dark smoky body, white-gold core
-at ≤ +1 EV, a few clusters per screen (the targets above); (b) saturated orange-red glow,
-which collides with the enemy red and CB orange; (c) give them a gameplay meaning and let
-the glow appear only in that state (≤ +2 EV). Recommendation: **(a)**, with **(c)** if
-design gives them a mechanic. Saturated orange is ruled out by G8.
+**Decided (2026-11-14): ember crystals have a dark smoky body and a white-gold core at
+≤ +1 EV, a few clusters per screen** (EMB-1; the targets above). If design later gives them a
+mechanic, the glow may appear only in that state (≤ +2 EV). Saturated orange is ruled out by
+G8. *Considered:* a saturated orange-red glow, which collides with the enemy red and CB
+orange.
 
 ### 3.4 Concept-image cross-check
 
@@ -361,15 +358,14 @@ a 40 px hero one pixel is about 4.5 cm.
 6. **Weathering never adds saturation.** Patina and rust stay inside the chroma caps; no
    verdigris green in playable space (see below).
 
-**Decision needed (maintainer): bronze patina colour.** Real outdoor bronze turns verdigris
-green-blue (h 160–190°), close to the self green and inside the Void's teal accent band.
-Options: (a) statuary brown-black patina in playable space, verdigris only out of play or in
-showcase; (b) verdigris at C ≤ 0.03 (grey-green, `#7E968E`); (c) full verdigris.
-Recommendation: **(a)**. It keeps teal as a Void signal and keeps green away from the self
-colour.
+**Decided (2026-11-14): bronze patina is statuary brown-black in playable space**
+(PBR-HEAT-1); verdigris only out of play or in showcase. Real outdoor bronze turns verdigris
+green-blue (h 160–190°), close to the self green and inside the Void's teal accent band; this
+keeps teal as a Void signal and green away from the self colour. *Considered:* a grey-green
+verdigris at C ≤ 0.03 (`#7E968E`), or full verdigris.
 
-**Decision needed (maintainer): dust on units.** Options: (a) ≤ 20 % coverage, lower body
-only (rule 4); (b) no dust on units; (c) no limit. Recommendation: **(a)**.
+**Decided (2026-11-14): dust on units ≤ 20 % coverage, lower body only** (rule 4,
+PBR-WEAR-1). *Considered:* no dust on units, or no limit.
 
 ## 5. How this maps to today's material format
 
@@ -382,38 +378,46 @@ vocabulary:
 - **Emissive** is one constant per material today. Molten seams, sun-glass cores and
   void-glass edges need an emissive texture (or mask) slot; until then, those assets use
   separate emissive submeshes.
-- **The class map** (if the class decision picks option (a)) is a source-pipeline file, not a
-  runtime slot.
+- **The class map** (decided in §2) is a source-pipeline file, not a runtime slot.
 - **`team_tint`**: see the decision in §1.1.
 
 ## 6. Checks this becomes
 
 Each check runs in `content-check` on the asset's source textures (after delight, before KTX2
-encoding) unless it says "capture". All are **proposed**.
+encoding) unless it says "capture". Every threshold was approved on 2026-11-14; a check is
+*enforced* once it is built and the first Ember Crossing captures confirm it
+([checks.md](checks.md)).
 
 | Rule ID | What `content-check` verifies | Threshold | Status |
 |---|---|---|---|
-| `PBR-ALB-1` | Dielectric texel luma | p1 ≥ 30, p99 ≤ 240 | proposed |
-| `PBR-ALB-2` | Metal texel luma (metalness ≥ 0.5) | p1 ≥ 180 | proposed |
-| `PBR-MET-1` | Transition texels (0.1 < metalness < 0.9) | ≤ 3 % of texels | proposed |
-| `PBR-RGH-1` | Roughness variation per class region (not `GLASS`, not wet masks) | σ ≥ 0.03 and p95 − p5 ≥ 0.08 | proposed |
-| `PBR-RGH-2` | Roughness floor | ≥ 0.045 all; ≥ 0.08 on heroes and minions | proposed |
-| `PBR-NRM-1` | Source normal length | 1 ± 0.02 per texel | proposed |
-| `PBR-NRM-2` | BC5 normal X² + Y² | ≤ 1.0 per texel | proposed |
-| `PBR-DELIGHT-1` | Correlation of blurred albedo luma with baked AO | < 0.3 | proposed |
-| `PBR-CLASS-1` | Every texel has a declared class | 100 % | proposed |
-| `PBR-METAL-1` … `PBR-BONE-1` | Per-class albedo luma, roughness and metalness ranges (table in §2) | the §2 ranges, p1/p99 | proposed |
-| `PBR-GLASS-1` | Glass and crystal IOR | 1.31–1.77 | proposed |
-| `PBR-SKIN-1` | Skin IOR and SSS radius present | IOR 1.4; radius from Skin I–VI | proposed |
-| `PAL-CHROMA-1` (= PAL-1) | Albedo chroma, terrain and ground decals | OKLCH C ≤ 0.06 (p99) | proposed |
-| `PAL-CHROMA-2` (= PAL-2) | Albedo chroma, units, structures, props | C ≤ 0.08 (p99) | proposed |
-| `PAL-HUE-1` (= PAL-4) | Emissive chroma near team hues (28°, 77°, 105°, 142°, 236°, 259° ± 25°) | C ≤ 0.06 | proposed |
-| `PAL-HUE-2` (= PAL-5) | Emissive chroma elsewhere | C ≤ 0.12 | proposed |
-| `PBR-EMIT-1` | Emissive luminance against each shipped map's `L_ref` | accents ≤ +1 EV; gameplay ≤ +2 EV | proposed |
-| `PBR-EMIT-2` | Emissive area per asset (emissive > 0.25 × `L_ref`) | ≤ 5 % units; ≤ 10 % structures; ≤ 3 % props | proposed |
-| `PBR-EMIT-3` | Static emissive screen share (capture, 46 m, before VFX) | ≤ 2 % of playable-space pixels | proposed |
-| `PBR-WEAR-1` | Dust coverage on units (capture or dust mask) | ≤ 20 % of surface | proposed |
-| `PBR-VOCAB-1` | Every material names a vocabulary entry from §3 | listed entry | proposed |
+| `PBR-ALB-1` | Dielectric texel luma | p1 ≥ 30, p99 ≤ 240 | approved |
+| `PBR-ALB-2` | Metal texel luma (metalness ≥ 0.5) | p1 ≥ 180 | approved |
+| `PBR-MET-1` | Transition texels (0.1 < metalness < 0.9) | ≤ 3 % of texels | approved |
+| `PBR-RGH-1` | Roughness variation per class region (not `GLASS`, not wet masks) | σ ≥ 0.03 and p95 − p5 ≥ 0.08 | approved |
+| `PBR-RGH-2` | Roughness floor | ≥ 0.045 all; ≥ 0.08 on heroes and minions | approved |
+| `PBR-NRM-1` | Source normal length | 1 ± 0.02 per texel | approved |
+| `PBR-NRM-2` | BC5 normal X² + Y² | ≤ 1.0 per texel | approved |
+| `PBR-DELIGHT-1` | Correlation of blurred albedo luma with baked AO | < 0.3 | approved |
+| `PBR-CLASS-1` | Every texel has a declared class | 100 % | approved |
+| `PBR-METAL-1` … `PBR-BONE-1` | Per-class albedo luma, roughness and metalness ranges (table in §2) | the §2 ranges, p1/p99 | approved |
+| `PBR-GLASS-1` | Glass and crystal IOR | 1.31–1.77 | approved |
+| `PBR-SKIN-1` | Skin IOR and SSS radius present | IOR 1.4; radius from Skin I–VI | approved |
+| `PAL-CHROMA-1` (= PAL-1) | Albedo chroma, terrain and ground decals | OKLCH C ≤ 0.06 (p99) | approved |
+| `PAL-CHROMA-2` (= PAL-2) | Albedo chroma, units, structures, props | C ≤ 0.08 (p99) | approved |
+| `PAL-HUE-1` (= PAL-4) | Emissive chroma near team hues (28°, 77°, 105°, 142°, 236°, 259° ± 25°) | C ≤ 0.06 | approved |
+| `PAL-HUE-2` (= PAL-5) | Emissive chroma elsewhere | C ≤ 0.12 | approved |
+| `PBR-EMIT-1` | Emissive luminance against each shipped map's `L_ref` | accents ≤ +1 EV; gameplay ≤ +2 EV | approved |
+| `PBR-EMIT-2` | Emissive area per asset (emissive > 0.25 × `L_ref`) | ≤ 5 % units; ≤ 10 % structures; ≤ 3 % props | approved |
+| `PBR-EMIT-3` | Static emissive screen share (capture, 46 m, before VFX) | ≤ 2 % of playable-space pixels | approved |
+| `PBR-WEAR-1` | Dust coverage on units (capture or dust mask) | ≤ 20 % of surface | approved |
+| `PBR-VOCAB-1` | Every material names a vocabulary entry from §3 | listed entry | approved |
+| `PBR-FORGE-1` | Chroma of sun-alloy, gilt (in play) and sun-glass tint | C ≤ 0.07 (p99) | approved |
+| `PBR-HEAT-1` | Temper and patina colours in playable space | straw to purple only (no blue temper); statuary brown-black patina (no verdigris) | approved |
+| `PBR-VOID-1` | Void hero body materials; light-material share per Void hero | albedo luma ≥ 45; ≥ 15 % of surface in pewter, silver or bone | approved (floor clash open: §3.2) |
+| `PBR-VOID-2` | Void emissive hue | violet 284–345° main; teal 167–211° minor | approved |
+| `LANE-1` | Lane grit albedo | C ≤ 0.06 (p99), h 44–55°, luma 110–120 | approved |
+| `EMB-1` | Ember crystal | white-gold core (PAL-4), ≤ +1 EV; orange only as a non-emissive facet rim ≤ 3 % of area (PAL-3); off the lanes | approved |
+| `TINT-1` | `team_tint` on photoreal (Tiered) content | 0; mask kept for Compat | approved (renderer default per ADR-0023 §8c) |
 
 ## 7. Sources
 
@@ -488,9 +492,12 @@ here is an engine target.
 - The database's own upstream sources (refractiveindex.info for metals and glasses, published
   skin optics papers, Lagarde's PBR charts) are listed per entry in the API response.
 
-## 8. Decisions needed
+## 8. Decisions
 
-| # | Decision | Section | Recommendation |
+All taken on 2026-11-14 by the maintainer's approval of the bible, on the recommended option.
+The numbering is kept because other documents cite it.
+
+| # | Decision | Section | Decided |
 |---|---|---|---|
 | 1 | How albedo ranges are measured | §1.1 | Per-texel luma, p1/p99 |
 | 2 | Metal floor vs Titanium and dark Cast Iron | §1.1 | Keep 180; dark metals are oxide layers |
@@ -503,9 +510,9 @@ here is an engine target.
 | 9 | Forge emissive colour | §3.1 | White-gold, C ≤ 0.06 |
 | 10 | Heat tint and the blue band | §3.1 | Straw to purple only in play |
 | 11 | Void emissive hue | §3.2 | Violet main, teal secondary |
-| 12 | How dark the Void may go | §3.2 | Luma floor 45 and ≥ 15 % light material per hero |
-| 13 | Lane redness | §3.3 | C ≤ 0.06, h 44–55°, plus a value step to the ash |
-| 14 | Ember crystals | §3.3 | Dark body, white-gold core ≤ +1 EV |
+| 12 | How dark the Void may go | §3.2 | (c): rims and outlines, plus luma floor 45 and ≥ 15 % light material per hero (floor vs two targets open) |
+| 13 | Lane redness | §3.3 | C ≤ 0.06, h 44–55°, lane lifted to luma about 115 (the leading option for the value step) |
+| 14 | Ember crystals | §3.3 | Dark body, white-gold core ≤ +1 EV (a gameplay state may reach +2 EV) |
 | 15 | Bronze patina colour | §4 | Statuary brown-black in play |
 | 16 | Dust on units | §4 | ≤ 20 %, lower body |
-| 17 | Emissive caps (+1/+2 EV, area shares) | §1.1 | As proposed, then tuned on the first Ember Crossing captures |
+| 17 | Emissive caps (+1/+2 EV, area shares) | §1.1 | As in §1.1; any tuning after the first Ember Crossing captures is a new maintainer decision |

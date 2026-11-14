@@ -1,7 +1,8 @@
 # Art bible
 
-**Version:** v0 draft, 2026-10-31. **Status:** for review: nothing here is final until the
-owner of each part signs it off.
+**Version:** v0, 2026-10-31. **Status:** v0 approved 2026-11-14 by the maintainer (see the
+[decision log](#decision-log)). The two briefs (UI/HUD and brand) stay open until their owners
+are engaged.
 **Owner:** the maintainer and their team (possibly a graphic designer and a marketing
 executive). Agents draft, research and turn decisions into checks; **people decide**
 ([roadmap §9.6](../plans/next-gen-graphics-roadmap.md#96-art-bible)).
@@ -15,17 +16,17 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 
 | Part | Lead | File | v0 state |
 |---|---|---|---|
-| World and factions | Maintainer | [world-and-factions.md](world-and-factions.md) | Drafted from the decisions below; names and lore are placeholders |
-| Palette and value | Maintainer + designer | [palette-and-value.md](palette-and-value.md) | Numbers drafted (OKLCH budgets, team zones) |
-| Lighting mood (Ember Crossing) | Maintainer | [lighting-mood.md](lighting-mood.md) | Four moods as bake inputs; one recommended |
-| Material vocabulary | Agent draft, maintainer approves | [material-vocabulary.md](material-vocabulary.md) | Drafted from physicallybased.info |
-| Silhouettes and scale | Maintainer | [silhouettes-and-scale.md](silhouettes-and-scale.md) | Size classes and rules drafted |
-| Heroes, minions and structures (v0) | Maintainer | [heroes-and-minions-v0.md](heroes-and-minions-v0.md) | Three slice-hero concepts to pick from |
-| VFX language | Maintainer + designer | [vfx-language.md](vfx-language.md) | Drafted on top of the R5 rules |
-| UI, HUD and typography | Designer | [ui-hud-typography.md](ui-hud-typography.md) | Brief only |
-| Brand and key art | Marketing + designer | [brand-and-key-art.md](brand-and-key-art.md) | Brief only |
-| References | Agent | [references.md](references.md) | Named CC0 assets; no bulk downloads |
-| Checks | Agent | [checks.md](checks.md) | Every rule mapped to where it runs |
+| World and factions | Maintainer | [world-and-factions.md](world-and-factions.md) | Approved 2026-11-14; working names kept, public names left to the brand pass |
+| Palette and value | Maintainer + designer | [palette-and-value.md](palette-and-value.md) | Approved 2026-11-14 (OKLCH budgets, team zones) |
+| Lighting mood (Ember Crossing) | Maintainer | [lighting-mood.md](lighting-mood.md) | Approved 2026-11-14: Golden Crossing |
+| Material vocabulary | Agent draft, maintainer approves | [material-vocabulary.md](material-vocabulary.md) | Approved 2026-11-14 |
+| Silhouettes and scale | Maintainer | [silhouettes-and-scale.md](silhouettes-and-scale.md) | Approved 2026-11-14: role-scaled S/M/L heroes |
+| Heroes, minions and structures (v0) | Maintainer | [heroes-and-minions-v0.md](heroes-and-minions-v0.md) | Approved 2026-11-14: the Kiln Warden is the slice hero |
+| VFX language | Maintainer + designer | [vfx-language.md](vfx-language.md) | Approved 2026-11-14 |
+| UI, HUD and typography | Designer | [ui-hud-typography.md](ui-hud-typography.md) | Brief only; **open** (designer not yet engaged) |
+| Brand and key art | Marketing + designer | [brand-and-key-art.md](brand-and-key-art.md) | Brief only; **open** (marketing and designer not yet engaged) |
+| References | Agent | [references.md](references.md) | Named CC0 candidates; no bulk downloads; each asset still picked before it is fetched |
+| Checks | Agent | [checks.md](checks.md) | Every rule mapped to where it runs; thresholds approved 2026-11-14 |
 | Boards | Agent | [boards/](boards/) | Curated boards, with [provenance](boards/PROVENANCE.md) |
 
 ## Decision log
@@ -42,34 +43,74 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-10-31 | **Technology so advanced it looks like magic**: weapons, armour, architecture, units and the Builders' relics are all technology ([world](world-and-factions.md#technology-that-looks-like-magic)) | Maintainer |
 | 2026-10-31 | Also the **Gemini API ("Nano Banana"), paid tier, for concept art and model sheets only**: a reference people model from, never shipped and never fed to a generator (enforced by the A0 provenance gate) | Maintainer |
 | 2026-10-31 | **Nano Banana 2.1 for drafts, Pro for model sheets** (after a side-by-side test) | Maintainer |
-| 2026-10-31 | Whole bible redrawn and rewritten for technology that looks like magic: rounds G3 (factions), G4 (everything else) and G5 (hero model sheets); materials renamed to technology names with measured stand-ins | Agent draft, for the maintainer to approve |
+| 2026-10-31 | Whole bible redrawn and rewritten for technology that looks like magic: rounds G3 (factions), G4 (everything else) and G5 (hero model sheets); materials renamed to technology names with measured stand-ins | Agent draft; approved by the maintainer 2026-11-14 (below) |
+| 2026-11-14 | **Art bible v0 approved.** The maintainer's words: "The Art style in the bible is approved - follow the recommended designs. Blender is installed. If you need any other tools installed to create models, ask." Every "Decision needed" in this folder is settled on its recommended option ([list below](#decisions-taken-2026-11-14)). Blender is the modelling tool: models are made by hand from the boards and model sheets ([concept generation](#concept-generation), step 3) | Maintainer |
 
-## Decisions needed
+## Decisions taken 2026-11-14
 
-Every open choice is marked **"Decision needed (…)"** in its file, with options and a
-recommendation. In priority order for the slice:
+All taken by the maintainer's approval above, on the bible's recommended option. The numbers
+are the ones the files used while the items were open, so other documents (ADR-0023 §8c) can
+still cite them. Where an item had no explicit recommendation, the bible's leading option was
+taken; those are marked *leading option*.
 
-1. **The slice hero:** Kiln Warden (recommended), Still Oracle or Ash Strider, now as advanced-tech redesigns with model sheets. See [heroes](heroes-and-minions-v0.md).
-2. **Map 1's lighting mood:** Golden Crossing (recommended). See [lighting](lighting-mood.md).
-3. **Faction readings:** Forge rec (B with A's emblems and C's machinery) and Void rec (B with A's ornament), recommended after both the fantasy-era rounds and the advanced-tech round G3. See [world](world-and-factions.md#interpretations-for-review).
-4. **Which faction holds which base:** Forge west, Void east (recommended). See [world](world-and-factions.md#ember-crossing-who-stands-where).
-5. **Are heroes faction-bound?** Free agents (recommended). See [world](world-and-factions.md#ember-crossing-who-stands-where).
-6. **The ember crystals' colour:** white-gold cores (recommended). See [palette](palette-and-value.md#6-ember-crossing-palette-map-1).
-7. **How dark the Void may go:** dark bodies plus mandatory pale elements (recommended). See [palette](palette-and-value.md#5-faction-palettes-draft).
-8. **The chroma caps and measurement method.** See [palette](palette-and-value.md) and [materials](material-vocabulary.md#8-decisions-needed).
-9. **`team_tint` on photoreal content:** 0, with the mask kept for Compat (recommended). See [materials](material-vocabulary.md#8-decisions-needed).
-10. **Ability-type coding:** by shape and motion, not colour (recommended). See [VFX](vfx-language.md).
-11. **Rim vs outline on allies.** See [silhouettes](silhouettes-and-scale.md#team-rims-the-team-layer-on-units).
-12. **Hero scale:** role-scaled S/M/L (recommended). See [silhouettes](silhouettes-and-scale.md#size-classes).
-13. Names (world, factions, heroes), neutral monsters, the Builders' presence, and the
-    designer's and marketing's open questions in their briefs.
+1. **The slice hero:** the **Kiln Warden** (Hero M, Forge, the `blade` kit). The Still Oracle
+   and the Ash Strider stay A4 candidates. See [heroes](heroes-and-minions-v0.md).
+2. **Map 1's lighting mood:** **Golden Crossing**. No time-of-day or weather variant for the
+   slice. See [lighting](lighting-mood.md).
+3. **Faction readings:** **Forge rec** (B with A's emblems and C's machinery) and **Void rec**
+   (B with A's ornament). See [world](world-and-factions.md#faction-readings).
+4. **Which faction holds which base:** **Forge west, Void east** (presentation only; the sim's
+   Blue and Red are unchanged). See [world](world-and-factions.md#ember-crossing-who-stands-where).
+5. **Heroes are free agents:** any hero plays on either side. See [world](world-and-factions.md#ember-crossing-who-stands-where).
+6. **The ember crystals:** **white-gold cores** (PAL-4), small non-emissive orange facet rims,
+   kept off the lanes. See [palette](palette-and-value.md#6-ember-crossing-palette-map-1).
+7. **How dark the Void may go:** **dark bodies plus mandatory pale elements** (bone or silver,
+   ≥ 10 % of every Void unit's projected area; Void heroes also ≥ 15 % light material). See
+   [palette](palette-and-value.md#5-faction-palettes).
+8. **The chroma caps and measurement method:** C ≤ 0.06 on the ground (PAL-1, kept at 0.06)
+   and ≤ 0.08 elsewhere (p99 of texels); albedo ranges measured per texel as luma
+   percentiles (p1/p99). See
+   [palette](palette-and-value.md) and [materials](material-vocabulary.md#8-decisions).
+9. **`team_tint` on photoreal content:** **0**, with the mask kept for Compat. The Tiered
+   renderer's default flips when the rims pass CON-2 ([ADR-0023](../adr/0023-frame-architecture-materials.md) §8c). See
+   [materials](material-vocabulary.md#8-decisions).
+10. **Ability-type coding:** **by shape and motion**, never colour. See [VFX](vfx-language.md).
+11. **Rim vs outline on allies:** **rim on everyone, outline only on enemies and the hovered
+    unit**. The renderer's default flips when CON-2 passes (ADR-0023 §8c). See
+    [silhouettes](silhouettes-and-scale.md#team-rims-the-team-layer-on-units).
+12. **Hero scale:** **role-scaled S/M/L**. See [silhouettes](silhouettes-and-scale.md#size-classes).
+13. **The rest:**
+    - names: the working names are kept as internal names (world option (b)); the public
+      names come from the brand pass. Heroes get new display names; kit IDs are unchanged;
+    - the neutral monsters: **ember scarabs** for the slice camp, and a dormant Builder warden
+      machine as the large objective in A4;
+    - the Builders appear only as ruins and relic machines, never as figures;
+    - green/blue/red stay the team colours for v0;
+    - every option in [material-vocabulary.md §8](material-vocabulary.md#8-decisions) on its
+      recommendation: (a) for each item, and (c) (both) for how dark the Void may go;
+    - the lane's value step: lift the lane to luma about 115 (*leading option*; the alternative
+      was darkening the burnt ash beside it).
+
+## Open
+
+- **The designer's brief** ([ui-hud-typography.md](ui-hud-typography.md)): faction-skinned or
+  neutral HUD, the display face, the icon style, and the UI-1 to UI-4 thresholds. Owned by a
+  graphic designer who has not been engaged yet.
+- **Marketing's brief** ([brand-and-key-art.md](brand-and-key-art.md)): the game's name and
+  logo, the public faction names, and which key-art direction to develop. Owned by a marketing
+  executive and the designer, not yet engaged.
+- **Void luma floor vs two material targets.** The decided floor (luma ≥ 45 on Void heroes)
+  sits above two targets in [material-vocabulary.md §3.2](material-vocabulary.md#32-the-void):
+  obsidian metamaterial (42) and Void lacquer (39). Whether those targets rise or stay as
+  structure-only materials needs a maintainer decision.
 
 ## How to propose a change
 
 1. Open a PR that edits the relevant part. Say which decision it changes, and why.
 2. If it changes a numeric rule, update [checks.md](checks.md) in the same PR.
-3. The part's lead approves (the table above). Agents may open PRs but never merge changes
-   to this folder: people decide.
+3. The part's lead approves (the table above). The maintainer's approval of v0 on 2026-11-14
+   is recorded in the decision log; every later change to this folder still needs a
+   maintainer decision before it merges. Agents draft and open PRs: people decide.
 4. Record approved decisions in the decision log, with the date.
 
 ## Licences for what lives here
