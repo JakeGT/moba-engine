@@ -776,6 +776,9 @@ exception: they stay all-rights-reserved and are listed as such.
    transparents, G-buffer decals, the multi-layer material model and team rims. Drafted as
    [ADR-0023](../adr/0023-frame-architecture-materials.md) (accepted 2026-11-02), with the
    vendor claims re-checked and its corrections to this plan listed there.
+8. **ADR-0026 (N3):** `light-bake`, a top-down terrain lightmap, an irradiance probe volume and
+   reflection probes. Drafted as [ADR-0026](../adr/0026-baked-lighting.md) (proposed
+   2026-11-14), with its corrections to this plan listed there.
 
 ## 13. Open questions for the maintainer
 
