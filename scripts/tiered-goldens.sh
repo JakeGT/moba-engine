@@ -14,10 +14,12 @@
 #     Vulkan version and driver info (Mesa and LLVM versions) from `vulkan-probe --json`):
 #     llvmpipe's code generation differs between Mesa and LLVM versions, so another lavapipe
 #     renders other bytes for every back end. The class is the CPU vendor (`amd`, `intel`,
-#     from /proc/cpuinfo): llvmpipe's JIT uses RSQRTPS, an approximation whose bits are the
-#     vendor's own, so the same lavapipe renders other bytes on Intel than on AMD (AVX-512 or
-#     not makes no difference). On a device the file names, a CPU class it has no section for
-#     fails the run for every back end, with the section to add. On another device the check
+#     from /proc/cpuinfo): the same lavapipe renders other bytes on Intel than on AMD runners
+#     (AVX-512 or not makes no difference; most likely llvmpipe's RSQRTPS, an approximation
+#     whose bits are the vendor's own). On a device the file names, a CPU class it has no
+#     section for (or a file from before the classes) fails the run for every back end, with
+#     the section to add. A mismatch on a recorded class means the code changed, or that the
+#     class key is too coarse (one Intel model was seen when it was set): check the CPU line. On another device the check
 #     is skipped with a log line, except on CI (GITHUB_ACTIONS) for FSR 3.1, whose only
 #     regression check it is: there it fails the run (TAAU, in the required renderer-gate,
 #     warns and keeps its fingerprints). Every run writes its section to
@@ -104,8 +106,10 @@ if [ "${WRITE_HASHES:-0}" = 1 ]; then
 elif [ -n "$device" ] && printf '%s\n' "$keys" | grep -qxF "$key"; then
   exact=1
   echo "exact hashes: on $key"
-elif [ -n "$device" ] && [ -n "$classes" ]; then
-  # The device is known and this CPU class is not: fail loudly, for every back end.
+elif [ -n "$device" ] && { [ -n "$classes" ] || grep -qxF "device $device" "$hashes" 2>/dev/null; }; then
+  # The device is known and this CPU class is not (or the file predates CPU classes, a bare
+  # `device <device>` line): fail loudly, for every back end.
+  classes=${classes:-"none (a section without cpu=, from before ADR-0021 amendment 6) "}
   echo "::error::tiered-goldens: no exact hashes for CPU class '$cpu_class' on '$device'" \
     "(recorded: ${classes% }); $regenerate"
   echo "FAIL: exact hashes: no section for '$key' (recorded classes: ${classes% }); $regenerate"
