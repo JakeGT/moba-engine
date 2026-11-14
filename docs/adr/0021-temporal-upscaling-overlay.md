@@ -1552,24 +1552,32 @@ the required `renderer-gate` on some attempts and passed it on others.
 
    | Runner CPU | Family/model | AVX-512 | Runs | TAAU low | FSR 3.1 low | Set |
    |---|---|---|---|---|---|---|
-   | AMD EPYC 7763 (Zen 3) | 25 / 1 | no | 3 (sampler) | `31b525c6…` | `3a0c1b01…` | AMD |
-   | AMD EPYC 9V74 (Zen 4) | 25 / 17 | yes | 1 (sampler) | `31b525c6…` | `3a0c1b01…` | AMD |
-   | AMD EPYC 9V45 (Zen 5) | 26 / 2 | yes | 2 (sampler, `tiered-temporal`) | `31b525c6…` | `3a0c1b01…` | AMD |
-   | Intel Xeon 6975P-C (Granite Rapids) | 6 / 173 | yes (+FP16) | 1 (sampler) | `5efbb97d…` | `49f1afa0…` | Intel |
-   | not logged (#373's `renderer-gate`, job 132542577022) | – | – | 1 | `5efbb97d…` | – | Intel |
+   | AMD EPYC 7763 (Zen 3) | 25 / 1 | no | 4 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
+   | AMD EPYC 9V74 (Zen 4) | 25 / 17 | yes | 5 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
+   | AMD EPYC 9V45 (Zen 5) | 26 / 2 | yes | 1 sampler, 2 `tiered-temporal` (FSR), 1 `renderer-gate` (TAAU) | `31b525c6…` | `3a0c1b01…` | AMD |
+   | Intel Xeon 6975P-C (Granite Rapids) | 6 / 173 | yes (+FP16) | 2 sampler, 1 `renderer-gate` (TAAU) | `5efbb97d…` | `49f1afa0…` | Intel |
+   | not logged (#373's `renderer-gate`, job 132542577022) | – | – | 1 (TAAU) | `5efbb97d…` | – | Intel |
 
-   The AMD set is amendment 4's hashes (the file's only set until now); "sampler" is a
-   temporary six-runner matrix job in #374's draft, removed before merge. #373 changed no
+   Runs 43627278470 and 43630461431. The AMD set is amendment 4's hashes (the file's only
+   set until now); "sampler" is a temporary six-runner matrix job (TAAU and FSR 3.1 on the
+   same runner) in #374's draft, removed before merge. In the second run, with the final
+   checker, every runner passed its own section exactly (Intel and AMD), and the same runners
+   failed loudly with their own section removed from the file. #373 changed no
    render code, so its failure was main's own Intel bytes.
 
    Every other capture (high, native, overlay, for both back ends) follows its low capture's
-   set. The two captures of each pair were byte-identical in every run. With llvmpipe's
-   AVX-512 cleared (`GALLIUM_OVERRIDE_CPU_CAPS=avx`, Mesa's override; `GALLIUM_DUMP_CPU`
-   confirmed `has_avx512f = 1` without it) each runner rendered **the same** FSR 3.1 bytes as
-   without it, on Intel and on AMD. AVX-512 is not the variable, and neither is the CPU
-   generation (Zen 3, without AVX-512, agrees with Zen 4 and Zen 5); the vendor is.
+   set. The two captures of each pair were byte-identical in every run. AVX-512 is not the
+   variable: the EPYC 7763 (Zen 3, no AVX-512) renders the same bytes as Zen 4 and Zen 5
+   (both with it), and Intel differs from all three. Supporting only: with Mesa's
+   `GALLIUM_OVERRIDE_CPU_CAPS=avx` (which clears llvmpipe's `has_avx512f`; the caps were
+   dumped without the override, `has_avx512f = 1`, not with it) each of run 43627278470's six
+   sampler runners rendered
+   the same FSR 3.1 bytes as without it, on Intel and on AMD. The vendor is the variable.
+   Only one Intel model (the 6975P-C) was seen, so a different Intel model could still prove
+   to be its own class.
 2. **Why (most likely).** llvmpipe's JIT uses x86's approximate reciprocal square root
-   (`llvm.x86.avx.rsqrt.ps.256` and `llvm.x86.sse.rsqrt.ps` are in `libvulkan_lvp.so`).
+   (`llvm.x86.avx.rsqrt.ps.256` and `llvm.x86.sse.rsqrt.ps` are in the bundled local
+   `libvulkan_lvp.so`; CI's Mesa 26.0.8 build was not inspected).
    RSQRTPS is specified only to a relative error of 1.5 × 2⁻¹², and Intel and AMD implement
    it with different tables, so its bits, and every pixel downstream of a normalize or a
    reciprocal square root, depend on the vendor. This is deterministic per vendor: it is not
@@ -1585,7 +1593,10 @@ the required `renderer-gate` on some attempts and passed it on others.
    exactly on both classes.
 4. **An unrecorded class fails loudly.** On a device the file names, a runner whose class has
    no section fails `tiered-goldens.sh` for **every back end** (an `::error::` naming the
-   class, the recorded ones and the section to add). That includes TAAU in the required
+   class, the recorded ones and the section to add). So does a file in the old format (a bare
+   `device <device>` line), so a merge that keeps an old file cannot silently drop the check.
+   A mismatch on a **recorded** class is a code change, or a sign that the vendor key is too
+   coarse (the log's CPU line says which): refine the key rather than overwrite the section. That includes TAAU in the required
    `renderer-gate`: a new CPU vendor on GitHub's runners now fails the required gate until
    its section is added, where before a different device only warned. A different
    **device** (another Mesa or LLVM) behaves as before: skipped with a log line, except that

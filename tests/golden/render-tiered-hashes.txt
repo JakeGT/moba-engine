@@ -1,6 +1,6 @@
 # SHA-256 of the tiered captures (scripts/tiered-goldens.sh), one section per lavapipe device
-# and CPU class (ADR-0021 amendment 6): llvmpipe's JIT uses RSQRTPS, whose bits are the CPU
-# vendor's own, so CI's lavapipe renders different bytes on Intel and on AMD runners. Fill a
+# and CPU class (ADR-0021 amendment 6): CI's lavapipe renders different bytes on Intel and on
+# AMD runners (most likely llvmpipe's RSQRTPS, whose bits are the vendor's own). Fill a
 # section from a CI run on that class only (its artifact's hashes-*.txt, or sha256sum of its
 # *-1.ppm captures); never from a local run or local WRITE_HASHES=1.
 device llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8) cpu=amd
