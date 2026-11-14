@@ -52,13 +52,9 @@ impl Simulation {
         let Some(modifiers) = self.world.get_mut::<Modifiers>(entity) else {
             return;
         };
-        let mut existing = None;
-        for index in 0..usize::from(modifiers.len) {
-            if modifiers.entries[index].kind == kind {
-                existing = Some(index);
-                break;
-            }
-        }
+        let existing = modifiers.entries[..usize::from(modifiers.len)]
+            .iter()
+            .position(|entry| entry.kind == kind);
         if let Some(index) = existing {
             let modifier = &mut modifiers.entries[index];
             modifier.def_id = def_id;
