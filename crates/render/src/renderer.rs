@@ -26,6 +26,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::bindless::BindlessTable;
 use crate::caps::{Admission, DeviceCapabilities, PathChoice, RenderPath};
 use crate::cull::{CullMode, CullStats, LodConfig};
+use crate::depth::DepthConvention;
 use crate::device::DeviceContext;
 use crate::dynres::{self, DynamicResolution};
 use crate::environment::{DecalUpload, EnvironmentConfig, FoliageData, WaterData, WaterMode};
@@ -45,6 +46,7 @@ use crate::memory::MemoryStats;
 use crate::passes::contact::ContactPass;
 use crate::passes::fog::FogPass;
 use crate::passes::gameplay_overlay::{GameplayOverlay, OverlayBlock, OverlayImages};
+use crate::passes::gbuffer_debug::{GBufferDebugPass, GBufferDebugTargets};
 use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
@@ -83,7 +85,7 @@ mod motion_probe;
 pub use ghost_probe::{GhostFrame, GhostProbeReport};
 pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PushCheck};
 
-const FRAMES_IN_FLIGHT: usize = 2;
+pub(crate) const FRAMES_IN_FLIGHT: usize = 2;
 // ADR-0021 (amendment 2 item 17): the temporal back end and `exposure_linear` keep one
 // descriptor set per frame-in-flight slot, rewritten only after that slot's fence.
 const _: () = assert!(
@@ -598,6 +600,8 @@ pub struct Renderer {
     temporal: Option<TemporalState>,
     /// The `exposure_linear` pass, with temporal AA.
     exposure_linear: Option<ExposureLinearPass>,
+    /// A G-buffer debug view (ADR-0023 §1f); `None` unless one is selected with temporal AA.
+    gbuffer_debug: Option<GBufferDebugPass>,
     /// The frame being recorded's temporal state.
     temporal_frame: Option<TemporalFrame>,
     /// [`Renderer::warm_up_temporal`] ran: the next capture keeps the history it built.
@@ -938,6 +942,7 @@ impl Renderer {
                 budget.oit,
                 temporal,
                 tiered.then_some(swapchain.format),
+                DepthConvention::of(path),
             ) {
                 Ok(mut pass) => {
                     if !config.distortion_draw && budget.distortion {
@@ -984,6 +989,8 @@ impl Renderer {
             temporal,
             readback: temporal && config.readback,
             overlay: tiered,
+            depth: DepthConvention::of(path),
+            gbuffer_debug: temporal && config.debug_view.gbuffer_view().is_some(),
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
         // that run them; see `plan_index`.
@@ -1102,6 +1109,7 @@ impl Renderer {
                 hull: lighting_config.outlines == OutlineMode::Hull,
                 temporal,
                 overlay: tiered,
+                depth: frame_spec.depth,
             },
             config.skinning,
             CullSettings {
@@ -1114,7 +1122,14 @@ impl Renderer {
         config.max_bones = scene.max_bones();
         let contact = frame_spec
             .contact_shadows
-            .then(|| ContactPass::new(&device, &shaders, scene.camera_set_layout()))
+            .then(|| {
+                ContactPass::new(
+                    &device,
+                    &shaders,
+                    scene.camera_set_layout(),
+                    frame_spec.depth,
+                )
+            })
             .transpose()?;
         // The outlines draw on the composite's output: the LDR intermediate when FXAA or the
         // upscale reads it, else the swapchain image.
@@ -1181,6 +1196,19 @@ impl Renderer {
         };
         let exposure_linear = temporal
             .then(|| ExposureLinearPass::new(&device, &shaders))
+            .transpose()?;
+        if config.debug_view.gbuffer_view().is_some() && !frame_spec.gbuffer_debug {
+            eprintln!(
+                "[render] debug view {}: the G-buffer needs the tiered path with temporal AA; \
+                 drawing the frame",
+                config.debug_view.name()
+            );
+        }
+        let gbuffer_debug = config
+            .debug_view
+            .gbuffer_view()
+            .filter(|_| frame_spec.gbuffer_debug)
+            .map(|view| GBufferDebugPass::new(&device, &shaders, view))
             .transpose()?;
         let post = PostPass::new(
             &device,
@@ -1255,6 +1283,7 @@ impl Renderer {
             outline,
             temporal: temporal_state,
             exposure_linear,
+            gbuffer_debug,
             temporal_frame: None,
             capture_warmed: false,
             overlay,
@@ -2186,6 +2215,11 @@ impl Renderer {
             .as_ref()
             .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
             .transpose()?;
+        let gbuffer_debug = self
+            .gbuffer_debug
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
         // Last of the builds: the back end replaces its own pipeline only on success.
         if let Some(temporal) = self.temporal.as_mut() {
             temporal
@@ -2194,6 +2228,9 @@ impl Renderer {
         }
         self.scene.install_pipelines(scene);
         if let (Some(pass), Some(pipeline)) = (self.exposure_linear.as_mut(), exposure_linear) {
+            pass.install_pipeline(pipeline);
+        }
+        if let (Some(pass), Some(pipeline)) = (self.gbuffer_debug.as_mut(), gbuffer_debug) {
             pass.install_pipeline(pipeline);
         }
         if let (Some(pass), Some(pipeline)) = (self.overlay.as_mut(), overlay) {
@@ -2615,11 +2652,14 @@ impl Renderer {
             crate::lights::ground_footprint(scene.camera.view_proj),
         );
         self.lighting.write_decals(frame_index, &self.decal_upload);
+        // ADR-0023 §1c: what the GPU reconstructs from depth is in the depth convention.
+        let depth = self.frame_spec.depth;
+        let (near, far) = (scene.camera.near, scene.camera.far);
         self.scene.environment_mut().prepare(
             frame_index,
             scene,
             self.render_extent,
-            raster_view_proj,
+            depth.view_proj(raster_view_proj, near, far),
             main_frame.history_reset,
         );
         // ADR-0021 §5: the overlay's block (unjittered, output resolution).
@@ -2632,7 +2672,7 @@ impl Renderer {
             overlay.prepare(
                 frame_index,
                 &OverlayBlock::new(
-                    scene.camera.view_proj,
+                    depth.view_proj(scene.camera.view_proj, near, far),
                     self.swapchain.extent,
                     crate::passes::composite::is_srgb(self.swapchain.format),
                     &outlines,
@@ -2965,6 +3005,10 @@ impl Renderer {
                         resolve: msaa_depth.map(|_| depth_view),
                         outline_ids,
                         motion: temporal_views.map(|(motion, _)| motion),
+                        gbuffer: resources
+                            .temporal
+                            .map(|temporal| temporal.gbuffer.map(|id| self.transient(id).view())),
+                        gbuffer_store: self.frame_spec.gbuffer_debug || self.frame_spec.readback,
                         lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                     },
@@ -3332,6 +3376,7 @@ impl Renderer {
                         let inputs = UpscaleInputs {
                             color: image(plan.resources.hdr, self.hdr_format, alloc),
                             depth: image(plan.resources.depth, self.frame_spec.depth_format, alloc),
+                            depth_convention: self.frame_spec.depth,
                             motion: image(resources.motion, frame_graph::MOTION_FORMAT, alloc),
                             reactive: image(resources.reactive, frame_graph::MASK_FORMAT, alloc),
                             transparency: image(resources.tc_mask, frame_graph::MASK_FORMAT, alloc),
@@ -3366,6 +3411,22 @@ impl Renderer {
                             // alive until the frame's fence, in the layouts the graph set.
                             unsafe { state.upscaler.record(command_buffer, &inputs, &output) };
                         }
+                    }
+                }
+                PassKind::GBufferDebug => {
+                    if let (Some(pass), Some(temporal)) = (&self.gbuffer_debug, resources.temporal)
+                    {
+                        pass.record(
+                            command_buffer,
+                            frame_index,
+                            &GBufferDebugTargets {
+                                gbuffer: temporal.gbuffer.map(|id| self.transient(id).view()),
+                                exposure: self.transient(temporal.exposure_linear).view(),
+                                output: self.transient(temporal.hdr_out).view(),
+                                render_size: render_extent,
+                                output_size: extent,
+                            },
+                        );
                     }
                 }
                 PassKind::OverlayPrepass => {
@@ -3482,6 +3543,9 @@ impl Renderer {
                     temporal.tc_mask,
                     temporal.exposure_linear,
                     temporal.hdr_out,
+                    temporal.gbuffer[0],
+                    temporal.gbuffer[1],
+                    temporal.gbuffer[2],
                 ]
             }))
             .chain(

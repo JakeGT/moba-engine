@@ -182,14 +182,6 @@ pub const WATER_REFRACTION_FRAG: &[u8] =
 pub const TOOLCHAIN_SMOKE_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/toolchain_smoke.slang.spv"));
 
-/// Unit depth pre-pass with motion vectors (`unit.vert` + `DEPTH_PREPASS` + `MOTION_VECTORS`, ADR-0021 §2).
-pub const UNIT_MOTION_VERT: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/unit_motion.vert.spv"));
-/// Skinned depth pre-pass with motion vectors (previous bone palette, ADR-0021 §2).
-pub const SKINNED_MOTION_VERT: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/skinned_motion.vert.spv"));
-/// VAT depth pre-pass with motion vectors (previous VAT pose, ADR-0021 §2).
-pub const VAT_MOTION_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vat_motion.vert.spv"));
 /// Terrain depth pre-pass with camera motion (ADR-0021 §2).
 pub const TERRAIN_MOTION_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/terrain_motion.vert.spv"));
@@ -199,14 +191,11 @@ pub const FOLIAGE_MOTION_VERT: &[u8] =
 /// Foliage colour pass with an `invariant` position (matches `foliage_motion.vert`'s depth).
 pub const FOLIAGE_TIERED_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/foliage_tiered.vert.spv"));
-/// Pre-pass fragment shader writing motion vectors (ADR-0021 §2a).
-pub const PREPASS_MOTION_FRAG: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/prepass_motion.frag.spv"));
-/// Pre-pass fragment shader writing motion vectors and the unit mask (`PREPASS_IDS`).
-pub const PREPASS_MOTION_IDS_FRAG: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/prepass_motion_ids.frag.spv"));
-/// Sky motion vectors (camera rotation only, ADR-0021 §2).
+/// Sky motion vectors (camera rotation only, ADR-0021 §2) and a zero (`UNLIT`) G-buffer.
 pub const SKY_MOTION_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion.frag.spv"));
+/// [`SKY_MOTION_FRAG`] that also writes the outline ID 0 (no unit).
+pub const SKY_MOTION_IDS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion_ids.frag.spv"));
 /// Water's transparency-and-composition mask (ADR-0021 §2b).
 pub const TC_MASK_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tc_mask.frag.spv"));
 /// The post-upscale gameplay overlay (ADR-0021 §5): outlines, rims and telegraphs at output resolution.
@@ -253,12 +242,73 @@ pub const VFX_MESH_TEMPORAL_VERT: &[u8] =
 /// Distortion writing the reactive mask (ADR-0021 §2b).
 pub const VFX_DISTORT_TEMPORAL_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_distort_temporal.frag.spv"));
+/// The G-buffer prepass's static meshes (ADR-0023 §1e): varyings, outline slot, motion.
+pub const UNIT_GBUFFER_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer.vert.spv"));
+/// The G-buffer prepass's textured static meshes (ADR-0023 §1e).
+pub const UNIT_TEXTURED_GBUFFER_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured_gbuffer.vert.spv"));
+/// The G-buffer prepass's skinned meshes (ADR-0023 §1e).
+pub const SKINNED_GBUFFER_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/skinned_gbuffer.vert.spv"));
+/// The G-buffer prepass's textured skinned meshes (ADR-0023 §1e).
+pub const SKINNED_TEXTURED_GBUFFER_VERT: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/skinned_textured_gbuffer.vert.spv"
+));
+/// The G-buffer prepass's VAT meshes (ADR-0023 §1e).
+pub const VAT_GBUFFER_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vat_gbuffer.vert.spv"));
+/// Units into the G-buffer and motion (ADR-0023 §1e).
+pub const UNIT_GBUFFER_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer.frag.spv"));
+/// Units into the G-buffer, motion and the outline IDs (ADR-0023 §1e).
+pub const UNIT_GBUFFER_IDS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer_ids.frag.spv"));
+/// Textured units into the G-buffer and motion (ADR-0023 §1e).
+pub const UNIT_TEXTURED_GBUFFER_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured_gbuffer.frag.spv"));
+/// Textured units into the G-buffer, motion and the outline IDs (ADR-0023 §1e).
+pub const UNIT_TEXTURED_GBUFFER_IDS_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_textured_gbuffer_ids.frag.spv"
+));
+/// The terrain into the G-buffer and motion (ADR-0023 §1e).
+pub const TERRAIN_GBUFFER_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer.frag.spv"));
+/// The terrain into the G-buffer and motion, and the outline ID 0 (ADR-0023 §1e).
+pub const TERRAIN_GBUFFER_IDS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer_ids.frag.spv"));
+/// Foliage into the G-buffer (`FOLIAGE` model) and motion (ADR-0023 §1e).
+pub const FOLIAGE_GBUFFER_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/foliage_gbuffer.frag.spv"));
+/// The G-buffer debug views (ADR-0023 §1f): one decoded channel over the upscaler's output.
+pub const GBUFFER_DEBUG_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_debug.slang.spv"));
+/// The sky backdrop at the reversed-Z far plane (Tiered, ADR-0023 §1c).
+pub const SKY_REVERSED_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/sky_reversed.vert.spv"));
+/// GTAO reconstructing from reversed-Z depth (Tiered, ADR-0023 §1c).
+pub const GTAO_REVERSED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gtao_reversed.frag.spv"));
+/// Contact shadows marching reversed-Z depth (Tiered, ADR-0023 §1c).
+pub const CONTACT_SHADOWS_REVERSED_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/contact_shadows_reversed.frag.spv"
+));
 /// The linear exposure multiplier the upscaler reads (ADR-0021 §4a), a 1×1 compute pass.
 pub const EXPOSURE_LINEAR_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/exposure_linear.slang.spv"));
 /// The in-house temporal AA and upscaler (ADR-0021 §3) with fused RCAS.
 pub const TEMPORAL_TAAU_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/temporal_taau.slang.spv"));
+/// `gbuffer_smoke`'s raster half (ADR-0023 gate 1): `encode_gbuffer` (include/gbuffer.glsl)
+/// into the three G-buffer targets, one fixed surface per pixel.
+pub const GBUFFER_SMOKE_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_smoke.frag.spv"));
+/// `gbuffer_smoke`'s Slang half: `encode_gbuffer` and `decode_gbuffer` (lib/gbuffer.slang).
+pub const GBUFFER_SMOKE_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_smoke.slang.spv"));
 
 include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
 
@@ -511,18 +561,6 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: TOOLCHAIN_SMOKE_SLANG,
     },
     ShaderModule {
-        name: "unit_motion.vert",
-        spirv: UNIT_MOTION_VERT,
-    },
-    ShaderModule {
-        name: "skinned_motion.vert",
-        spirv: SKINNED_MOTION_VERT,
-    },
-    ShaderModule {
-        name: "vat_motion.vert",
-        spirv: VAT_MOTION_VERT,
-    },
-    ShaderModule {
         name: "terrain_motion.vert",
         spirv: TERRAIN_MOTION_VERT,
     },
@@ -535,16 +573,12 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: FOLIAGE_TIERED_VERT,
     },
     ShaderModule {
-        name: "prepass_motion.frag",
-        spirv: PREPASS_MOTION_FRAG,
-    },
-    ShaderModule {
-        name: "prepass_motion_ids.frag",
-        spirv: PREPASS_MOTION_IDS_FRAG,
-    },
-    ShaderModule {
         name: "sky_motion.frag",
         spirv: SKY_MOTION_FRAG,
+    },
+    ShaderModule {
+        name: "sky_motion_ids.frag",
+        spirv: SKY_MOTION_IDS_FRAG,
     },
     ShaderModule {
         name: "tc_mask.frag",
@@ -607,12 +641,84 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: VFX_DISTORT_TEMPORAL_FRAG,
     },
     ShaderModule {
+        name: "unit_gbuffer.vert",
+        spirv: UNIT_GBUFFER_VERT,
+    },
+    ShaderModule {
+        name: "unit_textured_gbuffer.vert",
+        spirv: UNIT_TEXTURED_GBUFFER_VERT,
+    },
+    ShaderModule {
+        name: "skinned_gbuffer.vert",
+        spirv: SKINNED_GBUFFER_VERT,
+    },
+    ShaderModule {
+        name: "skinned_textured_gbuffer.vert",
+        spirv: SKINNED_TEXTURED_GBUFFER_VERT,
+    },
+    ShaderModule {
+        name: "vat_gbuffer.vert",
+        spirv: VAT_GBUFFER_VERT,
+    },
+    ShaderModule {
+        name: "unit_gbuffer.frag",
+        spirv: UNIT_GBUFFER_FRAG,
+    },
+    ShaderModule {
+        name: "unit_gbuffer_ids.frag",
+        spirv: UNIT_GBUFFER_IDS_FRAG,
+    },
+    ShaderModule {
+        name: "unit_textured_gbuffer.frag",
+        spirv: UNIT_TEXTURED_GBUFFER_FRAG,
+    },
+    ShaderModule {
+        name: "unit_textured_gbuffer_ids.frag",
+        spirv: UNIT_TEXTURED_GBUFFER_IDS_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer.frag",
+        spirv: TERRAIN_GBUFFER_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_ids.frag",
+        spirv: TERRAIN_GBUFFER_IDS_FRAG,
+    },
+    ShaderModule {
+        name: "foliage_gbuffer.frag",
+        spirv: FOLIAGE_GBUFFER_FRAG,
+    },
+    ShaderModule {
+        name: "gbuffer_debug.slang",
+        spirv: GBUFFER_DEBUG_SLANG,
+    },
+    ShaderModule {
+        name: "sky_reversed.vert",
+        spirv: SKY_REVERSED_VERT,
+    },
+    ShaderModule {
+        name: "gtao_reversed.frag",
+        spirv: GTAO_REVERSED_FRAG,
+    },
+    ShaderModule {
+        name: "contact_shadows_reversed.frag",
+        spirv: CONTACT_SHADOWS_REVERSED_FRAG,
+    },
+    ShaderModule {
         name: "exposure_linear.slang",
         spirv: EXPOSURE_LINEAR_SLANG,
     },
     ShaderModule {
         name: "temporal_taau.slang",
         spirv: TEMPORAL_TAAU_SLANG,
+    },
+    ShaderModule {
+        name: "gbuffer_smoke.frag",
+        spirv: GBUFFER_SMOKE_FRAG,
+    },
+    ShaderModule {
+        name: "gbuffer_smoke.slang",
+        spirv: GBUFFER_SMOKE_SLANG,
     },
 ];
 
@@ -734,6 +840,52 @@ mod tests {
             ],
         ),
         (
+            "gbuffer_debug.slang",
+            &[
+                (
+                    "gb0",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 0,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "gb1",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 1,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "gb2",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 2,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "exposure",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 3,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "hdr_out",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 4,
+                        ty: Cow::Borrowed("texture2D:readWrite"),
+                    },
+                ),
+                ("push", Slot::PushConstants),
+            ],
+        ),
+        (
             "exposure_linear.slang",
             &[
                 (
@@ -852,6 +1004,60 @@ mod tests {
                         set: 0,
                         binding: 11,
                         ty: Cow::Borrowed("samplerState"),
+                    },
+                ),
+                ("push", Slot::PushConstants),
+            ],
+        ),
+        (
+            "gbuffer_smoke.slang",
+            &[
+                (
+                    "surfaces",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 0,
+                        ty: Cow::Borrowed("structuredBuffer:read"),
+                    },
+                ),
+                (
+                    "encoded",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 1,
+                        ty: Cow::Borrowed("structuredBuffer:readWrite"),
+                    },
+                ),
+                (
+                    "gb0",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 2,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "gb1",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 3,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "gb2",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 4,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "decoded",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 5,
+                        ty: Cow::Borrowed("structuredBuffer:readWrite"),
                     },
                 ),
                 ("push", Slot::PushConstants),

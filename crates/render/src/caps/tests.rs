@@ -328,6 +328,25 @@ fn a_short_bindless_limit_is_compat_never_a_smaller_table() {
     assert_eq!(missing_items(&caps), ["vulkan-1.3"]);
 }
 
+/// ADR-0023 §1d: the G-buffer pass needs `maxColorAttachments` ≥ 8 (the tier-floor GPUs and
+/// every recorded device report 8); a device with Vulkan's core minimum of 4, or the
+/// Roadmap 2022 profile's 7, is Compat.
+#[test]
+fn eight_colour_attachments_are_required_on_tiered() {
+    for name in RECORDED.iter().chain(&SYNTHETIC) {
+        let caps = fixture(name);
+        assert!(caps.limits["maxColorAttachments"] >= 8, "{name}");
+    }
+    for short in [4, 7] {
+        let mut caps = fixture("rtx-5070-ti");
+        caps.limits
+            .insert(String::from("maxColorAttachments"), short);
+        let admission = admit(&caps, on(PathChoice::Auto));
+        assert_eq!(admission.path, RenderPath::Compat);
+        assert_eq!(admission.missing, ["maxColorAttachments"]);
+    }
+}
+
 /// ADR-0021 Q7: the tiered path's per-attachment blend states need `independentBlend`, and
 /// every fixture (each recorded device reports it) has it.
 #[test]

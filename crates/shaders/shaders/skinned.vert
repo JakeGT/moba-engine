@@ -22,7 +22,7 @@ invariant gl_Position;
 #include "outline.glsl"
 #endif
 #ifdef MOTION_VECTORS
-// ADR-0021 §2b: the temporal prepass's motion (with DEPTH_PREPASS).
+// ADR-0021 §2b: the G-buffer prepass's motion (with GBUFFER, ADR-0023 §1e).
 #define MOTION_VECTORS_VERTEX
 #define MOTION_PREV_INSTANCES
 #include "motion.glsl"
@@ -64,6 +64,11 @@ layout(location = 2) out vec3 out_world_pos;
 #ifdef MATERIAL_TEXTURED
 layout(location = 3) out vec2 out_uv;
 layout(location = 4) out vec4 out_world_tangent;
+#endif
+#ifdef GBUFFER
+// ADR-0023 §1e: the G-buffer prepass takes the scene's varyings, the outline slot (the unit
+// mask) and the motion (with MOTION_VECTORS).
+layout(location = 13) flat out uint out_outline_slot;
 #endif
 
 // The joint matrix of `joint` in the palette starting at `first`.
@@ -131,6 +136,18 @@ void main() {
 #elif defined(DEPTH_PREPASS)
     gl_Position = camera.view_proj * world;
     out_outline = instance.params.x;
+#elif defined(OUTLINE_HULL)
+    vec3 normal = transpose(inverse(mat3(model))) * in_normal;
+    gl_Position = outline_hull_position(world.xyz, normal, instance.params.x);
+    out_outline_color = outline_color(instance.params.x);
+#else
+    gl_Position = camera.view_proj * world;
+
+    out_world_normal = normalize(transpose(inverse(mat3(model))) * in_normal);
+    out_color = instance.color.rgb;
+    out_world_pos = world.xyz;
+#ifdef GBUFFER
+    out_outline_slot = instance.params.x;
 #ifdef MOTION_VECTORS
     // `reserved0`: the previous palette's first bone, copied after this frame's (ADR-0021
     // §2c); `reserved1` 1 when it is there (otherwise this frame's palette).
@@ -142,16 +159,7 @@ void main() {
     }
     write_motion(world.xyz, previous);
 #endif
-#elif defined(OUTLINE_HULL)
-    vec3 normal = transpose(inverse(mat3(model))) * in_normal;
-    gl_Position = outline_hull_position(world.xyz, normal, instance.params.x);
-    out_outline_color = outline_color(instance.params.x);
-#else
-    gl_Position = camera.view_proj * world;
-
-    out_world_normal = normalize(transpose(inverse(mat3(model))) * in_normal);
-    out_color = instance.color.rgb;
-    out_world_pos = world.xyz;
+#endif
 #endif
 #ifdef MATERIAL_TEXTURED
     out_uv = in_uv;

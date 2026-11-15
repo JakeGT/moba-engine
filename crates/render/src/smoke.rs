@@ -17,14 +17,20 @@
 //! - [`fsr3_smoke`] (N1b, ADR-0021 §4b and §4c): runs the FSR 3.1.6 port on synthetic inputs
 //!   with a known ideal output. Being an upscaler it is compared within error bounds rather than
 //!   exactly, and it must be bit-identical across two runs.
+//! - [`gbuffer_smoke`] (N2a, ADR-0023 verification gate 1): 4096 fixed surfaces through the
+//!   G-buffer encoding, in a GLSL fragment shader into the three targets' real formats and in
+//!   a Slang compute shader, and the Slang decode of the written texels; every stored byte
+//!   must equal the Rust twin's (`crate::gbuffer`), and every decoded value its decode.
 //!
-//! `moba-tools` runs them as the `bindless-smoke`, `rt-smoke` and `fsr3-smoke` binaries. A CPU
+//! `moba-tools` runs them as the `bindless-smoke`, `rt-smoke`, `fsr3-smoke` and
+//! `gbuffer-smoke` binaries. A CPU
 //! device such as lavapipe needs `MOBA_RENDER_PATH=tiered`; any validation message fails a
 //! run.
 
 pub(crate) mod bindless;
 #[cfg(feature = "fsr3")]
 pub(crate) mod fsr3;
+pub(crate) mod gbuffer;
 pub(crate) mod rt;
 
 use crate::caps::{PathChoice, RenderPath};
@@ -39,7 +45,7 @@ const QUOTED_MISMATCHES: usize = 8;
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct SmokeReport {
-    /// `"bindless_smoke"`, `"rt_smoke"` or `"fsr3_smoke"`.
+    /// `"bindless_smoke"`, `"rt_smoke"`, `"fsr3_smoke"` or `"gbuffer_smoke"`.
     pub name: &'static str,
     /// The device's name.
     pub device: String,
@@ -165,6 +171,17 @@ pub fn fsr3_smoke(choice: PathChoice, validation: ValidationMode) -> RenderResul
             "fsr3_smoke needs moba-render's `fsr3` feature",
         )))
     }
+}
+
+/// Runs `gbuffer_smoke` on a headless tiered device (ADR-0023 verification gate 1): 4096
+/// fixed surfaces through `encode_gbuffer` in a GLSL fragment shader (into the three G-buffer
+/// targets' real formats) and in Slang, and through Slang's `decode_gbuffer` from the written
+/// texels; every stored byte must equal the Rust twin's and every decoded value its decode.
+///
+/// # Errors
+/// As [`bindless_smoke`].
+pub fn gbuffer_smoke(choice: PathChoice, validation: ValidationMode) -> RenderResult<SmokeReport> {
+    run("gbuffer_smoke", choice, validation, gbuffer::run)
 }
 
 fn run(

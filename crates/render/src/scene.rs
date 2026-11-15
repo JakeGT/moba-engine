@@ -4,6 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use moba_assets::{JointMatrix, VatPose};
 use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, perspective_rh};
 
+use crate::depth::DepthConvention;
 use crate::ui::UiImage;
 
 use crate::environment::{Decal, EnvironmentFrame};
@@ -727,17 +728,26 @@ pub(crate) struct TemporalCamera {
 impl CameraUniform {
     /// Applies `temporal`: `view_proj` and `inv_view_proj` become the jittered matrix and its
     /// inverse (only when it differs from the camera's, so the still case keeps exactly the
-    /// bytes it had), and the N1 members are filled in.
-    pub(crate) fn with_temporal(mut self, temporal: &TemporalCamera) -> Self {
+    /// bytes it had), and the N1 members are filled in. Every matrix takes `depth`'s
+    /// convention with `camera`'s planes (ADR-0023 §1c); the temporal state itself is kept
+    /// forward, as the client's camera is.
+    pub(crate) fn with_temporal(
+        mut self,
+        temporal: &TemporalCamera,
+        depth: DepthConvention,
+        camera: &Camera,
+    ) -> Self {
+        let gpu = |matrix: Mat4| depth.view_proj(matrix, camera.near, camera.far);
         if temporal.jittered != temporal.unjittered {
-            let inverse = temporal.jittered.inverse();
+            let jittered = gpu(temporal.jittered);
+            let inverse = jittered.inverse();
             if inverse.is_finite() {
-                self.view_proj = temporal.jittered.to_cols_array_2d();
+                self.view_proj = jittered.to_cols_array_2d();
                 self.inv_view_proj = inverse.to_cols_array_2d();
             }
         }
-        self.view_proj_unjittered = temporal.unjittered.to_cols_array_2d();
-        self.prev_view_proj = temporal.previous.to_cols_array_2d();
+        self.view_proj_unjittered = gpu(temporal.unjittered).to_cols_array_2d();
+        self.prev_view_proj = gpu(temporal.previous).to_cols_array_2d();
         self.jitter = [
             temporal.jitter[0],
             temporal.jitter[1],
@@ -768,7 +778,9 @@ impl CameraUniform {
     }
 
     /// The camera block of a view `extent` pixels large, with this frame's `lighting`
-    /// (shadows, IBL, lights, occlusion) and `outlines`.
+    /// (shadows, IBL, lights, occlusion) and `outlines`, its matrices in `depth`'s convention
+    /// (ADR-0023 §1c: reversed-Z on Tiered).
+    #[allow(clippy::too_many_arguments)] // One block from the frame's parts.
     pub(crate) fn new(
         camera: Camera,
         vision: &VisionCircles,
@@ -777,10 +789,12 @@ impl CameraUniform {
         world: &WorldFrame,
         outlines: &OutlinePalette,
         extent: [u32; 2],
+        depth: DepthConvention,
     ) -> Self {
         let width = extent[0].max(1) as f32;
         let height = extent[1].max(1) as f32;
-        let inverse = camera.view_proj.inverse();
+        let view_proj = depth.camera(&camera);
+        let inverse = view_proj.inverse();
         let inverse = if inverse.is_finite() {
             inverse
         } else {
@@ -791,7 +805,7 @@ impl CameraUniform {
             *destination = source.to_array();
         }
         Self {
-            view_proj: camera.view_proj.to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
             camera_pos: [camera.position.x, camera.position.y, camera.position.z, 1.0],
             light_direction: [
                 camera.light_direction.x,
@@ -832,8 +846,8 @@ impl CameraUniform {
             baked_ao: lighting.baked_ao,
             contact: lighting.contact,
             outline_palette: outlines.sanitized(),
-            view_proj_unjittered: camera.view_proj.to_cols_array_2d(),
-            prev_view_proj: camera.view_proj.to_cols_array_2d(),
+            view_proj_unjittered: view_proj.to_cols_array_2d(),
+            prev_view_proj: view_proj.to_cols_array_2d(),
             jitter: [0.0; 4],
             temporal: [0.0; 4],
         }
