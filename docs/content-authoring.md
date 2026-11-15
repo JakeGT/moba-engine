@@ -914,9 +914,11 @@ outside its §2 row (ADR-0022 amendment 2 lists all 14: the Void composites, gla
 Void silk, fused scorch crust and fracture faces, cut and polished basalt, polished black
 stone, wet basalt, the emitter lattice, and void-glass, sun-glass and polished obsidian under
 the unit roughness floor), §3 applies and the report says so. That reading of §3 as the more
-specific rule is not yet confirmed by the maintainer. `Forge dark alloy, scaled` (`OXIDE`)
-leaves its chipped texels (metalness ≥ 0.9) out of the dielectric metalness check and reports
-their share, also pending the maintainer. For any other entry the §2 row applies.
+specific rule is not yet confirmed by the maintainer. For any other entry the §2 row applies.
+Chipped scale on `Forge dark alloy, scaled` is bare metal on an `OXIDE` (dielectric) surface:
+paint the chips as their own `METAL` class region in the class map, so they are checked as
+metal, and keep the oxide around them `OXIDE` (chips left inside the `OXIDE` region fail its
+metalness, albedo and roughness checks; ADR-0022 amendment 2).
 `material_class` takes the same table form.
 
 It reports, in order:

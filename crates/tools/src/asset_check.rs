@@ -231,7 +231,6 @@ pub(crate) fn class_range(key: &str) -> Option<&'static ClassRange> {
 /// conflict as an open decision. This is a minimal slice of PBR-VOCAB-1: only the entries that
 /// conflict are data; every other entry is checked against its §2 row.
 #[derive(Clone, Copy, Debug)]
-#[allow(clippy::struct_excessive_bools)] // Independent per-entry exemptions from §3.
 pub(crate) struct VocabEntry {
     /// The §3 material name, as the manifest gives it (matched ignoring case).
     pub(crate) name: &'static str,
@@ -249,9 +248,6 @@ pub(crate) struct VocabEntry {
     pub(crate) dark_metal: bool,
     /// Its §3 roughness goes below 0.08: PBR-RGH-2's floor on heroes and minions is 0.045 here.
     pub(crate) glossy: bool,
-    /// A dielectric with bare-metal chips (metalness ≥ 0.9): chip texels are left out of the
-    /// class's dielectric metalness check and reported; partial metalness still counts.
-    pub(crate) metal_chips: bool,
 }
 
 const fn vocab(
@@ -269,13 +265,12 @@ const fn vocab(
         wet: false,
         dark_metal: false,
         glossy: false,
-        metal_chips: false,
     }
 }
 
-/// The §3 entries that conflict with §2, plus Forge dark alloy's metal-chip allowance
-/// (ADR-0022 amendment 2 lists each one as an open question for the maintainer).
-pub(crate) const VOCAB: [VocabEntry; 15] = [
+/// The §3 entries that conflict with §2 (ADR-0022 amendment 2 lists each one as an open
+/// question for the maintainer).
+pub(crate) const VOCAB: [VocabEntry; 14] = [
     vocab(
         "Void composite, matte",
         "CERAM",
@@ -312,16 +307,6 @@ pub(crate) const VOCAB: [VocabEntry; 15] = [
         "§3.1 Fused scorch (CHAR / GLASS): fracture faces roughness 0.15-0.35",
         (0.15, 0.35),
     ),
-    VocabEntry {
-        roughness: None,
-        metal_chips: true,
-        ..vocab(
-            "Forge dark alloy, scaled",
-            "OXIDE",
-            "§3.1 Forge dark alloy, scaled: metal 0, 1 where the scale is chipped",
-            (0.0, 0.0),
-        )
-    },
     vocab(
         "Levitating basalt (cut faces)",
         "STONE-1",
@@ -1097,17 +1082,12 @@ fn classify(
                     ),
                     (None, None) => format!("§2 {} ranges kept", base.rule),
                 };
-                let chips = if entry.metal_chips {
-                    "; chips at metalness ≥ 0.9 are left out of the dielectric check"
-                } else {
-                    ""
-                };
                 report.push(
                     &rule,
                     None,
                     format!("{}: §3 applies", entry.name),
                     format!(
-                        "{}; {replaces}{chips} (§3 read as the more specific rule, not yet \
+                        "{}; {replaces} (§3 read as the more specific rule, not yet \
                          confirmed by the maintainer; ADR-0022 amendment 2)",
                         entry.source,
                     ),
@@ -1506,36 +1486,17 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         {
             let mut metalness: Vec<f32> = texels.iter().map(|&i| metal_at(i as usize)).collect();
             metalness.sort_unstable_by(f32::total_cmp);
-            // A §3 entry with metal chips: texels at metalness ≥ 0.9 sort last and are left out
-            // of the dielectric reading (partial metalness still counts against it).
-            let chips = if class.entry.is_some_and(|entry| entry.metal_chips) && !want_metal {
-                metalness.iter().filter(|&&m| m >= 0.9).count()
-            } else {
-                0
-            };
-            let rest = &metalness[..metalness.len() - chips];
-            let m1 = percentile_sorted(&metalness, 1.0);
-            let m99 = if rest.is_empty() {
-                0.0
-            } else {
-                percentile_sorted(rest, 99.0)
-            };
+            let (m1, m99) = (
+                percentile_sorted(&metalness, 1.0),
+                percentile_sorted(&metalness, 99.0),
+            );
             let (ok, limit) = if want_metal {
                 (
                     m1 >= 0.9,
-                    String::from("metal: p1 ≥ 0.9 (outside the 0.1-0.9 transition band)"),
-                )
-            } else if chips > 0 {
-                (
-                    m99 <= 0.1,
-                    format!(
-                        "dielectric: p99 ≤ 0.1, chipped scale left out ({:.4} of the class \
-                         at metalness ≥ 0.9, §3 metal chips)",
-                        chips as f32 / metalness.len() as f32
-                    ),
+                    "metal: p1 ≥ 0.9 (outside the 0.1-0.9 transition band)",
                 )
             } else {
-                (m99 <= 0.1, String::from("dielectric: p99 ≤ 0.1"))
+                (m99 <= 0.1, "dielectric: p99 ≤ 0.1")
             };
             report.push(
                 &format!("{name} metalness"),
@@ -2486,46 +2447,76 @@ mod tests {
     }
 
     #[test]
-    fn a_metal_chip_entry_leaves_chips_out_of_the_dielectric_check() {
+    fn chipped_scale_fails_as_oxide_and_passes_as_its_own_metal_region() {
+        // Forge dark alloy, scaled: oxide (luma ~56, roughness ~0.64, dielectric) on the left,
+        // chips of bare iron (#C0BEBB, luma ~190, roughness ~0.45, metal) on the right.
         let dir = scratch("chips");
-        // OXIDE at roughness 0.64, luma ~56, with 1 texel in 8 chipped to bare metal.
-        let manifest = |class: &str| {
-            format!("asset = \"alloy\"\nclass = \"prop\"\nmaterial_class = {class}\n{MAPS}")
+        let (side, n) = (16u32, 256usize);
+        let chip = |i: usize| i % 16 >= 8;
+        let base: Vec<[u8; 4]> = (0..n)
+            .map(|i| {
+                let jitter = (i % 5) as u8;
+                let [r, g, b] = if chip(i) {
+                    [0xC0, 0xBE, 0xBB]
+                } else {
+                    [0x3A, 0x38, 0x36]
+                };
+                [r + jitter, g + jitter, b + jitter, 255]
+            })
+            .collect();
+        let oxide = mr_map(n, 0.64);
+        let iron = mr_map(n, 0.45);
+        let mr: Vec<[u8; 4]> = (0..n)
+            .map(|i| {
+                if chip(i) {
+                    [255, iron[i][1], 0, 255]
+                } else {
+                    oxide[i]
+                }
+            })
+            .collect();
+        write_png(&dir.join("base.png"), side, side, &base);
+        write_png(&dir.join("mr.png"), side, side, &mr);
+        write_png(
+            &dir.join("normal.png"),
+            side,
+            side,
+            &vec![[128, 128, 255, 255]; n],
+        );
+        let path = dir.join("x.source.toml");
+        let check = |ids: &[u8], classes: &str| {
+            write_png_as(
+                &dir.join("class.png"),
+                side,
+                side,
+                png::ColorType::Grayscale,
+                ids,
+            );
+            std::fs::write(
+                &path,
+                format!(
+                    "asset = \"alloy\"\nclass = \"prop\"\n[classes]\n{classes}{MAPS}\
+                     class = \"class.png\"\n"
+                ),
+            )
+            .expect("manifest");
+            check_source(&path).expect("check")
         };
-        let path = set(&dir, 16, [0x3A, 0x38, 0x36], 0.64, &manifest("\"OXIDE\""));
-        let mut mr = mr_map(256, 0.64);
-        for texel in mr.iter_mut().step_by(8) {
-            texel[0] = 255;
+        // The chips painted into the OXIDE region: metal, too bright and too smooth for it.
+        let one = check(&[0; 256], "0 = \"OXIDE\"\n");
+        for limit in ["metalness", "albedo", "roughness"] {
+            let rule = rule(&one, &format!("PBR-OXIDE-1 (id 0) {limit}"));
+            assert_eq!(rule.pass, Some(false), "{limit}: {}", one.text());
         }
-        write_png(&dir.join("mr.png"), 16, 16, &mr);
-        let plain = check_source(&path).expect("check");
-        assert_eq!(
-            rule(&plain, "PBR-OXIDE-1 (id 0) metalness").pass,
-            Some(false)
-        );
-        std::fs::write(
-            &path,
-            manifest("{ class = \"OXIDE\", vocab = \"Forge dark alloy, scaled\" }"),
-        )
-        .expect("manifest");
-        let named = check_source(&path).expect("check");
-        let metal = rule(&named, "PBR-OXIDE-1 (id 0) metalness");
-        assert_eq!(metal.pass, Some(true), "{}", named.text());
-        assert!(
-            metal.limit.contains("chipped scale left out"),
-            "{}",
-            metal.limit
-        );
-        // Partial metalness is not a chip: it still fails.
-        for texel in mr.iter_mut().step_by(8) {
-            texel[0] = 128;
+        // The same chips as their own METAL region in the class map: both classes pass.
+        let ids: Vec<u8> = (0..n).map(|i| u8::from(chip(i))).collect();
+        let two = check(&ids, "0 = \"OXIDE\"\n1 = \"METAL\"\n");
+        for class in ["PBR-OXIDE-1 (id 0)", "PBR-METAL-1 (id 1)"] {
+            for limit in ["metalness", "albedo", "roughness"] {
+                let rule = rule(&two, &format!("{class} {limit}"));
+                assert_eq!(rule.pass, Some(true), "{class} {limit}: {}", two.text());
+            }
         }
-        write_png(&dir.join("mr.png"), 16, 16, &mr);
-        let half = check_source(&path).expect("check");
-        assert_eq!(
-            rule(&half, "PBR-OXIDE-1 (id 0) metalness").pass,
-            Some(false)
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

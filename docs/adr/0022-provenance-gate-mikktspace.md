@@ -429,7 +429,7 @@ a 4096² hero with seven RGB maps peaks at 414 MiB.
   §2/§3 conflicts listed below, its §3 numbers replace the §2 row for that class, and the report
   prints which entry applied and why (pending the maintainer's confirmation of that reading).
   Any other name is reported and the §2 row applies. This is a minimal slice of PBR-VOCAB-1:
-  only the conflicts, and Forge dark alloy's metal-chip allowance, are data.
+  only the conflicts are data.
 - **Class ids** are 0–254: 255 is reserved for "no class", and a manifest that would declare
   more than 255 classes is refused.
 - **UV coverage** rasterises the UVs at texel centres, wrapping tiling UVs. A UV more than
@@ -486,13 +486,14 @@ yet confirmed by the maintainer; each conflict is listed here to confirm or over
 | Sun-glass | PBR-RGH-2 0.08 on heroes and minions | roughness 0.05–0.20; floor 0.045 | below the unit floor |
 | Obsidian metamaterial, polished (blades) | PBR-RGH-2 0.08 on heroes and minions | roughness 0.05–0.20; floor 0.045 | below the unit floor |
 
-**Forge dark alloy, scaled: a metalness question.** §3 gives it metal 0, and 1 where the scale
-is chipped, but it sits in `OXIDE`, a dielectric class (p99 metalness ≤ 0.1). More than 1 % of
-chipped texels would fail the class's metalness check. `content-check` carries it as a 15th
-`vocab` entry with a metal-chip allowance: texels at metalness ≥ 0.9 are left out of the
-dielectric check and their share is reported (partial metalness still counts). The roughness
-and albedo stay §2's. The maintainer should confirm the allowance, or say whether chipped
-scale belongs in a separate `METAL` class region instead (see the open questions).
+**Forge dark alloy, scaled: chipped scale is its own `METAL` region.** §3 gives it metal 0,
+and 1 where the scale is chipped, but it sits in `OXIDE`, a dielectric class. A chip is bare
+iron (about luma 190, roughness 0.30–0.60), so chips inside the `OXIDE` region fail its
+metalness (p99 ≤ 0.1), albedo (30–140) and roughness (0.55–1.0) checks once they pass 1 %.
+The adopted approach: chipped scale is painted as its own `METAL` class region in the class
+map and checked as metal; the oxide around it stays `OXIDE`. `content-check` has no
+allowance for it and no `vocab` entry (there is no §2/§3 conflict to apply). The maintainer
+may overrule this (open question 7).
 
 **Review renders: departures from §9.4's wording.**
 
@@ -581,9 +582,10 @@ scale belongs in a separate `METAL` class region instead (see the open questions
    painted splat junctions and about 24 dB on wavy blends; only smooth two-layer ramps reach
    35 dB. A bake under 35 dB warns and points to `--format rgba8`. Should the default be
    `rgba8` instead?
-7. **Forge dark alloy, scaled.** Confirm the metal-chip allowance above, or move chipped scale
-   to a `METAL` class region. The allowance has no cap: a class that is all chips passes the
-   dielectric check (the report prints the share). Should it have one?
+7. **Forge dark alloy, scaled.** Chipped scale is painted as its own `METAL` class region and
+   checked as metal; this is the approach adopted, and the maintainer is free to overrule it
+   (for example with an allowance inside `OXIDE`, which would also need to exempt the chips
+   from `OXIDE`'s albedo and roughness ranges).
 
 **Blender export convention** (`docs/content-authoring.md`, Blender export):
 

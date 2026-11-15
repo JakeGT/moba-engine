@@ -149,8 +149,8 @@ the semver check):
     §2 and §6). It also checks roadmap §9.1's texel density and the export (loader limits,
     baked `TANGENT`, feet at y = 0). The mode is separate from the pack check and `--provenance`.
     A class may name its material-vocabulary §3 entry (`vocab`): where §3 conflicts with its
-    §2 row, §3 applies, a reading the amendment lists for the maintainer (14 conflicts, plus
-    Forge dark alloy's chipped-metal allowance). Class id 255 and a 256th class are refused. Maps
+    §2 row, §3 applies, a reading the amendment lists for the maintainer (14 conflicts).
+    Chipped Forge dark alloy is painted as its own `METAL` class region. Class id 255 and a 256th class are refused. Maps
     stay at their file's depth, so a 4096² hero peaks near 414 MiB; UVs no tiling explains are
     refused, and UVs that tile past the raster budget report coverage as not measured.
   - `scripts/blender/review_render.py` renders review frames in Golden Crossing light from the
