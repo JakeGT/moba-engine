@@ -21,7 +21,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | Gate | Result |
 |---|---|
 | 1. Encoding and interfaces | **Met.** `gbuffer-smoke` adds the GLSL decode; push blocks pinned by SPIR-V and reflection tests |
-| 2. Deferred–forward parity | **Met** locally and on CI after a TAAU fix (ADR-0021 amendment 7): worst pixel 2, 3 and 5/255 locally on the default scene, the river and the teamfight (CI: pending). See [below](#gate-2-deferredforward-parity) |
+| 2. Deferred–forward parity | **Met** locally and on CI after a TAAU fix (ADR-0021 amendment 7): worst pixel 2, 3 and 5/255 locally on the default scene, the river and the teamfight; on CI (AMD) 4, 3 and 5. No Intel runner ran the parity step. See [below](#gate-2-deferredforward-parity) |
 | 3. Light-set consistency | **Met** under all five caps |
 | 7. Performance (≤ 1.10× N1) | **Met**: GPU total 1.014–1.065× against `ab42718` (GPU span 1.031–1.078×), 0.959–0.981× against `790d9be`; Tiered Overdrive included |
 
@@ -53,13 +53,13 @@ tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness 0.2
 within 2/255 on at least 99.5 % of pixels, and within 6/255 everywhere.
 
 **Met**, with TAAU's history fix (ADR-0021 amendment 7), locally (Mesa 26.2.5, 0 validation
-messages) and on CI's lavapipe (Mesa 26.0.8, LLVM 21.1.8; pending):
+messages) and on CI's lavapipe (Mesa 26.0.8, LLVM 21.1.8; `tiered-temporal` in run 43720150585, an AMD EPYC 9V74 runner):
 
 | Scene | Local: within 2/255 | Local: max | CI: within 2/255 | CI: max |
 |---|---|---|---|---|
-| Default (frame 90) | 100.000 % | 2 | pending | pending |
-| R3b river (frame 90) | 100.000 % | 3 (3 pixels) | pending | pending |
-| R3b teamfight (tick 360) | 99.999 % | 5 (1 pixel) | pending | pending |
+| Default (frame 90) | 100.000 % | 2 | 100.000 % | 4 (2 pixels past 2) |
+| R3b river (frame 90) | 100.000 % | 3 (3 pixels) | 100.000 % | 3 (2 pixels) |
+| R3b teamfight (tick 360) | 99.999 % | 5 (1 pixel) | 99.999 % | 5 (1 pixel) |
 
 **The first build failed the river**, and on CI the teamfight, before the fix:
 
@@ -138,8 +138,16 @@ against the gate's comparison, locally:
 - **ADR-0021's TAAU probes** pass on the final code; before and after amendment 7 they are
   in that amendment. FSR 3.1's ghost probe is unchanged (it does not run TAAU's shader).
 - **Tiered goldens move**, deliberately: the tiered frame is deferred, and amendment 7 moves
-  every TAAU frame. Their fingerprints and hashes follow ADR-0021 amendment 6: the 64×36 fingerprints pass
-  unchanged locally (max_diff ≤ 5); the exact hashes are retaken from CI (pending).
+  every TAAU frame. Their fingerprints and hashes follow ADR-0021 amendment 6. The 64×36 fingerprints pass
+  unchanged, locally (max_diff ≤ 5) and on CI, so they are not rewritten. The eight TAAU
+  exact hashes (`low`, `high`, `native`, `overlay` × the AMD and Intel sections) moved and
+  were taken from CI only: the `cpu_sample=true` dispatch run 43722069812 at `3131b7f`
+  (seven AMD legs on EPYC 7763 and 9V74, one Intel leg on a Xeon 6975P-C), pasted as its
+  `tiered-hash-sections` artefact gives them, sorted with `LC_ALL=C`. The eight FSR 3.1
+  hashes did not move (FSR 3.1 does not run TAAU's shader); the PR's `tiered-temporal` (run
+  43720150585, AMD) printed `exact hash` for all four of its own. Cross-check: the same
+  run's `renderer-gate` (AMD EPYC 7763) printed exactly the new AMD TAAU hashes against
+  the old file.
   Locally all eight cases are two-run byte-identical with 0 validation messages, and both
   mid-stream resets are clean.
 

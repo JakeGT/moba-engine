@@ -159,7 +159,7 @@ the semver check):
   - **`MOBA_DEBUG_VIEW`** gains `tiles`, `light-count` and `lit-only`.
   - **Gates:** `scripts/deferred-parity.sh` (CI `tiered-temporal`) compares the two frames
     (`image-check --parity`) and passes on the default scene, the R3b river and the
-    teamfight (worst pixel 5/255 locally), after the TAAU fix below.
+    teamfight (worst pixel 5/255, locally and on CI), after the TAAU fix below.
     `gbuffer-smoke` also checks the GLSL decode. A CPU test holds that the forward and
     deferred light loops visit the same lights under every cap. On the RTX 5070 Ti the frame
     is 1.014–1.065× N1's forward frame (gate ≤ 1.10×) and 0.959–0.981× N2a's.

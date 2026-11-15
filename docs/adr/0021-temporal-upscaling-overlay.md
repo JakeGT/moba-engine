@@ -1684,6 +1684,8 @@ box is degenerate.
    | Clip, half-extent floored at 0.004 | 2 | 3 | 5 | 2.132 % | 1.44 % | 5.96 % |
    | Clip, half-extent floored at 0.01 | 2 | 2 | 4 | **32.5 %** | **13.1 %** | 5.96 % |
    | Clip, chroma half-extents floored at 0.004 | 2 | 3 | 5 | 2.045 % | 1.33 % | 5.96 % |
+   | Clip on the luma axis alone, then a per-channel clamp | 2 | 2 | 4 | 2.293 % | 1.33 % | **8.20 %** |
+   | Clip blended into a clamp below 0.02 | 2 | 2 | 4 | 2.281 % | 1.37 % | **7.53 %** |
    | **Clip blended into a clamp below 0.004 (shipped)** | 2 | 3 | 5 | 2.204 % | 1.31 % | 5.96 % |
 
    - **The clamp alone fails ghost energy** at Performance (particle smear 8.20 %), and is
@@ -1692,6 +1694,10 @@ box is degenerate.
    - **A floor is a scale the scene must not cross.** 0.004 passes; 0.01 brings the
      teamfight to 4/255 but is already wider than the probe's flat tiles, and the hero
      ghosts (32.5 % wake).
+   - **Every variant that brought the teamfight to 4/255 failed ghost energy or ghosted the
+     hero**: the particle's bright core keeps its history wherever it is clamped rather
+     than clipped (the luma-only clip, and the blend at 0.02, which clamps boxes up to 0.02
+     wide).
    - **The blend** measures as the 0.004 floor does on gate 2 (the remaining 3s and the 5
      are on boxes wider than 0.004, where both are the plain clip), with the hero's smear
      lower. It was chosen over the floor because its constant fails safe: widened, the blend
@@ -1721,8 +1727,8 @@ box is degenerate.
    are an ad hoc stability check, and show no new flicker.
 
 5. **What moves.** Every TAAU frame with a degenerate box somewhere, so every tiered golden
-   with TAAU (the exact hashes retaken from CI as amendment 6 prescribes; the 64×36
-   fingerprints pass unchanged locally, max_diff ≤ 5). FSR 3.1, FXAA and Compat do not run this shader and are
+   with TAAU: the eight TAAU exact hashes, retaken from CI as amendment 6 prescribes (the
+   `cpu_sample` dispatch run 43722069812); the 64×36 fingerprints pass unchanged. FSR 3.1, FXAA and Compat do not run this shader and are
    unchanged (Compat byte for byte). The simulation, wire format, replays and state hash are
    untouched.
 

@@ -1280,11 +1280,11 @@ clarifications:
     0.25), 1280×720, stylisation and foliage off; within 2/255 on at least 99.5 % of pixels
     and 6/255 everywhere.
 
-    | Scene | Local (Mesa 26.2.5) | CI (Mesa 26.0.8, LLVM 21.1.8) |
+    | Scene | Local (Mesa 26.2.5) | CI (Mesa 26.0.8, LLVM 21.1.8; run 43720150585, AMD EPYC 9V74) |
     |---|---|---|
-    | Default | 100 % within 2, max 2 | pending |
-    | R3b river | 100.000 % within 2, max 3 (3 pixels) | pending |
-    | R3b teamfight | 99.999 % within 2, max 5 (1 pixel) | pending |
+    | Default | 100 % within 2, max 2 | 100.000 % within 2, max 4 (2 pixels past 2) |
+    | R3b river | 100.000 % within 2, max 3 (3 pixels) | 100.000 % within 2, max 3 (2 pixels) |
+    | R3b teamfight | 99.999 % within 2, max 5 (1 pixel) | 99.999 % within 2, max 5 (1 pixel) |
 
     **The first build failed the river** (locally max 15/255 at 7 pixels; on CI max 9 at 11
     pixels, and the teamfight 7 at one pixel), all at high-contrast edges of the river's
