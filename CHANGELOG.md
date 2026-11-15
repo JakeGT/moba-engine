@@ -140,6 +140,25 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **A1 tool fixes from the A3 re-export
+  ([ADR-0022 amendment 3](docs/adr/0022-provenance-gate-mikktspace.md#amendment-3-2026-11-15-unit-tangents-and-normals-quantised-before-tangents)):**
+  - `content-check --source`'s GLB-TANGENT now also fails a file whose raw `TANGENT` has an
+    `xyz` length more than 1e-3 from 1 (zero included) or a `w` more than 1e-3 from ±1, and
+    reports the count. The loader normalises `xyz` and keeps zero tangents as zero, so these
+    passed before: the A3 Kiln Warden export of art-source `3e40395` has 35 zero-length
+    tangents on hammer slivers and hull-shard has 1. New `moba_assets::tangent_defects`,
+    `tangent_defects_file`, `TangentDefects` and `TANGENT_TOLERANCE` (additive). The
+    `--provenance` gate is unchanged.
+  - `scripts/blender/export_glb.py` quantises corner normals to the glTF exporter's 4-digit
+    rounding before Blender computes tangents (`quantised_normals`, in memory, stored exactly
+    as free float3 custom normals). Before, corners whose normals differed by under 1e-4
+    were tangent-split in Blender but identical in the file apart from `TANGENT`, so the
+    engine's MikkTSpace welded them and GLB-MIKK disagreed: the minimal repro (one near-flat
+    quad) goes from 6 vertices and GLB-MIKK 0.3333 to 4 and 1.0000, and the A3 Void Monolith
+    from 1460 vertices and 0.9007 to 860 and 1.0000. `verify_glb` reports the remaining
+    vertices that differ only in `TANGENT` (`tangent_splits`). The normal-map bake must run
+    inside the same `quantised_normals` block, or be redone, because the exported tangents
+    change where groups merge. GLB-MIKK keeps the exact weld.
 - **A1 ingest tools (next-gen roadmap §9.4,
   [ADR-0022 amendment 2](docs/adr/0022-provenance-gate-mikktspace.md#amendment-2-2026-11-15-a1-ingest-tools)):**
   - `content-check --source <asset>.source.toml` checks an asset's source maps and exported

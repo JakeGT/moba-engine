@@ -1874,15 +1874,19 @@ fn check_model(
         ),
         "loads with the engine's bounded loader (ADR-0007)",
     );
-    let tangents = moba_assets::check_baked_tangents_file(path);
+    let (pass, detail) = tangent_rule(
+        moba_assets::check_baked_tangents_file(path),
+        moba_assets::tangent_defects_file(path),
+    );
     report.push(
         &format!("GLB-TANGENT ({stem})"),
-        Some(tangents.is_ok()),
-        tangents
-            .as_ref()
-            .err()
-            .map_or_else(|| String::from("TANGENT baked"), Clone::clone),
-        "UVs need baked TANGENT (ADR-0022 amendment 1)",
+        Some(pass),
+        detail,
+        format!(
+            "UVs need baked TANGENT (ADR-0022 amendment 1); each unit length and w ±1, within {} \
+             (amendment 3)",
+            moba_assets::TANGENT_TOLERANCE
+        ),
     );
     if let (Some(file), Some(generated)) = (mesh.tangents(), mesh.generate_tangents()) {
         let (agree, handed) = tangent_agreement(file, &generated);
@@ -1912,6 +1916,29 @@ fn check_model(
         uvs: uvs.to_vec(),
         indices: mesh.indices().to_vec(),
     })
+}
+
+/// GLB-TANGENT: the file has baked `TANGENT`s (`baked`) and every one is a unit vector with a
+/// `±1` handedness (`defects`, read from the file's own numbers, which the loader normalises).
+fn tangent_rule(
+    baked: Result<(), String>,
+    defects: Result<moba_assets::TangentDefects, moba_assets::GlbError>,
+) -> (bool, String) {
+    match (baked, defects) {
+        (Err(error), _) => (false, error),
+        (Ok(()), Err(error)) => (false, format!("TANGENT unreadable: {error}")),
+        (Ok(()), Ok(defects)) if defects.tangents == 0 => (true, String::from("no TANGENT needed")),
+        (Ok(()), Ok(defects)) if defects.is_clean() => {
+            (true, format!("TANGENT baked, {} unit", defects.tangents))
+        }
+        (Ok(()), Ok(defects)) => (
+            false,
+            format!(
+                "{} of {} TANGENT not unit length ({} zero), {} with w not ±1",
+                defects.bad_length, defects.tangents, defects.zero_length, defects.bad_handedness
+            ),
+        ),
+    }
 }
 
 /// Shares of vertices whose file tangent is within 5° of `generated`, and whose handedness
@@ -2549,6 +2576,55 @@ mod tests {
 
     const SENTINEL: &[u8] = include_bytes!("../../../content/models/sentinel.glb");
 
+    /// `glb` with its first `TANGENT` element's `xyz` zeroed, as an exporter writes a corner
+    /// without tangent space.
+    fn zero_first_tangent(glb: &[u8]) -> Vec<u8> {
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().expect("header")) as usize;
+        let doc: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_len]).expect("json");
+        let index = |value: &serde_json::Value| value.as_u64().map_or(0, |v| v as usize);
+        let tangent = index(&doc["meshes"][0]["primitives"][0]["attributes"]["TANGENT"]);
+        let accessor = &doc["accessors"][tangent];
+        let view = &doc["bufferViews"][index(&accessor["bufferView"])];
+        // The BIN chunk's data starts after the JSON chunk and the BIN chunk header.
+        let start = 20 + json_len + 8 + index(&view["byteOffset"]) + index(&accessor["byteOffset"]);
+        let mut out = glb.to_vec();
+        out[start..start + 12].fill(0);
+        out
+    }
+
+    #[test]
+    fn glb_tangent_needs_unit_tangents_with_a_sign() {
+        let baked = || Ok(());
+        let counted = |bad_length, zero_length, bad_handedness| {
+            let mut defects = moba_assets::TangentDefects::default();
+            defects.tangents = 100;
+            defects.bad_length = bad_length;
+            defects.zero_length = zero_length;
+            defects.bad_handedness = bad_handedness;
+            Ok(defects)
+        };
+        assert_eq!(
+            tangent_rule(baked(), counted(0, 0, 0)),
+            (true, String::from("TANGENT baked, 100 unit"))
+        );
+        assert_eq!(
+            tangent_rule(baked(), counted(35, 35, 0)),
+            (
+                false,
+                String::from("35 of 100 TANGENT not unit length (35 zero), 0 with w not ±1")
+            )
+        );
+        assert!(!tangent_rule(baked(), counted(0, 0, 2)).0);
+        assert_eq!(
+            tangent_rule(baked(), Ok(moba_assets::TangentDefects::default())),
+            (true, String::from("no TANGENT needed"))
+        );
+        let missing = tangent_rule(Err(String::from("no TANGENT")), counted(0, 0, 0));
+        assert_eq!(missing, (false, String::from("no TANGENT")));
+        let unreadable = tangent_rule(baked(), Err(moba_assets::GlbError::BadAccessor));
+        assert!(!unreadable.0 && unreadable.1.starts_with("TANGENT unreadable"));
+    }
+
     #[test]
     fn models_go_through_the_engines_loader_and_the_glb_rules() {
         let dir = scratch("glb");
@@ -2562,8 +2638,20 @@ mod tests {
         assert_eq!(rule(&report, "GLB-NAME (sentinel)").pass, Some(true));
         assert_eq!(rule(&report, "GLB-LOAD (sentinel)").pass, Some(true));
         let feet = rule(&report, "GLB-FEET (sentinel)").pass;
-        let tangent = rule(&report, "GLB-TANGENT (sentinel)").pass;
-        assert!(tangent.is_some() && feet.is_some());
+        let tangent = rule(&report, "GLB-TANGENT (sentinel)");
+        assert_eq!(tangent.pass, Some(true), "{}", tangent.value);
+        assert!(feet.is_some());
+        // A zero-length TANGENT, which the loader keeps (as zero), fails GLB-TANGENT with a count.
+        std::fs::write(dir.join("zeroed.glb"), zero_first_tangent(SENTINEL)).expect("model");
+        let mut zeroed = SourceReport::default();
+        check_model(&decl, &dir.join("zeroed.glb"), &mut zeroed).expect("still loads");
+        let tangent = rule(&zeroed, "GLB-TANGENT (zeroed)");
+        assert_eq!(tangent.pass, Some(false));
+        assert!(
+            tangent.value.starts_with("1 of ") && tangent.value.contains("(1 zero)"),
+            "{}",
+            tangent.value
+        );
         // A documented hover far from the mesh fails GLB-FEET.
         let mut hovering = SourceReport::default();
         let high = ModelDecl {

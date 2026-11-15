@@ -852,7 +852,7 @@ blender --background --python-exit-code 1 art/kiln-warden.blend \
 | Axes | Blender Z up, the model facing −Y; the file is +Y up, facing +Z (the engine's forward) |
 | Ground | The lowest vertex at z = 0 in the rest pose at frame 0 (feet on the ground), or `--hover` metres for floating units |
 | Mesh | Triangulated; one UV map (`TEXCOORD_0`; others are ignored); no vertex colours; at most 65 536 vertices and 393 216 indices (ADR-0007) |
-| Tangents | MikkTSpace `TANGENT` baked into the file (ADR-0022 amendment 1) |
+| Tangents | MikkTSpace `TANGENT` baked into the file (ADR-0022 amendment 1), computed on corner normals already quantised to the glTF exporter's 4-digit rounding (amendment 3) |
 | Materials | Slots named `<asset>` or `<asset>-<suffix>` (one per shading model, not per texture set). No images go in the file: textures are baked separately to KTX2 |
 | Names | The asset 1..=16 of `[A-Za-z0-9_-]`; joints 1..=32 of the same; at most 32 joints per armature (the Low tier's cap; stricter than `budget.rs`, which lets Medium and High take more) |
 | Clips | Sampled every frame at 30 fps. Clip names are free: the model's [animation set](#animation-sets) (`animations/<model>.toml`) maps them to engine states |
@@ -866,6 +866,19 @@ check or any exception. Next to the `.glb` it writes
 `<asset>.provenance-stub.toml`, a draft `[[asset]]` entry with the Blender version and the
 `.blend` name. Finish its `notes` and move it into the content directory's `provenance.toml`;
 the gate never reads the stub. Then bake the LODs (`mesh-bake lod`) and check the source maps.
+
+**Normals before tangents.** The glTF exporter rounds normals to 4 decimals after Blender has
+computed tangents on the unrounded ones, so corners whose normals differ by less than 1e-4
+would share one normal in the file but keep two tangents, and the engine's MikkTSpace would
+disagree (GLB-MIKK). The script therefore exports inside `quantised_normals(objects)`, which
+replaces each mesh's corner normals, in memory, with the exporter's own rounding and restores
+them afterwards. Bake the normal map against the same tangents: in a bake script, run
+`with export_glb.quantised_normals(objects):` around the bake as well as the export, and never
+save the .blend inside the block (free normals do not follow deformation). A script that calls
+`check_scene`, `gltf_options` and `verify_glb` itself must do the same. A map baked without it
+is off by up to the tangent spread wherever groups merge, so re-bake it. The export info's
+`tangent_splits` counts vertices that differ from another only in `TANGENT`; a few are normal,
+because MikkTSpace itself splits a vertex where two fans of triangles meet only there.
 
 ### Source checks (A1)
 
@@ -924,6 +937,9 @@ metalness, albedo and roughness checks; ADR-0022 amendment 2).
 It reports, in order:
 
 - **Export checks** (GLB-*): the loader, baked `TANGENT`, feet and the MikkTSpace agreement.
+  GLB-TANGENT also fails, with a count, any file tangent whose `xyz` length is more than 1e-3
+  from 1 (zero-length ones included: an exporter writes them on degenerate or zero-UV-area
+  slivers) or whose `w` is more than 1e-3 from ±1. GLB-MIKK is information.
 - **Texel density.** TD-1, px/m, passes or fails for structures, props and terrain (and fails
   when there is nothing to measure it with); it is reported for units. TD-2 is the authored
   size. UVs that tile past the raster budget report "coverage not measured".

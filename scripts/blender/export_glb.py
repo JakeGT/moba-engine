@@ -9,7 +9,8 @@ meshes; one UV set read (TEXCOORD_0); baked MikkTSpace TANGENT (ADR-0022 amendme
 slots named `<asset>` or `<asset>-<suffix>` for shading models, never texture sets; no images,
 vertex colours, Draco or meshopt; joint names by the engine's rule, at most 32 per armature;
 clips sampled at 30 fps (clip names are free: `animations/<asset>.toml` maps them to engine states,
-ADR-0012); no mirrored (negative) scale.
+ADR-0012); no mirrored (negative) scale; corner normals quantised to the glTF exporter's precision
+before tangents are computed (`quantised_normals`, ADR-0022 amendment 3).
 
 Writes `<out>/<asset>.glb` and `<out>/<asset>.provenance-stub.toml` (a draft ADR-0022 entry to
 finish by hand). Exits 1, writing nothing, when the scene breaks the convention or the script
@@ -17,7 +18,12 @@ fails: the file is exported under a temporary name, its glTF JSON checked, and o
 `--python-exit-code 1` also makes Blender exit 1 if the script cannot even start. Then run the
 engine's own checks on it:
 `content-check --source <asset>.source.toml` (loader limits, baked tangents, feet, texel density).
+
+A script that calls the helpers itself (`check_scene`, `gltf_options`, `verify_glb`) instead of
+`main` must run the export, and the normal-map bake that goes with it, inside
+`with quantised_normals(objects):`, as `main` does (see that function).
 """
+import contextlib
 import json
 import os
 import struct
@@ -25,6 +31,12 @@ import sys
 import traceback
 
 import bpy
+import numpy as np
+
+try:
+    from io_scene_gltf2.io.com.constants import ROUNDING_DIGIT
+except ImportError:  # the exporter's own value (4) in every Blender this convention supports
+    ROUNDING_DIGIT = 4
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from moba_blender import argv_after_dashdash, valid_name  # noqa: E402
@@ -154,6 +166,91 @@ def mesh_checks(meshes, depsgraph, asset, errors, warnings):
     return min_z
 
 
+def exporter_normals(normals):
+    """The glTF exporter's treatment of corner normals (io_scene_gltf2 `primitive_extract.py`,
+    `__get_normals`): float32, rounded to `ROUNDING_DIGIT` decimals, then renormalised. Negative
+    zeros are made positive, so every weld (Blender's, the exporter's de-duplication and the
+    engine's bitwise MikkTSpace weld) sees one zero."""
+    q = np.round(np.asarray(normals, dtype=np.float32), ROUNDING_DIGIT)
+    norms = np.linalg.norm(q, axis=1, keepdims=True)
+    np.divide(q, norms, out=q, where=norms != 0)
+    q[q == 0.0] = 0.0
+    return q
+
+
+def quantise(normals, rounds=8):
+    """`normals` moved to a fixed point of `exporter_normals`, so the exporter writes each one
+    unchanged and two distinct normals here can never become one written normal."""
+    q = exporter_normals(normals)
+    for _ in range(rounds):
+        again = exporter_normals(q)
+        if np.array_equal(again.view(np.uint32), q.view(np.uint32)):
+            return q
+        q = again
+    raise RuntimeError("corner normals did not settle under the exporter's rounding")
+
+
+# The corner attribute types a mesh's `custom_normal` can have: foreach key, width, numpy type.
+_CUSTOM_NORMAL_TYPES = {
+    "FLOAT_VECTOR": ("vector", 3, np.float32),
+    "INT16_2D": ("value", 2, np.int32),
+}
+
+
+@contextlib.contextmanager
+def quantised_normals(objs):
+    """Within the block, the corner normals of every mesh in `objs` are quantised to the glTF
+    exporter's precision (`quantise`) and stored exactly, as free float3 custom normals.
+
+    Blender's MikkTSpace (`Mesh.calc_tangents`, which the exporter calls) welds corners whose
+    position, normal and UV are exactly equal. The exporter then rounds normals to 4 digits, so
+    corners whose normals differed by less than 1e-4 become identical in the file except for
+    TANGENT: the file holds split vertices, and the engine's MikkTSpace on it (GLB-MIKK) welds
+    them and disagrees. Quantising first makes Blender weld what the file welds. Cycles bakes
+    against the same tangents, so run the normal-map bake inside this block too, or the map will
+    not match the exported tangents where groups merge (ADR-0022 amendment 3).
+
+    In memory only: on exit each mesh gets its previous `custom_normal` back (or none). Do not
+    save the .blend inside the block: free normals do not follow deformation, so posed renders
+    would shade with rest-pose normals. Yields the number of corners whose normal the rounding
+    changed."""
+    saved = []
+    moved = 0
+    try:
+        for me in {o.data for o in objs if o.type == "MESH"}:
+            corners = len(me.loops)
+            raw = np.empty(corners * 3, dtype=np.float32)
+            me.corner_normals.foreach_get("vector", raw)
+            raw = raw.reshape(corners, 3)
+            old = me.attributes.get("custom_normal")
+            snapshot = None
+            if old is not None:
+                if old.domain != "CORNER" or old.data_type not in _CUSTOM_NORMAL_TYPES:
+                    raise RuntimeError(f"{me.name}: custom_normal is {old.data_type} on "
+                                       f"{old.domain}, not a corner normal")
+                key, width, kind = _CUSTOM_NORMAL_TYPES[old.data_type]
+                values = np.empty(len(old.data) * width, dtype=kind)
+                old.data.foreach_get(key, values)
+                snapshot = (old.data_type, key, values)
+            q = quantise(raw)
+            if old is not None:
+                me.attributes.remove(old)
+            saved.append((me, snapshot))
+            moved += int(np.count_nonzero(np.any(q.view(np.uint32) != raw.view(np.uint32), axis=1)))
+            me.attributes.new("custom_normal", "FLOAT_VECTOR", "CORNER").data.foreach_set(
+                "vector", q.ravel())
+            me.update()
+        yield moved
+    finally:
+        for me, snapshot in saved:
+            if "custom_normal" in me.attributes:
+                me.attributes.remove(me.attributes["custom_normal"])
+            if snapshot is not None:
+                data_type, key, values = snapshot
+                me.attributes.new("custom_normal", data_type, "CORNER").data.foreach_set(key, values)
+            me.update()
+
+
 def gltf_options(path):
     """The exporter's keyword arguments, keeping only those this Blender's exporter knows."""
     wanted = {
@@ -210,10 +307,66 @@ def verify_glb(path):
         errors.append(f"{verts} vertices: over the loader's {MAX_VERTICES}")
     if idx > MAX_INDICES:
         errors.append(f"{idx} indices: over the loader's {MAX_INDICES}")
+    splits = None
+    if not errors:
+        try:
+            splits = tangent_splits(doc, glb_bin(data, jlen))
+        except ValueError as e:
+            errors.append(f"cannot read the vertex streams back: {e}")
     return errors, {"bytes": len(data), "vertices": verts, "triangles": idx // 3,
+                    "tangent_splits": splits,
                     "joints": [len(s["joints"]) for s in doc.get("skins", [])],
                     "clips": [a.get("name") for a in doc.get("animations", [])],
                     "materials": [m.get("name") for m in doc.get("materials", [])]}
+
+
+def glb_bin(data, jlen):
+    """The GLB's BIN chunk (the bytes after the JSON chunk), or b"" without one."""
+    start = 20 + ((jlen + 3) & ~3)
+    if start + 8 > len(data):
+        return b""
+    blen, kind = struct.unpack_from("<II", data, start)
+    if kind != 0x004E4942 or start + 8 + blen > len(data):
+        raise ValueError("bad BIN chunk")
+    return data[start + 8:start + 8 + blen]
+
+
+def float_stream(doc, bin_chunk, index, width):
+    """Accessor `index` as a (count, width) float32 array (FLOAT components, BIN chunk only)."""
+    a = doc["accessors"][index]
+    if a.get("componentType") != 5126 or "bufferView" not in a:
+        raise ValueError(f"accessor {index} is not float")
+    view = doc["bufferViews"][a["bufferView"]]
+    stride = view.get("byteStride", 4 * width)
+    start = view.get("byteOffset", 0) + a.get("byteOffset", 0)
+    count = a["count"]
+    if count < 1 or stride < 4 * width or start + (count - 1) * stride + 4 * width > len(bin_chunk):
+        raise ValueError(f"accessor {index} is out of the BIN chunk")
+    return np.ndarray((count, width), dtype="<f4", buffer=bin_chunk, offset=start,
+                      strides=(stride, 4))
+
+
+def tangent_splits(doc, bin_chunk):
+    """Vertices in the file that share POSITION, NORMAL and TEXCOORD_0 (bit for bit, within one
+    glTF mesh) with another vertex but have a different TANGENT: the symptom of tangents computed
+    on normals other than the written ones, which the engine's MikkTSpace welds and averages
+    (GLB-MIKK). Information, an upper bound: MikkTSpace itself gives a vertex two tangents where
+    two fans of its triangles meet only at that vertex, and the engine reproduces those. The Void
+    Monolith (A3) exports 1032 without `quantised_normals` and 2 with it, at GLB-MIKK 1.0000
+    (ADR-0022 amendment 3)."""
+    split = 0
+    for mesh in doc.get("meshes", []):
+        groups = {}
+        for prim in mesh["primitives"]:
+            at = prim["attributes"]
+            streams = [float_stream(doc, bin_chunk, at[name], width) for name, width in
+                       (("POSITION", 3), ("NORMAL", 3), ("TEXCOORD_0", 2), ("TANGENT", 4))]
+            keys = np.ascontiguousarray(np.hstack(streams[:3]) + np.float32(0.0)).view(np.uint32)
+            tangents = np.ascontiguousarray(streams[3]).view(np.uint32)
+            for key, tangent in zip(map(bytes, keys), map(bytes, tangents)):
+                groups.setdefault(key, []).append(tangent)
+        split += sum(len(ts) for ts in groups.values() if len(set(ts)) > 1)
+    return split
 
 
 def toml_string(text):
@@ -261,8 +414,10 @@ def main():
         bpy.ops.object.select_all(action="DESELECT")
         for o in objs:
             o.select_set(True)
-        bpy.ops.export_scene.gltf(**gltf_options(partial))
+        with quantised_normals(objs) as moved:
+            bpy.ops.export_scene.gltf(**gltf_options(partial))
         errors, info = verify_glb(partial)
+        info["normals_quantised"] = moved
         if errors:
             for e in errors:
                 print(f"export_glb: error in {path}: {e}", flush=True)
