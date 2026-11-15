@@ -1256,8 +1256,10 @@ clarifications:
     the teamfight pass; the river has 99.966 % of pixels within 2/255 (the bound is 99.5 %)
     but **7 of 921,600 pixels past 6/255, the worst at 15**. On CI's lavapipe (Mesa 26.0.8,
     LLVM 21.1.8, AMD) the default scene passes (max 6), the river has **11 pixels past 6, the
-    worst at 9**, and the teamfight **1 pixel at 7**; every one of those pixels, on both
-    machines, is on the river's shoreline foam line. perf/0036 has the full measurement. In
+    worst at 9**, and the teamfight **1 pixel at 7**. Every one of those pixels is on the
+    river's bank: locally all on the shoreline foam line; on CI on the foam line or on a
+    terrain crack where it meets the foam or runs into the shallows (two clusters on the
+    bottom rows of the frame, on the dry side). perf/0036 has the full measurement. In
     short:
     - **The lighting is exact.** A forward build that sends its terrain surface through the
       G-buffer's encode and decode before `shade()` matches the deferred frame within 2/255
@@ -1269,11 +1271,12 @@ clarifications:
       sit on the shoreline foam line, where the bed is seen through the refracting water
       (whose tint amplifies blue), at TAAU's 0.667 upscale with sharpening. So no G-buffer
       precision meets "6/255 everywhere" on this capture, and the encoding (amendment 1) is
-      unchanged.
+      unchanged. These two controls were measured on the local Mesa only; that CI's
+      outliers have the same cause is inferred from where they are, not measured.
     - **At native scale** (`MOBA_UPSCALE_MODE=native`, sharpness 0) the river's worst pixel is
       6/255, at the bound, with no margin for CI's different Mesa and CPU class.
 
-    The gate is left as written and its CI step reports the failures. The choices for
+    The gate is left as written and its CI step reports the failures (run 43699326756). The choices for
     the maintainer: keep "6/255 everywhere" and accept the red shoreline cases until the frame is
     made stable; measure parity at native scale; or bound the outliers by count relative to a
     forward-against-perturbed-forward control (the frame's own instability), which this PR

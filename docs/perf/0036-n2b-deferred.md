@@ -21,7 +21,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | Gate | Result |
 |---|---|
 | 1. Encoding and interfaces | **Met.** `gbuffer-smoke` adds the GLSL decode; push blocks pinned by SPIR-V and reflection tests |
-| 2. Deferred–forward parity | **Not met on the river** (locally max 15/255 at 7 of 921,600 pixels, 99.966 % within 2/255; on CI max 9 at 11 pixels) **nor, on CI's lavapipe, the teamfight** (1 pixel at 7/255). Default scene met on both. Every outlier is on the shoreline foam line. See [below](#gate-2-deferredforward-parity) |
+| 2. Deferred–forward parity | **Not met on the river** (locally max 15/255 at 7 of 921,600 pixels, 99.966 % within 2/255; on CI max 9 at 11 pixels) **nor, on CI's lavapipe, the teamfight** (1 pixel at 7/255). Default scene met on both. Every outlier is on the river's bank (the foam line, or terrain cracks meeting it). See [below](#gate-2-deferredforward-parity) |
 | 3. Light-set consistency | **Met** under all five caps |
 | 7. Performance (≤ 1.10× N1) | **Met**: 1.061–1.087× against `ab42718`, 0.990–1.001× against `790d9be` |
 
@@ -48,6 +48,8 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 `MOBA_FOLIAGE=off` (`STANDARD` only), rims off (there are none before N2e), High (the default
 tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness 0.25),
 1280×720. `image-check --parity` takes the largest channel difference per pixel.
+Locally (Mesa 26.2.5), re-run on the final code with identical results and 0 validation
+messages:
 
 | Scene | Within 2/255 | Max | Pixels past 6/255 | Result |
 |---|---|---|---|---|
@@ -67,9 +69,21 @@ an AMD EPYC runner), same script and settings:
 | R3b river | 99.959 % | **9** | 11 | **not met** |
 | R3b teamfight | 99.991 % | **7** | 1 | **not met** |
 
-Every CI outlier is also on the shoreline foam line (the teamfight's one at (402, 282), where
-the replay's camera sees the river's edge); the pixels differ from the local ones, as the two
-lavapipes round differently.
+The CI outliers are on the river's bank too, but not all on the foam line itself (each
+cluster cropped from the run's artefact and inspected):
+
+- on the shoreline foam line: river (173, 388–389), (955, 407) and (461, 710), and the
+  teamfight's one at (402, 282), where the replay's camera sees the river's edge;
+- on a terrain crack where it meets the foam's end: river (612–616, 601–602), shifted by 6–8
+  in all three channels rather than mostly blue;
+- on a crack under the shallow water: river (410, 676);
+- on the same crack in the dry bank, 1–5 rows from the frame's bottom edge: river
+  (524–532, 715–719).
+
+The pixels differ from the local ones, as the two lavapipes round differently. The controls
+below (the G-buffer round trip and the perturbed forward frame) were run on the local Mesa
+only; that CI's outliers have the same cause, high-contrast edges amplified by TAAU's upscale
+and sharpening, is inferred from where they are, not measured.
 
 **Where the river's outliers are.** All seven sit on the shoreline foam line, where the
 river bed is seen through the refracting water, in single pixels that appear in either
@@ -105,7 +119,8 @@ river frame (frame 2, whose outliers are the same pixels as frame 90's) unless m
   contact-shadows-off runs were byte-identical to the default ones (this view has no casters
   near the bed), so they rule nothing out.
 
-The gate is kept as written, and CI reports the river's result. ADR-0023 amendment 2 item 16
+The gate is kept as written, and CI reports the failing scenes (the river, and on CI the
+teamfight; run 43699326756). ADR-0023 amendment 2 item 16
 lists the options for the maintainer.
 
 ## Gate 3: light-set consistency
@@ -133,7 +148,8 @@ lists the options for the maintainer.
 
 - **Compat is byte-identical** to origin/main (`790d9be`) on lavapipe: the Compat scenes of
   `render-golden.yml` (default, Ultra, Low at 0.75, VAT, horizon, river, river Low, river
-  Ultra and the teamfight decals) compared with `cmp`.
+  Ultra and the teamfight decals) compared with `cmp`, re-run on the final code (after the
+  AO rebind fix in the shared `lighting.rs`).
 - **SPIR-V:** every one of the 120 modules that exists on both sides is byte-identical,
   forward, Compat and tiered alike (`MOBA_PIXEL_CENTER` expands to `gl_FragCoord.xy` in the
   fragment stages). The 15 new modules are `deferred_light`, `deferred_light_extended`,
