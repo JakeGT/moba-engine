@@ -1,8 +1,15 @@
 //! Validate a content pack and print its catalogue summary, or (`--provenance`) run the
 //! asset licence and provenance gate over a content root and write (or `--check`) the
-//! notices generated from it (A0, ADR-0022).
+//! notices generated from it (A0, ADR-0022), or (`--source`) check one asset's source maps
+//! against the art bible's material rules and texel-density targets (A1, ADR-0022
+//! amendment 2).
 #![allow(clippy::print_stdout)]
 
+#[path = "../asset_check.rs"]
+mod asset_check;
+#[allow(dead_code)] // The contact-sheet half is for `review-sheet`.
+#[path = "../imaging.rs"]
+mod imaging;
 #[path = "../map_site.rs"]
 mod map_site;
 
@@ -35,12 +42,20 @@ fn main() {
     let mut check = false;
     let mut content_root = String::from("content");
     let mut third_party = String::from("THIRD_PARTY.md");
+    let mut source: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--json" => json = true,
             "--provenance" => provenance = true,
             "--check" => check = true,
+            "--source" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--source needs an <asset>.source.toml");
+                    std::process::exit(2);
+                };
+                source = Some(value);
+            }
             "--content" | "--third-party" => {
                 let Some(value) = args.next() else {
                     eprintln!("{argument} needs a path");
@@ -63,7 +78,8 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: content-check [--json] [--require-attestation] [--publisher HEX] <pack.toml>\n       \
-                     content-check --provenance [--check] [--content DIR] [--third-party FILE]"
+                     content-check --provenance [--check] [--content DIR] [--third-party FILE]\n       \
+                     content-check --source <asset>.source.toml [--json]"
                 );
                 return;
             }
@@ -73,6 +89,13 @@ fn main() {
                 std::process::exit(2);
             }
         }
+    }
+    if let Some(manifest) = source {
+        if provenance || check || path.is_some() || require_attestation || publisher.is_some() {
+            eprintln!("--source takes one source manifest and optionally --json");
+            std::process::exit(2);
+        }
+        std::process::exit(source_check(std::path::Path::new(&manifest), json));
     }
     if provenance {
         if path.is_some() || json || require_attestation || publisher.is_some() {
@@ -568,4 +591,35 @@ fn provenance_gate(content: &std::path::Path, third_party: &std::path::Path, che
     println!("ai         {}", report.ai_entries().count());
     println!("valid      {}", report.errors.is_empty());
     status
+}
+
+/// `--source`: the material, texel-density and export checks on one asset's source maps.
+/// Exit 0 when every built rule passes, 1 when one fails or the inputs cannot be read.
+fn source_check(manifest: &std::path::Path, json: bool) -> i32 {
+    match asset_check::check_source(manifest) {
+        Ok(report) => {
+            if json {
+                println!("{}", report.json());
+            } else {
+                print!("{}", report.text());
+                println!(
+                    "{}: {}",
+                    report.asset,
+                    if report.passed() { "pass" } else { "FAIL" }
+                );
+            }
+            i32::from(!report.passed())
+        }
+        Err(error) => {
+            if json {
+                println!(
+                    "{{\"file\":{},\"pass\":false,\"errors\":[{}]}}",
+                    json_string(&manifest.display().to_string()),
+                    json_string(&error)
+                );
+            }
+            eprintln!("content-check --source: {error}");
+            1
+        }
+    }
 }

@@ -9,7 +9,8 @@ trees) are never built by the engine workspace or linked into the client.
 ## 5×7 bitmap font
 
 `crates/render/src/font_data.rs` contains the printable-ASCII portion of the Adafruit-GFX
-5×7 font.
+5×7 font. `crates/tools/src/font5x7.rs` is an identical copy of that table, which labels the
+review-render contact sheets (`review-sheet`).
 
 ```text
 Software License Agreement (BSD License)
