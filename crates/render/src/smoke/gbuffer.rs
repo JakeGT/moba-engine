@@ -701,15 +701,14 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
             max_depth: 1.0,
         };
         device.cmd_begin_rendering(command, &rendering);
-        // SAFETY: recording inside dynamic rendering; the pipeline is live, its viewport and
-        // scissor are dynamic, the set matches set 0 of its layout and the push range is the
-        // fragment stage's first 4 bytes (the blocks below rely on the same).
+        // SAFETY: `command` is recording inside dynamic rendering and `raster` is a live
+        // graphics pipeline of this device.
         unsafe { d.cmd_bind_pipeline(command, vk::PipelineBindPoint::GRAPHICS, raster.handle()) };
-        // SAFETY: as above.
+        // SAFETY: the bound pipeline declares its viewport dynamic; one viewport.
         unsafe { d.cmd_set_viewport(command, 0, core::slice::from_ref(&viewport)) };
-        // SAFETY: as above.
+        // SAFETY: the bound pipeline declares its scissor dynamic; one scissor.
         unsafe { d.cmd_set_scissor(command, 0, core::slice::from_ref(&area)) };
-        // SAFETY: as above.
+        // SAFETY: `raster_set` is live, written, and matches set 0 of `raster_pipeline_layout`.
         unsafe {
             d.cmd_bind_descriptor_sets(
                 command,
@@ -720,7 +719,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
                 &[],
             );
         }
-        // SAFETY: as above.
+        // SAFETY: the layout's push range covers the fragment stage's first 4 bytes.
         unsafe {
             d.cmd_push_constants(
                 command,
@@ -752,9 +751,8 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
             command,
             &vk::DependencyInfo::default().image_memory_barriers(&to_sampled),
         );
-        // SAFETY: the compute pipeline is live, the set matches set 0 of its
-        // layout (the targets now sampled read-only) and the push range is the compute
-        // stage's 8 bytes.
+        // SAFETY: `command` is recording outside a render pass and `compute_pipeline` is a
+        // live compute pipeline of this device.
         unsafe {
             d.cmd_bind_pipeline(
                 command,
@@ -762,7 +760,8 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
                 compute_pipeline.handle(),
             );
         }
-        // SAFETY: as above.
+        // SAFETY: `compute_set` is live, written, and matches set 0 of the compute layout;
+        // the targets it samples are now in SHADER_READ_ONLY_OPTIMAL (barrier above).
         unsafe {
             d.cmd_bind_descriptor_sets(
                 command,
@@ -773,7 +772,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
                 &[],
             );
         }
-        // SAFETY: as above.
+        // SAFETY: the compute layout's push range covers the compute stage's 8 bytes.
         unsafe {
             d.cmd_push_constants(
                 command,

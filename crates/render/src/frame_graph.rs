@@ -381,8 +381,8 @@ pub(crate) struct FrameSpec {
     /// composite run at output resolution on its output. Implies the prepass; the `fxaa`
     /// and `upscale` switches are ignored with it.
     pub(crate) temporal: bool,
-    /// `TRANSFER_SRC` on the temporal depth and motion, for the motion probe's readback only
-    /// (`RenderConfig::readback`).
+    /// `TRANSFER_SRC` on the temporal depth, motion and G-buffer, for the motion probe's
+    /// readback only (`RenderConfig::readback`); it also keeps the G-buffer stored.
     pub(crate) readback: bool,
     /// The post-upscale gameplay overlay (ADR-0021 §5; Tiered only): replaces R2b's
     /// `outline` pass, and the last post pass writes an LDR image the overlay reads.
@@ -731,13 +731,25 @@ pub(crate) fn build_variant(
             image(HDR_OUT_FORMAT, ImageSize::Output { shift: 0 }),
         ),
         // ADR-0023 §1a, §1e: the G-buffer, with the temporal prepass that writes it.
-        // TRANSFER_SRC for the motion probe's readback, as the motion.
+        // TRANSFER_SRC only for the motion probe's G-buffer readback, as the motion.
         gbuffer: [
             ("gb0", crate::gbuffer::GB0_FORMAT),
             ("gb1", crate::gbuffer::GB1_FORMAT),
             ("gb2", crate::gbuffer::GB2_FORMAT),
         ]
-        .map(|(name, format)| graph.transient_image(name, image(format, render))),
+        .map(|(name, format)| {
+            graph.transient_image(
+                name,
+                ImageDesc {
+                    extra_usage: if spec.readback {
+                        vk::ImageUsageFlags::TRANSFER_SRC
+                    } else {
+                        vk::ImageUsageFlags::empty()
+                    },
+                    ..image(format, render)
+                },
+            )
+        }),
     });
     // ADR-0021 §5c: the overlay's own unjittered depth and IDs at output resolution.
     let overlay_targets = spec.overlay.then(|| {

@@ -25,6 +25,16 @@
 //! [`MOTION_PROBE_TOLERANCE_PX`] render pixels; pixels within a centimetre of an object's
 //! boundary, where the class is ambiguous, are skipped and counted.
 //!
+//! **The G-buffer** (ADR-0023 amendment 1 item 9) is read back with frame B and checked per
+//! draw class against what each surface writes in N2a: the unit, skinned and VAT cubes are
+//! `STANDARD` with F0 0.04 and `UNIT | NO_FOG_OF_WAR`; the terrain is `STANDARD` with F0 0.04
+//! and no flags; the foliage is `FOLIAGE` with no flags; the far plane keeps the clear value
+//! (`UNLIT`, every bit 0). Every rim slot is 0. The pixels are classified as for the motion
+//! (ground under a foliage patch, where blade bases stand, is left out of `terrain`), and
+//! every classified pixel must match ([`GBufferCheck`]). Frames A and B look down on the
+//! ground and show no sky, so a frame C, with the camera turned to the horizon, gives the
+//! far-plane pixels of the `sky` class.
+//!
 //! Diagnostic only: the probe registers its meshes and replaces the foliage, so it is meant
 //! for a fresh renderer that then exits (the client's `MOBA_MOTION_PROBE=1`).
 
@@ -42,6 +52,7 @@ use super::Renderer;
 use crate::environment::{EnvironmentFrame, FoliageData, FoliageDisplacer, FoliageInstanceData};
 use crate::error::{RenderError, RenderResult};
 use crate::frame_graph::FramePlan;
+use crate::gbuffer::{FLAG_NO_FOG_OF_WAR, FLAG_UNIT, GBufferTexels, ShadingModel};
 use crate::graph::ResourceId;
 use crate::resources::{CommandPool, GpuBuffer};
 use crate::scene::{BoneRange, Camera, Scene, UnitInstance};
@@ -134,6 +145,28 @@ impl PushCheck {
     }
 }
 
+/// One draw class's G-buffer against what N2a writes (ADR-0023 amendment 1 item 9).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct GBufferCheck {
+    /// The class (`unit`, `skinned`, `vat`, `terrain`, `foliage`, `sky`).
+    pub name: &'static str,
+    /// Pixels compared.
+    pub pixels: u32,
+    /// Pixels whose model, flags, rim slot or F0 differ from the class's.
+    pub mismatches: u32,
+    /// The first mismatching pixel's texels, for the log.
+    pub first_mismatch: Option<String>,
+}
+
+impl GBufferCheck {
+    /// Enough pixels, every one as expected.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.pixels >= MIN_PIXELS && self.mismatches == 0
+    }
+}
+
 /// The result of [`Renderer::motion_probe`].
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -146,6 +179,8 @@ pub struct MotionProbeReport {
     pub checks: Vec<MotionCheck>,
     /// The pushed foliage patch.
     pub pushed: PushCheck,
+    /// The G-buffer per draw class.
+    pub gbuffer: Vec<GBufferCheck>,
     /// Pixels skipped as ambiguous (a cube's boundary) or unclassified.
     pub skipped: u32,
 }
@@ -157,6 +192,8 @@ impl MotionProbeReport {
         !self.checks.is_empty()
             && self.checks.iter().all(MotionCheck::passed)
             && self.pushed.passed()
+            && self.gbuffer.len() == GBUFFER_CLASSES.len()
+            && self.gbuffer.iter().all(GBufferCheck::passed)
     }
 }
 
@@ -197,6 +234,20 @@ impl fmt::Display for MotionProbeReport {
             100.0 * PUSH_INWARD_SHARE,
             self.pushed.mean_extra
         )?;
+        for check in &self.gbuffer {
+            writeln!(
+                f,
+                "  {} gbuffer {:<8} pixels={:<7} mismatches={}{}",
+                if check.passed() { "ok  " } else { "FAIL" },
+                check.name,
+                check.pixels,
+                check.mismatches,
+                check
+                    .first_mismatch
+                    .as_deref()
+                    .map_or(String::new(), |first| format!(" first: {first}"))
+            )?;
+        }
         write!(
             f,
             "motion probe: {}",
@@ -228,6 +279,92 @@ const CAMERA: usize = 0;
 const FOLIAGE: usize = 4;
 /// The pushed patch: not a `CLASSES` entry, checked by [`PushCheck`].
 const PUSHED: usize = usize::MAX;
+
+/// What one draw class writes into the G-buffer (ADR-0023 amendment 1 item 9).
+#[derive(Clone, Copy, Debug)]
+struct GBufferExpect {
+    name: &'static str,
+    model: ShadingModel,
+    flags: u32,
+    /// F0 0.04 in the model data (`STANDARD`).
+    f0: bool,
+}
+
+const fn expect(name: &'static str, model: ShadingModel, flags: u32, f0: bool) -> GBufferExpect {
+    GBufferExpect {
+        name,
+        model,
+        flags,
+        f0,
+    }
+}
+
+const UNIT_FLAGS: u32 = FLAG_UNIT | FLAG_NO_FOG_OF_WAR;
+const GBUFFER_CLASSES: [GBufferExpect; 6] = [
+    expect("unit", ShadingModel::Standard, UNIT_FLAGS, true),
+    expect("skinned", ShadingModel::Standard, UNIT_FLAGS, true),
+    expect("vat", ShadingModel::Standard, UNIT_FLAGS, true),
+    expect("terrain", ShadingModel::Standard, 0, true),
+    expect("foliage", ShadingModel::Foliage, 0, false),
+    expect("sky", ShadingModel::Unlit, 0, false),
+];
+const GB_TERRAIN: usize = 3;
+const GB_FOLIAGE: usize = 4;
+const GB_SKY: usize = 5;
+/// The F0 0.04 default stores 128 (`sqrt(F0 / 0.16)`), which decodes to 0.0403; one step is
+/// 0.0006.
+const F0_TOLERANCE: f32 = 0.0007;
+
+/// The G-buffer class of a motion class (`PUSHED` is foliage).
+fn gbuffer_class(class: usize) -> Option<usize> {
+    match class {
+        CAMERA => Some(GB_TERRAIN),
+        1 | 5 | 6 | 7 => Some(0),
+        2 => Some(1),
+        3 => Some(2),
+        FOLIAGE | PUSHED => Some(GB_FOLIAGE),
+        _ => None,
+    }
+}
+
+/// Whether `texels` (`gb0` is not read back) hold what `expect` writes.
+fn gbuffer_matches(expect: &GBufferExpect, texels: GBufferTexels) -> bool {
+    let Some(surface) = crate::gbuffer::decode(texels) else {
+        return false;
+    };
+    let clear = texels.gb1 == 0 && texels.gb2 == [0; 4];
+    surface.model == expect.model
+        && surface.flags == expect.flags
+        && surface.rim_slot == 0
+        && (!expect.f0 || (surface.model_data[0] - 0.04).abs() <= F0_TOLERANCE)
+        && (expect.model != ShadingModel::Unlit || clear)
+}
+
+#[derive(Clone, Copy, Default)]
+struct GBufferTally {
+    pixels: u32,
+    mismatches: u32,
+    first: Option<(usize, usize, GBufferTexels)>,
+}
+
+impl GBufferTally {
+    fn add(&mut self, expect: &GBufferExpect, x: usize, y: usize, texels: GBufferTexels) {
+        self.pixels += 1;
+        if !gbuffer_matches(expect, texels) {
+            self.mismatches += 1;
+            self.first.get_or_insert((x, y, texels));
+        }
+    }
+}
+
+/// Frame B's targets as read back, row-major at the render resolution.
+struct Readback {
+    /// Render pixels.
+    motion: Vec<[f32; 2]>,
+    depth: Vec<f32>,
+    /// `gb1` and `gb2` (`gb0` left at 0).
+    gbuffer: Vec<GBufferTexels>,
+}
 
 #[derive(Clone, Copy, Default)]
 struct Tally {
@@ -531,7 +668,12 @@ impl Renderer {
             .and_then(super::TemporalState::previous_jitter)
             .ok_or_else(|| probe_error("frame B left no jitter"))?;
         let render = self.render_extent;
-        let (motion, depth) = self.read_motion_and_depth()?;
+        let Readback {
+            motion,
+            depth,
+            gbuffer,
+        } = self.read_targets()?;
+        let mut gbuffer_tallies = [GBufferTally::default(); GBUFFER_CLASSES.len()];
 
         let cubes = [
             Cube {
@@ -585,6 +727,7 @@ impl Renderer {
                 let index = y * w + x;
                 let d = depth[index];
                 if !depth_convention.nearer(d, depth_convention.far()) {
+                    gbuffer_tallies[GB_SKY].add(&GBUFFER_CLASSES[GB_SKY], x, y, gbuffer[index]);
                     skipped += 1;
                     continue;
                 }
@@ -632,6 +775,17 @@ impl Renderer {
                         continue;
                     }
                 };
+                let under_foliage = [FOLIAGE_CENTRE, PUSHED_CENTRE].iter().any(|centre| {
+                    (world.x - centre[0]).abs() < FOLIAGE_HALF
+                        && (world.z - centre[1]).abs() < FOLIAGE_HALF
+                });
+                match gbuffer_class(class) {
+                    Some(GB_TERRAIN) if under_foliage => {}
+                    Some(class) => {
+                        gbuffer_tallies[class].add(&GBUFFER_CLASSES[class], x, y, gbuffer[index]);
+                    }
+                    None => {}
+                }
                 let Some(twin) = motion_pixels(
                     camera_b.view_proj,
                     world,
@@ -687,49 +841,81 @@ impl Renderer {
             })
             .collect();
         pushed.mean_extra = (extra_sum / f64::from(pushed.moved.max(1))) as f32;
+
+        // Frame C: the camera at the horizon, for the sky's G-buffer (its far-plane pixels).
+        let camera_c = Camera::perspective(
+            Vec3::new(0.0, 1.5, 9.0),
+            Vec3::new(0.0, 1.5, 0.0),
+            Vec3::Y,
+            0.8,
+            aspect,
+            1.0,
+            60.0,
+        );
+        let scene_c = Scene::new(camera_c, &units_b)
+            .with_bones(&bones_b)
+            .with_environment(EnvironmentFrame::new(FOLIAGE_TIME, &push));
+        if !(0..3).any(|_| self.render_internal(&scene_c, None, &[]).unwrap_or(false)) {
+            return Err(probe_error("the sky frame was skipped"));
+        }
+        let sky = self.read_targets()?;
+        for (index, (&d, &texels)) in sky.depth.iter().zip(&sky.gbuffer).enumerate() {
+            if !depth_convention.nearer(d, depth_convention.far()) {
+                gbuffer_tallies[GB_SKY].add(&GBUFFER_CLASSES[GB_SKY], index % w, index / w, texels);
+            }
+        }
+        let gbuffer = GBUFFER_CLASSES
+            .iter()
+            .zip(gbuffer_tallies)
+            .map(|(expect, tally)| GBufferCheck {
+                name: expect.name,
+                pixels: tally.pixels,
+                mismatches: tally.mismatches,
+                first_mismatch: tally.first.map(|(x, y, texels)| {
+                    format!("({x}, {y}) gb1={:#010x} gb2={:?}", texels.gb1, texels.gb2)
+                }),
+            })
+            .collect();
         Ok(MotionProbeReport {
             render: [render.width, render.height],
             jitter,
             checks,
             pushed,
+            gbuffer,
             skipped,
         })
     }
 
-    /// Frame B's motion (render pixels) and depth, row-major at the render resolution.
-    #[allow(clippy::too_many_lines)] // Two transitions, two copies, two transitions back.
-    fn read_motion_and_depth(&self) -> RenderResult<(Vec<[f32; 2]>, Vec<f32>)> {
+    /// Frame B's motion (render pixels), depth and G-buffer (`gb1`, `gb2`), row-major at the
+    /// render resolution.
+    #[allow(clippy::too_many_lines)] // Transitions, four copies, transitions back.
+    fn read_targets(&self) -> RenderResult<Readback> {
         let plan = &self.plans[0];
         let temporal = plan
             .resources
             .temporal
             .ok_or_else(|| probe_error("no motion target"))?;
-        let (motion_image, motion_layout) = final_state(self, plan, temporal.motion, "motion")?;
-        let (depth_image, depth_layout) = final_state(self, plan, plan.resources.depth, "depth")?;
+        let color = vk::ImageAspectFlags::COLOR;
         let depth_format = self.frame_spec.depth_format;
         let depth_aspect = self.frame_spec.depth_aspect;
+        let depth_bytes = depth_texel_bytes(depth_format);
+        // (resource, name, aspect copied, aspect of the image, bytes per texel); every colour
+        // target is 4 bytes a texel (`R16G16_SFLOAT`, `A2B10G10R10`, `R8G8B8A8`).
+        let targets = [
+            (temporal.motion, "motion", color, color, 4),
+            (temporal.gbuffer[1], "gb1", color, color, 4),
+            (temporal.gbuffer[2], "gb2", color, color, 4),
+            (
+                plan.resources.depth,
+                "depth",
+                vk::ImageAspectFlags::DEPTH,
+                depth_aspect,
+                depth_bytes,
+            ),
+        ];
         let extent = self.render_extent;
         let texels = u64::from(extent.width) * u64::from(extent.height);
         let device = &self.device.device;
-        let mut motion_buffer = GpuBuffer::new(
-            device.clone(),
-            self.device.allocator(),
-            "motion-probe-motion",
-            texels * 4,
-            vk::BufferUsageFlags::TRANSFER_DST,
-            MemoryLocation::GpuToCpu,
-        )?;
-        let depth_bytes = depth_texel_bytes(depth_format);
-        let mut depth_buffer = GpuBuffer::new(
-            device.clone(),
-            self.device.allocator(),
-            "motion-probe-depth",
-            texels * depth_bytes,
-            vk::BufferUsageFlags::TRANSFER_DST,
-            MemoryLocation::GpuToCpu,
-        )?;
-        let pool = CommandPool::new(device.clone(), self.device.graphics_family)?;
-        let cmd = pool.allocate_one()?;
         let all = vk::PipelineStageFlags2::ALL_COMMANDS;
         let any = vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE;
         let copy_state = (
@@ -737,25 +923,36 @@ impl Renderer {
             vk::PipelineStageFlags2::COPY,
             vk::AccessFlags2::TRANSFER_READ,
         );
-        let color = vk::ImageAspectFlags::COLOR;
-        let to_copy = [
-            layout_barrier(motion_image, color, (motion_layout, all, any), copy_state),
-            layout_barrier(
-                depth_image,
-                depth_aspect,
-                (depth_layout, all, any),
+        let mut images = Vec::with_capacity(targets.len());
+        let mut buffers = Vec::with_capacity(targets.len());
+        let mut to_copy = Vec::with_capacity(targets.len());
+        let mut back = Vec::with_capacity(targets.len());
+        for (resource, name, _, aspect, bytes) in targets {
+            let (image, layout) = final_state(self, plan, resource, name)?;
+            images.push(image);
+            to_copy.push(layout_barrier(
+                image,
+                aspect,
+                (layout, all, any),
                 copy_state,
-            ),
-        ];
-        let back = [
-            layout_barrier(motion_image, color, copy_state, (motion_layout, all, any)),
-            layout_barrier(
-                depth_image,
-                depth_aspect,
+            ));
+            back.push(layout_barrier(
+                image,
+                aspect,
                 copy_state,
-                (depth_layout, all, any),
-            ),
-        ];
+                (layout, all, any),
+            ));
+            buffers.push(GpuBuffer::new(
+                device.clone(),
+                self.device.allocator(),
+                "motion-probe-readback",
+                texels * bytes,
+                vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuToCpu,
+            )?);
+        }
+        let pool = CommandPool::new(device.clone(), self.device.graphics_family)?;
+        let cmd = pool.allocate_one()?;
         // The copies' writes made available to the host reads after the queue wait.
         let to_host = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
@@ -780,35 +977,28 @@ impl Renderer {
         // SAFETY: `cmd` was just allocated from `pool` and is not recording.
         unsafe { device.begin_command_buffer(cmd, &begin) }?;
         // SAFETY: the device is idle after frame B (`render_internal` returned and nothing
-        // else was submitted), both images are live in the layouts the frame left them in.
+        // else was submitted), and every image is live in the layout the frame left it in.
         unsafe {
             device.cmd_pipeline_barrier2(
                 cmd,
                 &vk::DependencyInfo::default().image_memory_barriers(&to_copy),
             );
         }
-        // SAFETY: the motion image is in TRANSFER_SRC_OPTIMAL and the buffer holds the
-        // render extent's texels (4 bytes each).
-        unsafe {
-            device.cmd_copy_image_to_buffer(
-                cmd,
-                motion_image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                motion_buffer.handle(),
-                &region(color),
-            );
+        for ((image, buffer), (_, _, aspect, _, _)) in images.iter().zip(&buffers).zip(targets) {
+            // SAFETY: the image is in TRANSFER_SRC_OPTIMAL (the barrier above, with
+            // `TRANSFER_SRC` usage from `RenderConfig::readback`) and the buffer holds the
+            // render extent's texels of this target.
+            unsafe {
+                device.cmd_copy_image_to_buffer(
+                    cmd,
+                    *image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    buffer.handle(),
+                    &region(aspect),
+                );
+            }
         }
-        // SAFETY: as above, for the depth aspect of the depth image.
-        unsafe {
-            device.cmd_copy_image_to_buffer(
-                cmd,
-                depth_image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                depth_buffer.handle(),
-                &region(vk::ImageAspectFlags::DEPTH),
-            );
-        }
-        // SAFETY: returns both images to the layouts the next frame's barriers expect.
+        // SAFETY: returns every image to the layout the next frame's barriers expect.
         unsafe {
             device.cmd_pipeline_barrier2(
                 cmd,
@@ -829,20 +1019,41 @@ impl Renderer {
         // SAFETY: waits for the submission above; the pool and buffers outlive it.
         unsafe { device.queue_wait_idle(self.device.graphics_queue) }?;
         let count = usize::try_from(texels).expect("render extent fits usize");
+        let [motion_buffer, gb1_buffer, gb2_buffer, depth_buffer] = &mut buffers[..] else {
+            unreachable!("four targets");
+        };
+        let host = || probe_error("readback buffer is not host visible");
         let motion = motion_buffer
             .mapped_slice_mut::<[u16; 2]>(count)
-            .ok_or_else(|| probe_error("readback buffer is not host visible"))?
+            .ok_or_else(host)?
             .iter()
             .map(|texel| [f32_from_f16(texel[0]), f32_from_f16(texel[1])])
+            .collect();
+        let gb1 = gb1_buffer.mapped_slice_mut::<u32>(count).ok_or_else(host)?;
+        let gb2 = gb2_buffer
+            .mapped_slice_mut::<[u8; 4]>(count)
+            .ok_or_else(host)?;
+        let gbuffer = gb1
+            .iter()
+            .zip(gb2.iter())
+            .map(|(&gb1, &gb2)| GBufferTexels {
+                gb0: [0; 4],
+                gb1,
+                gb2,
+            })
             .collect();
         let width = usize::try_from(depth_bytes).expect("small");
         let depth = depth_buffer
             .mapped_slice_mut::<u8>(count * width)
-            .ok_or_else(|| probe_error("readback buffer is not host visible"))?
+            .ok_or_else(host)?
             .chunks_exact(width)
             .map(|texel| decode_depth(depth_format, texel))
             .collect();
-        Ok((motion, depth))
+        Ok(Readback {
+            motion,
+            depth,
+            gbuffer,
+        })
     }
 }
 
@@ -881,6 +1092,53 @@ mod tests {
         assert_eq!(decode_depth(vk::Format::D16_UNORM, &[0, 0]), 0.0);
         assert_eq!(depth_texel_bytes(vk::Format::D16_UNORM), 2);
         assert_eq!(depth_texel_bytes(vk::Format::D32_SFLOAT_S8_UINT), 4);
+    }
+
+    /// The probe's expectations are what the twin encodes for each class (ADR-0023
+    /// amendment 1 item 9), and a wrong flag, model, rim slot or F0 fails.
+    #[test]
+    fn gbuffer_expectations_match_the_twin() {
+        use crate::gbuffer::{SurfaceParams, encode};
+        let surface = |model, flags, f0: f32| SurfaceParams {
+            base_color: [0.5; 3],
+            metallic: 0.0,
+            normal: [0.0, 1.0, 0.0],
+            roughness: 0.6,
+            model,
+            model_data: [f0, 0.0, 0.0],
+            ao: 1.0,
+            flags,
+            rim_slot: 0,
+        };
+        for expect in &GBUFFER_CLASSES[..GB_SKY] {
+            let f0 = if expect.f0 { 0.04 } else { 0.3 };
+            let good = encode(&surface(expect.model, expect.flags, f0));
+            assert!(gbuffer_matches(expect, good), "{}", expect.name);
+            let flagged = encode(&surface(expect.model, expect.flags ^ FLAG_UNIT, f0));
+            assert!(!gbuffer_matches(expect, flagged), "{}", expect.name);
+            let mut rim = good;
+            rim.gb2[3] |= 1;
+            assert!(!gbuffer_matches(expect, rim), "{}", expect.name);
+        }
+        let unit = &GBUFFER_CLASSES[0];
+        assert!(!gbuffer_matches(
+            unit,
+            encode(&surface(unit.model, UNIT_FLAGS, 0.05))
+        ));
+        assert!(!gbuffer_matches(
+            unit,
+            encode(&surface(ShadingModel::Foliage, UNIT_FLAGS, 0.04))
+        ));
+        let sky = &GBUFFER_CLASSES[GB_SKY];
+        assert!(gbuffer_matches(sky, GBufferTexels::default()));
+        let normal = GBufferTexels {
+            gb1: 1,
+            ..GBufferTexels::default()
+        };
+        assert!(!gbuffer_matches(sky, normal));
+        for class in [CAMERA, 1, 2, 3, FOLIAGE, 5, 6, 7, PUSHED] {
+            assert!(gbuffer_class(class).is_some(), "{class}");
+        }
     }
 
     #[test]

@@ -241,6 +241,11 @@ pub(crate) struct PrepassTarget {
     /// The G-buffer `gb0`–`gb2` (ADR-0023 §1a; cleared to 0), attachments 1–3, with the
     /// motion.
     pub(crate) gbuffer: Option<[vk::ImageView; 3]>,
+    /// Whether the G-buffer's contents are kept (`STORE`) for a reader: a debug view
+    /// (ADR-0023 §1f) or the motion probe's readback. Until N2b's lighting reads them, the
+    /// targets are otherwise `DONT_CARE`, so a tile-based or compressing GPU need not write
+    /// them out.
+    pub(crate) gbuffer_store: bool,
     /// The main view's lighting set (the G-buffer prepass's fragment stages read it).
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) extent: vk::Extent2D,
@@ -798,13 +803,17 @@ impl ScenePipelines {
             depth_write: false,
             depth_compare,
         };
-        // The tiered permutations are also the reversed-Z ones (ADR-0023 §1c); Tiered never
-        // runs without the overlay (it refuses MSAA, the only case that drops it).
-        debug_assert!(
-            !depth.is_reversed() || overlay,
-            "reversed-Z water needs the tiered set"
+        // The water permutation follows the depth convention (ADR-0023 §1c): the tiered
+        // modules are the reversed-Z ones (`MOBA_REVERSED_Z`, which the refraction's depth
+        // compare needs). They also drop the glow decals for the overlay (`MOBA_NO_GLOW_DECALS`),
+        // which only holds while reversed-Z and the overlay go together: Tiered refuses MSAA,
+        // the only case that would drop its overlay, and Compat has neither.
+        let tiered_water = depth.is_reversed();
+        debug_assert_eq!(
+            tiered_water, overlay,
+            "the tiered water modules assume reversed-Z and the overlay together"
         );
-        let water_fragment = module(if overlay {
+        let water_fragment = module(if tiered_water {
             "water_tiered.frag"
         } else {
             "water.frag"
@@ -817,7 +826,7 @@ impl ScenePipelines {
         .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
         // The full water draws after any MSAA resolve: single-sampled, in the base set only.
         let water_full = if environment.full_water && samples == vk::SampleCountFlags::TYPE_1 {
-            let fragment = module(if overlay {
+            let fragment = module(if tiered_water {
                 "water_refraction_tiered.frag"
             } else {
                 "water_refraction.frag"
@@ -1106,10 +1115,12 @@ impl ScenePipelines {
         };
         let rgba = vk::ColorComponentFlags::RGBA;
         let none = vk::ColorComponentFlags::empty();
-        let motion = target(
-            crate::frame_graph::MOTION_FORMAT,
-            vk::ColorComponentFlags::R | vk::ColorComponentFlags::G,
-        );
+        // Motion is `R16G16_SFLOAT`, so RGBA writes exactly its R and G. It is not narrowed to
+        // R|G: lavapipe (Mesa 26.0 and 26.2) applies attachment 0's write mask to every
+        // attachment of these pipelines, which dropped `gb0`–`gb2`'s blue and alpha (the
+        // roughness, the flags and the model) on CI's device. The motion probe's G-buffer
+        // check catches it (ADR-0023 amendment 1 item 16).
+        let motion = target(crate::frame_graph::MOTION_FORMAT, rgba);
         let gbuffer = |write_mask| {
             [
                 target(crate::gbuffer::GB0_FORMAT, write_mask),
@@ -2677,7 +2688,16 @@ impl ScenePass {
                 })
         };
         let motion_attachment = target.motion.map(cleared);
-        let gbuffer_attachments = target.gbuffer.into_iter().flatten().map(cleared);
+        let gbuffer_store = if target.gbuffer_store {
+            vk::AttachmentStoreOp::STORE
+        } else {
+            vk::AttachmentStoreOp::DONT_CARE
+        };
+        let gbuffer_attachments = target
+            .gbuffer
+            .into_iter()
+            .flatten()
+            .map(|view| cleared(view).store_op(gbuffer_store));
         let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 5];
         let mut color_count = 0;
         for attachment in motion_attachment

@@ -1,6 +1,6 @@
 // Motion vectors (ADR-0021 §2): the prepass's `MOTION_VECTORS` permutations write the
-// unjittered current and the previous clip position of each vertex; `prepass_motion.frag`
-// divides per fragment, so the interpolation is exact on every triangle (perspective-correct
+// unjittered current and the previous clip position of each vertex; the G-buffer prepass's
+// fragment stages (the `GBUFFER` permutations, ADR-0023 §1e) divide per fragment, so the interpolation is exact on every triangle (perspective-correct
 // clip positions), and writes render pixels from the current sample to its previous position,
 // x right and y down (the scene draws through a flipped viewport: NDC +y is the top), without
 // jitter. Includers declare the camera block first.

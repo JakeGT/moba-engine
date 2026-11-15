@@ -1,6 +1,7 @@
 # Reversed-Z and the thin G-buffer on Tiered (N2a)
 
-Captured 2026-11-03 for ADR-0023 (N2a) and its
+Captured 2026-11-03, with gate 7 re-timed and the G-buffer content check added on 2026-11-15
+after the reviews, for ADR-0023 (N2a) and its
 [Amendment 1](../adr/0023-frame-architecture-materials.md#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built).
 
 - **GPU:** NVIDIA GeForce RTX 5070 Ti, used for timings, the ghost probe and the debug-view
@@ -10,8 +11,9 @@ Captured 2026-11-03 for ADR-0023 (N2a) and its
 - **CPU:** AMD Ryzen 7 9800X3D. **OS:** Linux 7.3.0-5-cachyos, Wayland.
 - **Toolchain:** rustc stable, the pinned `slangc`.
 - **Branch:** `feat/n2a-gbuffer-reversed-z`.
-- **Baseline:** origin/main `657a7ab` (N1b stage 2 merged), built detached in its own
-  worktree. Both release builds use the default `fsr3` feature.
+- **Baseline:** origin/main, built detached in its own worktree: `657a7ab` (N1b stage 2
+  merged) for gates 1, 5 and 6, and `ab42718` (after #373, #347, #374 and #349) for gate 7 and
+  the 2026-11-15 tiered comparison. Every release build uses the default `fsr3` feature.
 
 Every lavapipe and RTX run below printed no `[vulkan` line. Validation and synchronisation
 validation were clean.
@@ -43,6 +45,25 @@ validation were clean.
     3.05e-5);
   - 719 surfaces with a value within 0.01 of a step of a rounding boundary were redrawn.
   CI runs it in `tiered-temporal`.
+- **In the frame, on lavapipe:** the motion probe reads `gb1` and `gb2` back (amendment 1
+  item 16). `scripts/motion-probe.sh`, at Low and High, 853×480, validation required:
+
+  | Class | What it must hold | Pixels (Low / High) | Mismatches |
+  |---|---|---|---|
+  | unit (static, reset, unkeyed) | `STANDARD`, F0 0.04, `UNIT \| NO_FOG_OF_WAR`, rim 0 | 8,711 / 8,711 | 0 |
+  | skinned | as unit | 1,709 / 1,709 | 0 |
+  | vat | as unit | 2,163 / 2,163 | 0 |
+  | terrain (outside the foliage patches) | `STANDARD`, F0 0.04, no flags | 369,616 / 369,616 | 0 |
+  | foliage | `FOLIAGE`, no flags | 6,323 / 7,186 | 0 |
+  | sky (frame C, at the horizon) | the clear value: `UNLIT`, every bit 0 | 216,662 / 216,662 | 0 |
+
+  **The check found a real fault.** Its first run failed every class on lavapipe: `gb1`'s
+  roughness and flags and `gb2`'s model read 0, so every surface decoded as `UNLIT`. The
+  in-frame `model` and `flags` debug views showed the same on lavapipe, so the readback was
+  not at fault. The cause was the per-attachment write masks: lavapipe applied attachment 0's
+  (motion's R|G) to every attachment. With motion's mask set to RGBA, which on its
+  `R16G16_SFLOAT` format writes the same R and G, every class passes. The RTX debug views
+  (gate 6) were right before the fix, because the NVIDIA driver honours the masks.
 - **Reflection tests:** `gbuffer_debug.slang`'s push block against `DebugPush` (24 bytes),
   and the smoke's bindings and push. The GLSL-vertex / Slang-fragment interface test moves to
   N2c with the first Slang G-buffer fragment stage (amendment 1 item 5).
@@ -131,44 +152,80 @@ They were captured on the RTX with validation required.
 
 ## Gate 7: performance
 
-RTX 5070 Ti, the teamfight replay (`MOBA_WARMUP_TICKS=330`) at 1920×1080, vsync off, the 240 fps
-limit, validation off, the pipeline cache off, 3000 frames per run (the log covers the last
-2940). Three rounds, each running every configuration on origin/main and then the branch, run
-under the shared GPU lock with no other GPU client running. Medians of the three rounds, in ms.
-A first A/B overlapped another agent's measurement on the same GPU and was discarded.
-
-This A/B was taken on 2026-11-03 against `657a7ab` and was not re-measured after the branch
-merged main (`9325ea3`, 2026-11-15). Between those two commits the only crate changes are
-#373's iterator rewrites in `moba-net` and `moba-sim`, which the renderer does not run; #347
-and #374 change docs, scripts, the workflow and the hash file only. So the baseline still
-stands for the merged branch. The raw frame logs of these rounds were not kept.
+Re-timed on 2026-11-15, after the reviews, at the branch's review-fix commit (merged with
+origin/main `ab42718`), against a detached build of `ab42718` in its own temporary worktree.
+- **Builds:** both are release builds with the default `fsr3` feature.
+- **Machine:** the RTX 5070 Ti (driver 620.70.06, Linux 7.3.4).
+- **Replay:** the teamfight replay (`MOBA_WARMUP_TICKS=330`) at 1920×1080, vsync off, the
+  240 fps limit, validation off, the pipeline cache off, 3000 frames per run (the log covers
+  the last 2940).
+- **Rounds:** three. Each held `flock handoff/gpu.lock` and ran every configuration on main
+  and then the branch, with no other `moba-client` running (checked before each run).
+- **Results:** medians of the three rounds, in ms; the three rounds' GPU totals agree within
+  0.003 ms. The raw logs are in `~/.cache/moba-evidence/n2a-ab/` (not committed).
+- **The earlier A/B** (2026-11-03, against `657a7ab`) measured the same deltas at about 0.03 ms
+  higher absolute totals. It is superseded by this one.
 
 | Configuration | GPU total p50 | GPU total p95 | `prepass` p50 | `scene` p50 | `temporal` p50 | Frame p95 |
 |---|---|---|---|---|---|---|
-| Tiered Low, main | 0.539 | 0.547 | 0.022 | 0.083 | 0.144 | 4.239 |
-| Tiered Low, branch | 0.585 | 0.595 | 0.065 | 0.081 | 0.146 | 4.240 |
-| Tiered High, main | 0.588 | 0.597 | 0.026 | 0.095 | 0.144 | 4.238 |
-| Tiered High, branch | 0.638 | 0.648 | 0.073 | 0.093 | 0.146 | 4.240 |
-| Tiered Ultra, main | 0.588 | 0.597 | 0.025 | 0.095 | 0.144 | 4.241 |
-| Tiered Ultra, branch | 0.638 | 0.648 | 0.073 | 0.092 | 0.146 | 4.239 |
-| Compat Ultra, main | 0.715 | 0.727 | 0.068 | 0.275 | — | 4.193 |
-| Compat Ultra, branch | 0.715 | 0.727 | 0.068 | 0.276 | — | 4.193 |
+| Tiered Low (TAAU), main | 0.506 | 0.519 | 0.020 | 0.079 | 0.125 | 4.241 |
+| Tiered Low (TAAU), branch | 0.548 | 0.560 | 0.062 | 0.076 | 0.125 | 4.242 |
+| Tiered High (TAAU), main | 0.557 | 0.570 | 0.024 | 0.090 | 0.125 | 4.242 |
+| Tiered High (TAAU), branch | 0.604 | 0.617 | 0.068 | 0.089 | 0.125 | 4.238 |
+| Tiered Ultra (TAAU), main | 0.558 | 0.571 | 0.024 | 0.090 | 0.125 | 4.240 |
+| Tiered Ultra (TAAU), branch | 0.604 | 0.615 | 0.068 | 0.089 | 0.125 | 4.242 |
+| Tiered Low (FSR 3.1), main | 0.656 | 0.670 | 0.020 | 0.079 | 0.278 | 4.238 |
+| Tiered Low (FSR 3.1), branch | 0.698 | 0.711 | 0.062 | 0.077 | 0.278 | 4.241 |
+| Tiered High (FSR 3.1), main | 0.706 | 0.720 | 0.024 | 0.090 | 0.277 | 4.241 |
+| Tiered High (FSR 3.1), branch | 0.753 | 0.767 | 0.068 | 0.089 | 0.278 | 4.240 |
+| Compat Ultra, main | 0.672 | 0.684 | 0.058 | 0.246 | — | 4.189 |
+| Compat Ultra, branch | 0.672 | 0.684 | 0.058 | 0.246 | — | 4.190 |
 
+**Against ADR-0023 §9b's 1.10× gate** (the N2 tiered frame against the N1 tiered forward
+frame; GPU total, branch ÷ main):
+
+| Preset | p50 ratio | p95 ratio | Headroom to 1.10× at p50 |
+|---|---|---|---|
+| Tiered Low (TAAU) | 1.083 | 1.079 | 0.009 ms (1.7 % of N1) |
+| Tiered High (TAAU) | 1.084 | 1.082 | 0.009 ms (1.6 %) |
+| Tiered Ultra (TAAU) | 1.082 | 1.077 | 0.010 ms (1.8 %) |
+| Tiered Low (FSR 3.1) | 1.064 | 1.061 | 0.024 ms (3.6 %) |
+| Tiered High (FSR 3.1) | 1.067 | 1.065 | 0.024 ms (3.3 %) |
+| Compat Ultra | 1.000 | 1.000 | not gated (Compat is not N2) |
+
+- **The gate is for the finished N2 frame**, not for N2a alone. N2a passes it at every
+  preset, but it spends most of the margin: about **0.01 ms of headroom is left at the TAAU
+  presets** (0.024 ms with FSR 3.1, whose own cost makes the ratio smaller).
+- **Where N2b–N2f find their cost.** N2b's deferred lighting has to replace the forward
+  `scene` shading (0.076–0.089 ms here) rather than add to it, and N2c–N2f (materials,
+  LTC lights, rims, transmission) then fit in what that frees plus the 0.01 ms. N2b should
+  measure against this table before it lands. The G-buffer writes can only get cheaper
+  (N2c's bindless materials drop the per-draw binds).
 - **Reversed-Z costs nothing measurable.** The `scene` lane, which runs the same draws with
-  the reversed compare, is 0.001–0.003 ms faster. `temporal` (TAAU's reversed depth
-  linearisation) is 0.002 ms slower. Both are at the noise floor.
-- **The G-buffer writes cost about +0.045 ms in the `prepass` lane** (0.022 → 0.065 at Low,
-  0.025 → 0.073 at High and Ultra), which is all of the +0.046–0.051 ms in the GPU total.
-  The pass now writes 12 more bytes per pixel at render resolution and binds the textured
-  materials. The frame time does not move: these frames are limited at 240 fps.
-- **perf-gate** against `tests/perf/baseline.toml` passes every branch log: Tiered High and
-  Ultra at 0.648 ms against an allowed 0.747 and 0.749, Low at 0.595 against 0.689, and Compat
-  Ultra at 0.727 ms against an allowed 0.830. No pacing or run-integrity failure. Tiered
-  baselines are still report-only (`TIERED_BASELINE_FAILS`), but no tiered log breaches one.
+  the reversed compare, is 0.001–0.003 ms faster. `temporal` is unchanged for TAAU (0.125)
+  and for FSR 3.1, which now builds its inverted-depth permutation (0.277–0.278).
+- **The G-buffer writes cost +0.042–0.044 ms in the `prepass` lane** (0.020 → 0.062 at Low,
+  0.024 → 0.068 at High and Ultra). That is all of the +0.042–0.047 ms in the GPU total. The
+  pass writes 12 more bytes per pixel at render resolution and binds the textured materials.
+  The frame time does not move: these frames are limited at 240 fps.
+- **`DONT_CARE` stores (amendment 1 item 16) change nothing on this GPU.** The prepass lane
+  is 0.062/0.068 against 0.065/0.073 in the earlier A/B, which is within that A/B's higher
+  absolute level. The NVIDIA driver writes the targets out either way; the store op is for
+  tile-based and compressing GPUs, which are not measured here.
+- **perf-gate** against `tests/perf/baseline.toml` passes every TAAU branch log:
+  - Tiered High at 0.618 ms against an allowed 0.747, Ultra at 0.615 against 0.749;
+  - Tiered Low at 0.563 ms against an allowed 0.689; only its report-only CPU-render line
+    flags;
+  - the FSR 3.1 logs are checked against the TAAU baselines (FSR 3.1 has none of its own)
+    and flag only report-only lines.
+- **Compat Ultra trips perf-gate's CPU-render p95 limit (0.318 ms) on both builds**: main in
+  rounds 1 and 3 (0.320, 0.321), the branch in rounds 1–3 (0.318–0.319). That is this
+  machine's CPU today, not the branch: Compat's GPU numbers are identical, and N2a changes no
+  Compat code.
 - **`locked_uploads=0`, `locked_pipelines=0` and `frames_dropped=0`** in every run.
 - **Pipelines:**
-  - On the RTX the replay builds **46 tiered pipelines on main and 48 on the branch**.
-    Compat stays at 42.
+  - On the RTX the replay builds **46 tiered pipelines on main and 48 on the branch** with
+    TAAU, and 54 → 56 with FSR 3.1. Compat stays at 42.
   - On lavapipe at 640×360 High it is 45 → 47 with TAAU and 53 → 55 with FSR 3.1.
   - The two new pipelines are the textured unit and skinned G-buffer variants, because the
     textured materials now feed the G-buffer.
@@ -178,5 +235,17 @@ stands for the merged branch. The raw frame logs of these rounds were not kept.
   - `targets_mb` rises by **11.2–11.3 MB** at every tiered preset (132.0 → 143.2 at Low and
     180.5 → 191.8 at High and Ultra), and `vram_peak_mb` by 11.3 MB.
   - §1b predicts 11.1 MB at the 1280×720 ceiling of a 1080p output (12 B/px × 0.92 M px).
+  - **At native scale** (TAAU or FSR 3.1 native, render = output), the G-buffer is the output
+    size:
+
+    | Output | G-buffer at native scale |
+    |---|---|
+    | 1920×1080 | 24.9 MB |
+    | 2560×1440 | 44.2 MB |
+    | 3840×2160 | 99.5 MB |
+
+    §1b's 11–25 MB envelope assumes a render-scale ceiling of 0.67 or less at 1440p and 4K.
+    Native at 4K is about 4× that. Even so, it stays far inside the per-preset VRAM budgets
+    perf-gate checks (4–12 GB).
   - On lavapipe the same growth is 1.2 MB at 427×240 and 2.7 MB at 640×360. Compat does not
     change.

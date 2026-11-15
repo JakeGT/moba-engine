@@ -3,8 +3,9 @@
 //! `crate::vendor` (ADR-0020 §6a); call sites never `cfg`.
 //!
 //! **Inputs** ([`UpscaleInputs`]) are all at render resolution, in the render sub-rectangle
-//! at the top-left of their allocation: the jittered linear HDR colour, depth (`D32_SFLOAT`,
-//! reversed-Z with 1 near and 0 far, finite far plane: ADR-0023 §1c), `motion`
+//! at the top-left of their allocation: the jittered linear HDR colour, depth (`D32_SFLOAT`
+//! with a finite far plane, in the convention [`UpscaleInputs::depth_convention`] names:
+//! reversed-Z, 1 near and 0 far, on Tiered, ADR-0023 §1c), `motion`
 //! (`R16G16_SFLOAT`, render pixels from the current sample to its previous position, x right
 //! and y down, without jitter: every back end takes it with a scale of (1, 1)), `reactive`
 //! and `tc_mask` (`R8_UNORM`), a 1×1 `R32_SFLOAT` linear exposure multiplier, and the frame's
@@ -24,6 +25,7 @@ pub(crate) mod taau;
 
 use ash::vk;
 
+pub(crate) use crate::depth::DepthConvention;
 pub(crate) use crate::post::{UpscaleMode, UpscalerKind};
 pub(crate) use crate::temporal::Extent;
 
@@ -43,9 +45,16 @@ pub(crate) struct UpscaleImage {
 pub(crate) struct UpscaleInputs {
     /// The jittered linear HDR colour.
     pub(crate) color: UpscaleImage,
-    /// Depth, `D32_SFLOAT`, reversed-Z: 1 near, 0 far, finite far plane (ADR-0023 §1c; the
-    /// upscalers run only on Tiered, which is always reversed).
+    /// Depth, `D32_SFLOAT`, finite far plane, in [`Self::depth_convention`].
     pub(crate) depth: UpscaleImage,
+    /// Which way `depth` runs (ADR-0023 §1c, amendment 1 item 4): the renderer's main-view
+    /// convention, reversed on Tiered. **Every back end reads it**: its depth maths (TAAU's
+    /// linearisation, FSR 3.1's `device_to_view_depth`) follows it, and a back end built for
+    /// one convention (TAAU's and FSR 3.1's shaders are reversed-only) refuses the other with
+    /// [`expect_depth_convention`]. N1c's back ends set their inverted-depth flags from it
+    /// (DLSS `NVSDK_NGX_DLSS_Feature_Flags_DepthInverted`, FSR 4
+    /// `FFX_UPSCALE_ENABLE_DEPTH_INVERTED`, XeSS `XESS_INIT_FLAG_INVERTED_DEPTH`).
+    pub(crate) depth_convention: DepthConvention,
     /// Motion vectors, `R16G16_SFLOAT`, render pixels to the previous position.
     pub(crate) motion: UpscaleImage,
     /// FSR's reactive mask (`R8_UNORM`): particles and distortion.
@@ -73,6 +82,22 @@ pub(crate) struct UpscaleInputs {
     /// this slot's previous submission, so per-slot state (descriptor sets, constants) is
     /// free to rewrite, also after recorded frames were dropped unsubmitted.
     pub(crate) frame_slot: usize,
+}
+
+/// Checks that `inputs` carry the depth convention a back end's shaders were built for.
+///
+/// # Panics
+/// When they do not: the renderer handed a back end a depth it would misread (every tiered
+/// frame is reversed, so this is a renderer bug, not a device or settings condition).
+pub(crate) fn expect_depth_convention(
+    kind: UpscalerKind,
+    built_for: DepthConvention,
+    inputs: &UpscaleInputs,
+) {
+    assert_eq!(
+        inputs.depth_convention, built_for,
+        "{kind:?} is built for {built_for:?} depth (ADR-0023 §1c)"
+    );
 }
 
 /// The upscaler's output: `hdr_out`, `RGBA16F` storage at output resolution, in `GENERAL`.
@@ -270,8 +295,39 @@ fn new_fsr3(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Inputs with null images, for tests of a back end's CPU side.
+    pub(crate) fn inputs() -> UpscaleInputs {
+        let image = UpscaleImage {
+            image: vk::Image::null(),
+            view: vk::ImageView::null(),
+            format: vk::Format::UNDEFINED,
+            extent: vk::Extent2D::default(),
+        };
+        UpscaleInputs {
+            color: image,
+            depth: image,
+            depth_convention: DepthConvention::Reversed,
+            motion: image,
+            reactive: image,
+            transparency: image,
+            exposure: image,
+            jitter: [0.0; 2],
+            render_size: vk::Extent2D {
+                width: 1280,
+                height: 720,
+            },
+            dt_ms: 16.0,
+            near: 0.1,
+            far: 100.0,
+            fov_y: 1.0,
+            reset: false,
+            sharpness: 0.0,
+            frame_slot: 0,
+        }
+    }
 
     /// TAAU rounds to nearest (amendment 2, item 19); FSR 3.1's SDK truncates.
     #[test]

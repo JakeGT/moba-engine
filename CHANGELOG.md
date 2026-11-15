@@ -155,6 +155,20 @@ the semver check):
   - `MOBA_DEBUG_VIEW` gains `albedo`, `normal`, `roughness`, `metallic`, `model`, `rim-slot`
     and `flags` (`TemporalDebugView`), drawn by a `gbuffer_debug` compute pass after
     `temporal`. The tiered path now requires `maxColorAttachments ≥ 8`.
+  - **The upscalers' depth contract is explicit:** `UpscaleInputs::depth_convention`, read by
+    every back end. TAAU and FSR 3.1 derive their depth maths from it and refuse a convention
+    their shaders were not built for.
+  - **The G-buffer is stored only for a reader:** a debug view or the motion probe. Otherwise
+    the prepass stores it `DONT_CARE`.
+  - **Fix: the G-buffer on lavapipe.** The prepass's motion write mask is now RGBA, which is
+    still exactly R and G on its two-channel format. Lavapipe applied attachment 0's mask to
+    every attachment, which dropped the G-buffer's blue and alpha.
+  - **The motion probe checks the G-buffer.** It reads `gb1` and `gb2` back and checks the
+    model, flags, F0 and rim slot per draw class, and `UNLIT` on the sky.
+  - **`moba-shaders` drops the N1a motion prepass modules**, unused since the G-buffer
+    prepass replaced them: `UNIT_MOTION_VERT`, `SKINNED_MOTION_VERT`, `VAT_MOTION_VERT`,
+    `PREPASS_MOTION_FRAG` and `PREPASS_MOTION_IDS_FRAG`, and their `MODULES` entries. None was
+    in a release (v0.4.1 has none of them).
 - **Asset licence and provenance gate, and MikkTSpace tangents (next-gen roadmap A0,
   [ADR-0022](docs/adr/0022-provenance-gate-mikktspace.md)):**
   - Every file in `content/`'s asset directories now has a provenance entry in its

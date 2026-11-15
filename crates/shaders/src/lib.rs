@@ -182,14 +182,6 @@ pub const WATER_REFRACTION_FRAG: &[u8] =
 pub const TOOLCHAIN_SMOKE_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/toolchain_smoke.slang.spv"));
 
-/// Unit depth pre-pass with motion vectors (`unit.vert` + `DEPTH_PREPASS` + `MOTION_VECTORS`, ADR-0021 §2).
-pub const UNIT_MOTION_VERT: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/unit_motion.vert.spv"));
-/// Skinned depth pre-pass with motion vectors (previous bone palette, ADR-0021 §2).
-pub const SKINNED_MOTION_VERT: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/skinned_motion.vert.spv"));
-/// VAT depth pre-pass with motion vectors (previous VAT pose, ADR-0021 §2).
-pub const VAT_MOTION_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vat_motion.vert.spv"));
 /// Terrain depth pre-pass with camera motion (ADR-0021 §2).
 pub const TERRAIN_MOTION_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/terrain_motion.vert.spv"));
@@ -199,12 +191,6 @@ pub const FOLIAGE_MOTION_VERT: &[u8] =
 /// Foliage colour pass with an `invariant` position (matches `foliage_motion.vert`'s depth).
 pub const FOLIAGE_TIERED_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/foliage_tiered.vert.spv"));
-/// Pre-pass fragment shader writing motion vectors (ADR-0021 §2a).
-pub const PREPASS_MOTION_FRAG: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/prepass_motion.frag.spv"));
-/// Pre-pass fragment shader writing motion vectors and the unit mask (`PREPASS_IDS`).
-pub const PREPASS_MOTION_IDS_FRAG: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/prepass_motion_ids.frag.spv"));
 /// Sky motion vectors (camera rotation only, ADR-0021 §2).
 pub const SKY_MOTION_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion.frag.spv"));
 /// Water's transparency-and-composition mask (ADR-0021 §2b).
@@ -569,18 +555,6 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: TOOLCHAIN_SMOKE_SLANG,
     },
     ShaderModule {
-        name: "unit_motion.vert",
-        spirv: UNIT_MOTION_VERT,
-    },
-    ShaderModule {
-        name: "skinned_motion.vert",
-        spirv: SKINNED_MOTION_VERT,
-    },
-    ShaderModule {
-        name: "vat_motion.vert",
-        spirv: VAT_MOTION_VERT,
-    },
-    ShaderModule {
         name: "terrain_motion.vert",
         spirv: TERRAIN_MOTION_VERT,
     },
@@ -591,14 +565,6 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "foliage_tiered.vert",
         spirv: FOLIAGE_TIERED_VERT,
-    },
-    ShaderModule {
-        name: "prepass_motion.frag",
-        spirv: PREPASS_MOTION_FRAG,
-    },
-    ShaderModule {
-        name: "prepass_motion_ids.frag",
-        spirv: PREPASS_MOTION_IDS_FRAG,
     },
     ShaderModule {
         name: "sky_motion.frag",

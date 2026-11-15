@@ -997,8 +997,11 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
    0 with the main view, which removed every shadow on Tiered, so the shadow clear is now
    separate from the main view's.
 3. **Every tiered depth consumer switched together** (§1c): the prepass and the scene, the
-   overlay prepass, the sky (`sky_reversed.vert`), water's depth fade (`MOBA_REVERSED_Z` on
-   `water_tiered`/`water_refraction_tiered`), soft particles and the distortion draw (the VFX
+   overlay prepass, the sky (`sky_reversed.vert`), water (its depth fade reconstructs through
+   the environment's inverse view-projection, which is already reversed, so it needs no
+   define; `MOBA_REVERSED_Z` on `water_tiered`/`water_refraction_tiered` matters only to the
+   refraction branch's depth compare; the scene picks those modules from the depth
+   convention, not from the overlay), soft particles and the distortion draw (the VFX
    pipelines' compare op and reconstruction), GTAO (`gtao_reversed.frag`), contact shadows
    (`contact_shadows_reversed.frag`), TAAU's nearest-depth cross and linearisation, and the
    motion probe's twin. Decals need no change: on both paths they are applied inside the
@@ -1006,12 +1009,17 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
    byte-identical**, module by module, to origin/main's: the shared shaders take the
    convention from macros (`include/depth.glsl`) whose Compat expansion is the original
    expression, and only the new `*_reversed` and tiered permutations differ.
-4. **The upscalers are told.** `UpscaleInputs::depth` is documented as reversed (1 near, 0
-   far, finite far plane). FSR 3.1 builds with `FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1`,
-   `device_to_view_depth` applies the SDK's plane swap for an inverted depth, and the
-   reconstructed-depth target is cleared to the bits of 0.0 (its `InterlockedMax` far value)
-   instead of 1.0. DLSS's `DepthInverted`, FSR 4's and XeSS's inverted-depth flags belong to
-   #365 (N1c), which had not merged when this PR opened; see item 15.
+4. **The upscalers are told, explicitly.** `UpscaleInputs` gains a `depth_convention` field
+   (a change to ADR-0021 §4a's inputs), set from the renderer's main-view convention, and
+   **every back end must read it**. TAAU's linearisation and FSR 3.1's `device_to_view_depth`
+   are computed from it (the SDK's plane swap for an inverted depth). Both back ends' shaders
+   are built for reversed-Z only (TAAU's nearest-depth cross takes the largest depth; FSR 3.1
+   builds with `FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1`, and its reconstructed-depth target
+   is cleared to the bits of 0.0, its `InterlockedMax` far value), so each declares that
+   convention and `record` refuses another (`expect_depth_convention`, a panic: a renderer
+   bug). Unit tests tie each back end's declared convention to its shader source, its far
+   value and the refusal. The vendor back ends' inverted-depth flags belong to #365 (N1c);
+   see item 15.
 5. **The G-buffer fragment stages are GLSL, not new Slang shaders** (departs from §1e). They
    are `GBUFFER` permutations of today's forward `unit.frag`, `terrain.frag` and
    `foliage.frag` (11 new modules in all, with the `GBUFFER` vertex permutations of `unit`,
@@ -1051,7 +1059,13 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
     stored bytes do not depend on the device's float-to-UNORM rounding. The octahedral map
     folds about +y in the (x, z) plane, because the map's normals are mostly +y. Measured by
     the twin tests over a dense sphere: maximum angular error 0.237°, mean 0.084° (bounds 0.25° and 0.088°).
-    sRGB 8-bit relative step at most 4.6 %. The F0 0.04 default stores 128.
+    sRGB 8-bit relative step at most 4.6 %. The F0 0.04 default stores 128. The shader
+    therefore hands the float-to-UNORM conversion a value within an ulp of an integer, never
+    one halfway between two. Vulkan still lets that conversion round to either neighbouring
+    integer, so a conformant device may store `k ± 1` where the scaled value lands an ulp off
+    `k`. Lavapipe, CI's device, stores `k` for every value `gbuffer-smoke` draws, so the smoke's
+    byte-for-byte comparison holds there; on another device a one-LSB difference is a
+    conformant rounding, not an encoding bug.
 11. **Gate 1's lavapipe check is `gbuffer-smoke`** (`crates/tools/src/bin/gbuffer-smoke.rs`, in
     the `tiered-temporal` job). It raster-encodes 4,096 surfaces over the eight models, every
     flag combination and rim slots 0–15 through the GLSL encoder. It reads the three targets
@@ -1065,15 +1079,47 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
     with N2b's passes. The view is a compute pass, `gbuffer_debug`, after `temporal`. It
     overwrites `hdr_out` with the decoded channel (nearest render pixel, divided by the
     exposure as TAAU's views are), and it is in the graph only while a G-buffer view is
-    selected. It reads `hdr_out` as well as writing it (a new `StorageImageReadWrite`
-    access), so the upscaler stays live and its history and timings are the frame's.
+    selected. The pass only writes `hdr_out`; the graph records that write as a new
+    `StorageImageReadWrite` access. A plain write would make the upscaler's write of
+    `hdr_out` dead, and the graph would cull the `temporal` pass. The read-write access
+    keeps it live, so its history and timings stay the frame's.
 13. **Admission:** `maxColorAttachments ≥ 8` joined the tiered limits (§1d), with a capability
     test.
 14. **Graph:** the G-buffer adds three render-resolution transients and, with a debug view,
     one pass. Every frame variant still shares its transients and start states (unit tests).
-15. **#365 (N1c):** *to be completed before merge (see the PR): whether DLSS
-    `DepthInverted`, FSR 4's and XeSS's inverted-depth flags were wired here or are left to
-    #365.*
+15. **#365 (N1c) wires the vendor flags, not this PR.** #365 (head `783bc82`) is open and
+    blocked on a maintainer decision, so N2a merges first. When #365 merges main it must set,
+    from `UpscaleInputs::depth_convention` (reversed on every tiered frame):
+    - **DLSS:** `NVSDK_NGX_DLSS_Feature_Flags_DepthInverted` in the feature-create flags;
+    - **FSR 4:** `FFX_UPSCALE_ENABLE_DEPTH_INVERTED` in the context-creation flags;
+    - **XeSS:** `XESS_INIT_FLAG_INVERTED_DEPTH` in the init flags.
+
+    Each back end's depth handling then gets the same test as TAAU's and FSR 3.1's (item 4).
+    Without those flags, a vendor upscaler would read the far plane as the near one and
+    reject the history everywhere.
+16. **The G-buffer is stored only for a reader, and its content is checked on lavapipe.**
+    - **Stored only when read.** Nothing reads `gb0`–`gb2` in N2a except a debug view and the
+      motion probe's readback. Without one of those, the prepass stores them `DONT_CARE`, so
+      a tile-based or compressing GPU need not write them out. The graph still records the
+      pass's colour writes. N2b's lighting will need `STORE`.
+    - **Write masks.** On lavapipe (Mesa 26.0.8 on CI and 26.2.5 locally), the prepass
+      pipelines' per-attachment colour write masks were not honoured: attachment 0's mask
+      (motion's R|G) reached every attachment. That dropped `gb0`–`gb2`'s blue and alpha (the
+      roughness, the flags and the model), so on lavapipe every surface read as `UNLIT`. The
+      RTX 5070 Ti honoured the masks. The trigger is inferred, not traced in Mesa: these
+      pipelines differ only in their masks, while pipelines that also differ in blending (the
+      VFX, `tc_mask`, the overlay) behave.
+    - **The fix.** Motion's mask is now RGBA. On its two-channel `R16G16_SFLOAT` format that
+      writes exactly R and G on any device. The remaining differences are harmless under
+      attachment 0's mask: the unit IDs' R mask on an `R8_UINT` target, and the empty masks of
+      outputs the shader never writes (the terrain's and foliage's ID slot, the sky's
+      G-buffer).
+    - **The check.** The motion probe (`scripts/motion-probe.sh`, CI `renderer-gate`) reads
+      `gb1` and `gb2` back. It checks each draw class against item 9: units, skinned and VAT
+      are `STANDARD`, F0 0.04, `UNIT | NO_FOG_OF_WAR`; terrain is `STANDARD`, F0 0.04, no
+      flags; foliage is `FOLIAGE`; every rim slot is 0. A third frame at the horizon checks
+      that the sky's pixels keep the clear value (`UNLIT`, every bit 0). This is gate 1's
+      in-frame complement to `gbuffer-smoke`, which tests the encoder alone.
 
 ## Corrections to the roadmap
 

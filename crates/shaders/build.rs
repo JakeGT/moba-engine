@@ -151,21 +151,6 @@ const PERMUTATIONS: &[Permutation] = &[
     },
     // Temporal AA/upscaling and the gameplay overlay (tiered, ADR-0021 §2 and §5).
     Permutation {
-        source: "unit.vert",
-        output: "unit_motion.vert",
-        defines: &["DEPTH_PREPASS", "MOTION_VECTORS"],
-    },
-    Permutation {
-        source: "skinned.vert",
-        output: "skinned_motion.vert",
-        defines: &["DEPTH_PREPASS", "MOTION_VECTORS"],
-    },
-    Permutation {
-        source: "vat.vert",
-        output: "vat_motion.vert",
-        defines: &["DEPTH_PREPASS", "MOTION_VECTORS"],
-    },
-    Permutation {
         source: "terrain.vert",
         output: "terrain_motion.vert",
         defines: &["MOTION_VECTORS"],
@@ -179,11 +164,6 @@ const PERMUTATIONS: &[Permutation] = &[
         source: "foliage.vert",
         output: "foliage_tiered.vert",
         defines: &["FOLIAGE_INVARIANT"],
-    },
-    Permutation {
-        source: "prepass_motion.frag",
-        output: "prepass_motion_ids.frag",
-        defines: &["PREPASS_IDS"],
     },
     Permutation {
         source: "terrain.frag",

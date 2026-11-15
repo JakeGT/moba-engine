@@ -98,25 +98,49 @@ impl GBufferDebugPass {
             &[set_layout.handle()],
             &push,
         )?;
-        let module = shaders.module(device, "gbuffer_debug.slang")?;
-        let stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(compute)
-            .module(module.handle())
-            .name(c"main");
-        let handle = device.create_compute_pipeline(
-            &vk::ComputePipelineCreateInfo::default()
-                .stage(stage)
-                .layout(layout.handle()),
-        )?;
+        let pipeline = Self::build(device, shaders, layout.handle())?;
         Ok(Self {
             device: device.device.clone(),
-            pipeline: GraphicsPipeline::from_raw(device.device.clone(), handle),
+            pipeline,
             layout,
             _set_layout: set_layout,
             _pool: pool,
             sets,
             view,
         })
+    }
+
+    fn build(
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+        layout: vk::PipelineLayout,
+    ) -> RenderResult<GraphicsPipeline> {
+        let module = shaders.module(device, "gbuffer_debug.slang")?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(module.handle())
+            .name(c"main");
+        let handle = device.create_compute_pipeline(
+            &vk::ComputePipelineCreateInfo::default()
+                .stage(stage)
+                .layout(layout),
+        )?;
+        Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
+    }
+
+    /// Debug builds' shader hot reload: a new pipeline from `shaders` (installed with
+    /// [`Self::install_pipeline`]).
+    pub(crate) fn build_pipeline(
+        &self,
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+    ) -> RenderResult<GraphicsPipeline> {
+        Self::build(device, shaders, self.layout.handle())
+    }
+
+    /// Replaces the pipeline (the device is idle).
+    pub(crate) fn install_pipeline(&mut self, pipeline: GraphicsPipeline) {
+        self.pipeline = pipeline;
     }
 
     /// Records the pass into `cmd` for frame-in-flight slot `frame_slot` (its fence was
@@ -142,24 +166,24 @@ impl GBufferDebugPass {
         let output = [vk::DescriptorImageInfo::default()
             .image_view(targets.output)
             .image_layout(vk::ImageLayout::GENERAL)];
-        let mut writes: Vec<vk::WriteDescriptorSet<'_>> = inputs
-            .iter()
-            .enumerate()
-            .map(|(binding, info)| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(u32::try_from(binding).expect("small"))
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .image_info(info)
-            })
-            .collect();
-        writes.push(
+        let sampled = |binding: u32, info| {
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(binding)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(info)
+        };
+        let writes = [
+            sampled(0, &inputs[0]),
+            sampled(1, &inputs[1]),
+            sampled(2, &inputs[2]),
+            sampled(3, &inputs[3]),
             vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(4)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .image_info(&output),
-        );
+        ];
         let push = DebugPush {
             render_size: [targets.render_size.width, targets.render_size.height],
             output_size: [targets.output_size.width, targets.output_size.height],

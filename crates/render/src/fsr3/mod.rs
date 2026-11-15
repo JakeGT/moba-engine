@@ -29,7 +29,13 @@ use ash::vk;
 
 pub(crate) use context::{Fsr3, SET_RING};
 
+use crate::depth::DepthConvention;
 use crate::upscale::UpscaleMode;
+
+/// The depth convention the FSR 3.1 passes are built for: `moba-shaders` compiles them with
+/// `FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1` (ADR-0023 §1c). [`Fsr3`] refuses inputs in
+/// another convention, and its constants and reconstructed-depth clear follow this one.
+pub(crate) const DEPTH_CONVENTION: DepthConvention = DepthConvention::Reversed;
 
 /// The FSR 3.1 quality modes by ratio (output ÷ render per axis), ADR-0021 §4b.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

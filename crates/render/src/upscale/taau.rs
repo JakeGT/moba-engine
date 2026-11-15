@@ -21,7 +21,10 @@
 use ash::vk;
 use bytemuck::{Pod, Zeroable, bytes_of};
 
-use super::{Extent, TemporalUpscaler, UpscaleInputs, UpscaleMode, UpscaleOutput, UpscalerKind};
+use super::{
+    DepthConvention, Extent, TemporalUpscaler, UpscaleInputs, UpscaleMode, UpscaleOutput,
+    UpscalerKind, expect_depth_convention,
+};
 use crate::device::DeviceContext;
 use crate::error::RenderResult;
 use crate::resources::{
@@ -93,16 +96,27 @@ pub(crate) struct TaauPush {
     flags: u32,
 }
 
-/// `(p22, p23)` with linear depth `p23 / (depth + p22)` for the upscaler inputs' reversed-Z
-/// depth (1 near, 0 far, ADR-0023 §1c) with a finite far plane; `(0, 1)` (linear = 1/d, still
-/// monotonic) without one.
+/// The depth convention `temporal_taau.slang` is built for: its nearest-depth cross takes
+/// the largest depth (ADR-0023 §1c).
+pub(crate) const DEPTH_CONVENTION: DepthConvention = DepthConvention::Reversed;
+
+/// `(p22, p23)` with linear depth `p23 / (depth + p22)` for a depth in `convention` with a
+/// finite far plane: reversed-Z (1 near, 0 far, ADR-0023 §1c) or forward (0 near, 1 far).
+/// Without valid planes, a monotonic stand-in: `1/d` reversed, `1/(1 − d)` forward.
 #[must_use]
-pub(crate) fn depth_linearisation(near: f32, far: f32) -> (f32, f32) {
-    if near.is_finite() && far.is_finite() && near > 0.0 && far > near {
-        let range = far - near;
-        (near / range, near * far / range)
-    } else {
-        (0.0, 1.0)
+pub(crate) fn depth_linearisation(near: f32, far: f32, convention: DepthConvention) -> (f32, f32) {
+    let planes = near.is_finite() && far.is_finite() && near > 0.0 && far > near;
+    match (convention, planes) {
+        (DepthConvention::Reversed, true) => {
+            let range = far - near;
+            (near / range, near * far / range)
+        }
+        (DepthConvention::Forward, true) => {
+            let range = far - near;
+            (-far / range, -near * far / range)
+        }
+        (DepthConvention::Reversed, false) => (0.0, 1.0),
+        (DepthConvention::Forward, false) => (-1.0, -1.0),
     }
 }
 
@@ -316,7 +330,7 @@ impl Taau {
 
     /// The push block for this frame.
     fn push(&self, inputs: &UpscaleInputs, out: &UpscaleOutput, reset: bool) -> TaauPush {
-        let (p22, p23) = depth_linearisation(inputs.near, inputs.far);
+        let (p22, p23) = depth_linearisation(inputs.near, inputs.far, inputs.depth_convention);
         let sharpness = if inputs.sharpness.is_finite() {
             inputs.sharpness.clamp(0.0, 1.0)
         } else {
@@ -366,6 +380,7 @@ impl TemporalUpscaler for Taau {
         inputs: &UpscaleInputs,
         out: &UpscaleOutput,
     ) {
+        expect_depth_convention(UpscalerKind::Taau, DEPTH_CONVENTION, inputs);
         self.barriers(cmd);
         let reset = self.reset || inputs.reset;
         let set = self.sets[inputs.frame_slot % SET_RING];
@@ -559,16 +574,49 @@ mod tests {
     }
 
     #[test]
-    fn depth_linearisation_inverts_the_engine_projection() {
+    fn depth_linearisation_inverts_the_engine_projection_in_either_convention() {
         let (near, far) = (0.1_f32, 1_000.0_f32);
-        let (p22, p23) = depth_linearisation(near, far);
-        // Reversed-Z depth of a point at view distance z (1 near, 0 far).
-        for z in [0.5_f32, 10.0, 300.0] {
-            let depth = 1.0 - (far / (far - near) - far * near / ((far - near) * z));
-            let linear = p23 / (depth + p22);
-            assert!((linear - z).abs() < z * 1e-3, "{linear} vs {z}");
+        for convention in [DepthConvention::Reversed, DepthConvention::Forward] {
+            let (p22, p23) = depth_linearisation(near, far, convention);
+            for z in [near, 0.5_f32, 10.0, 300.0, far] {
+                // Forward depth of a point at view distance z (0 near, 1 far), reversed
+                // as 1 − d.
+                let forward = far / (far - near) - far * near / ((far - near) * z);
+                let depth = match convention {
+                    DepthConvention::Forward => forward,
+                    DepthConvention::Reversed => 1.0 - forward,
+                };
+                let linear = p23 / (depth + p22);
+                assert!(
+                    (linear - z).abs() < z * 2e-3,
+                    "{convention:?}: {linear} vs {z}"
+                );
+            }
         }
-        assert_eq!(depth_linearisation(0.0, 0.0), (0.0, 1.0));
+        assert_eq!(
+            depth_linearisation(0.0, 0.0, DepthConvention::Reversed),
+            (0.0, 1.0)
+        );
+    }
+
+    /// TAAU's inverted-depth handling matches the convention it claims (ADR-0023 amendment 1
+    /// item 4): its shader's nearest-depth cross takes the largest depth exactly when the
+    /// back end is built for reversed-Z, and it refuses inputs in the other convention.
+    #[test]
+    fn taau_depth_handling_matches_its_convention() {
+        let shader = include_str!("../../../shaders/shaders/slang/temporal_taau.slang");
+        let reversed_cross = shader.contains("if (z > nearest)");
+        let forward_cross = shader.contains("if (z < nearest)");
+        assert_eq!(reversed_cross, DEPTH_CONVENTION.is_reversed());
+        assert_eq!(forward_cross, !DEPTH_CONVENTION.is_reversed());
+        let mut inputs = crate::upscale::tests::inputs();
+        inputs.depth_convention = DEPTH_CONVENTION;
+        expect_depth_convention(UpscalerKind::Taau, DEPTH_CONVENTION, &inputs);
+        inputs.depth_convention = DepthConvention::Forward;
+        let refused = std::panic::catch_unwind(|| {
+            expect_depth_convention(UpscalerKind::Taau, DEPTH_CONVENTION, &inputs);
+        });
+        assert!(refused.is_err(), "TAAU must refuse forward depth");
     }
 
     #[test]

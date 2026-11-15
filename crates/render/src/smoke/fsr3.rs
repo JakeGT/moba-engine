@@ -941,6 +941,7 @@ fn run_once(gpu: &Headless, poison: bool) -> RenderResult<Run> {
         let inputs = UpscaleInputs {
             color: Targets::image(&targets.color, vk::Format::R16G16B16A16_SFLOAT, max),
             depth: Targets::image(&targets.depth, vk::Format::D32_SFLOAT, max),
+            depth_convention: crate::depth::DepthConvention::Reversed,
             motion: Targets::image(&targets.motion, vk::Format::R16G16_SFLOAT, max),
             reactive: Targets::image(&targets.reactive, vk::Format::R8_UNORM, max),
             transparency: Targets::image(&targets.transparency, vk::Format::R8_UNORM, max),

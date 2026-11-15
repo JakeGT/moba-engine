@@ -12,10 +12,14 @@
 //! [`encode`] and [`decode`] are the twins of `encode_gbuffer` in
 //! `shaders/include/gbuffer.glsl` (the G-buffer fragment stages) and `encode_gbuffer` /
 //! `decode_gbuffer` in `shaders/slang/lib/gbuffer.slang` (the debug views, N2b's lighting).
-//! All three quantise explicitly, `floor(x · (2^b − 1) + 0.5)`, so the stored bytes do not
-//! depend on the device's float-to-UNORM rounding: a shader writes `k / (2^b − 1)`, which every
-//! conformant device stores as `k`. `gbuffer-smoke` checks the shaders' bytes against
-//! [`encode`] on a device (verification gate 1).
+//! All three quantise explicitly, `floor(x · (2^b − 1) + 0.5)`, so a shader writes the float
+//! nearest `k / (2^b − 1)` and the device's float-to-UNORM conversion starts from a value
+//! within an ulp of an integer, not from one halfway between two. Vulkan lets that conversion
+//! round to either neighbouring integer, so a conformant device may still store `k ± 1`
+//! where the scaled value lands an ulp off `k`; lavapipe (CI's device) stores `k` for every
+//! value `gbuffer-smoke` draws. `gbuffer-smoke` checks the shaders' bytes against [`encode`]
+//! exactly on a device (verification gate 1), so on another device a one-LSB difference is a
+//! conformant rounding, not an encoding bug.
 //!
 //! **Model data** is kept in physical units in [`SurfaceParams::model_data`] and mapped to
 //! `[0, 1]` per model (§6c): a dielectric F0 as `sqrt(F0 / 0.16)`, film thickness over

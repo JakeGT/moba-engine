@@ -2215,6 +2215,11 @@ impl Renderer {
             .as_ref()
             .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
             .transpose()?;
+        let gbuffer_debug = self
+            .gbuffer_debug
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
         // Last of the builds: the back end replaces its own pipeline only on success.
         if let Some(temporal) = self.temporal.as_mut() {
             temporal
@@ -2223,6 +2228,9 @@ impl Renderer {
         }
         self.scene.install_pipelines(scene);
         if let (Some(pass), Some(pipeline)) = (self.exposure_linear.as_mut(), exposure_linear) {
+            pass.install_pipeline(pipeline);
+        }
+        if let (Some(pass), Some(pipeline)) = (self.gbuffer_debug.as_mut(), gbuffer_debug) {
             pass.install_pipeline(pipeline);
         }
         if let (Some(pass), Some(pipeline)) = (self.overlay.as_mut(), overlay) {
@@ -3000,6 +3008,7 @@ impl Renderer {
                         gbuffer: resources
                             .temporal
                             .map(|temporal| temporal.gbuffer.map(|id| self.transient(id).view())),
+                        gbuffer_store: self.frame_spec.gbuffer_debug || self.frame_spec.readback,
                         lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                     },
@@ -3367,6 +3376,7 @@ impl Renderer {
                         let inputs = UpscaleInputs {
                             color: image(plan.resources.hdr, self.hdr_format, alloc),
                             depth: image(plan.resources.depth, self.frame_spec.depth_format, alloc),
+                            depth_convention: self.frame_spec.depth,
                             motion: image(resources.motion, frame_graph::MOTION_FORMAT, alloc),
                             reactive: image(resources.reactive, frame_graph::MASK_FORMAT, alloc),
                             transparency: image(resources.tc_mask, frame_graph::MASK_FORMAT, alloc),
