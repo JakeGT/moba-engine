@@ -15,7 +15,7 @@ on any failure. Checks:
   point and face domains, INT16_2D (tangent space), mesh data shared by two objects, and
   after an exception inside the block;
 - the guard raises, naming the cause, for an Edge Split modifier, a Mirror modifier and
-  Subdivision + Triangulate (corner count), a Weighted Normal modifier and a shape key under an
+  Subdivision + Triangulate, and Triangulate on quads (topology), a Weighted Normal modifier and a shape key under an
   Armature modifier, and passes an Armature modifier alone.
 """
 import os
@@ -68,11 +68,12 @@ def repro_quad(name="mikk-repro"):
     return link(me, name)
 
 
-def sphere(name, smooth=True):
+def sphere(name, smooth=True, triangulated=True):
     me = bpy.data.meshes.new(name)
     bm = bmesh.new()
     bmesh.ops.create_uvsphere(bm, u_segments=8, v_segments=6, radius=1.0)
-    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    if triangulated:
+        bmesh.ops.triangulate(bm, faces=bm.faces[:])
     for f in bm.faces:
         f.smooth = smooth
     bm.to_mesh(me)
@@ -232,14 +233,22 @@ def check_guard():
     ob.modifiers.new("mirror", "MIRROR")
     error = guarded(ob)
     check("guard: Mirror raises on the corner count",
-          error is not None and "corner count" in error and "NOT RESTORED" not in error, error)
+          error is not None and "changes topology" in error and "NOT RESTORED" not in error,
+          error)
+    reset()
+    ob = sphere("triangulate", triangulated=False)
+    ob.modifiers.new("triangulate", "TRIANGULATE")
+    error = guarded(ob)
+    check("guard: Triangulate on quads raises, saying it changes topology",
+          error is not None and "changes topology" in error and "TRIANGULATE" in error
+          and "NOT RESTORED" not in error, error)
     reset()
     ob = sphere("subsurf")
     ob.modifiers.new("subsurf", "SUBSURF")
     ob.modifiers.new("triangulate", "TRIANGULATE")
     error = guarded(ob)
     check("guard: Subdivision + Triangulate raises on the corner count",
-          error is not None and "corner count" in error and "SUBSURF" in error, error)
+          error is not None and "changes topology" in error and "SUBSURF" in error, error)
     reset()
     ob = sphere("weighted")
     ob.modifiers.new("weighted", "WEIGHTED_NORMAL").weight = 100

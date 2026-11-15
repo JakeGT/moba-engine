@@ -147,7 +147,8 @@ the semver check):
     reports the count. The loader normalises `xyz` and keeps zero tangents as zero, so these
     passed before: the A3 Kiln Warden export of art-source `3e40395` has 35 zero-length
     tangents on hammer slivers and hull-shard has 1. New `moba_assets::tangent_defects`,
-    `tangent_defects_file`, `TangentDefects` and `TANGENT_TOLERANCE` (additive). The
+    `tangent_defects_file`, `TangentDefects` and `TANGENT_TOLERANCE`, and `read_glb_file` is
+    now public (additive; `content-check` reads each file once through it). The
     `--provenance` gate is unchanged.
   - `scripts/blender/export_glb.py` quantises corner normals to the glTF exporter's 4-digit
     rounding before Blender computes tangents (`quantised_normals`, in memory, stored exactly
@@ -158,7 +159,7 @@ the semver check):
     from 1460 vertices and 0.9007 to 860 and 1.0000. `verify_glb` reports the remaining
     vertices that differ only in `TANGENT` (`tangent_splits`); the A3 Kiln Warden goes from
     212 to 0 and GLB-MIKK 0.9899 to 1.0000. Re-exporting an asset changes its tangents where
-    groups merge (the script warns), so the normal-map bake must run inside the same block
+    groups merge (the script notes it), so the normal-map bake must run inside the same block
     (new `bake_normals`, so bakes are scripted) or be redone; `--no-quantise` exports as
     before. A guard evaluates each object as the exporter does and refuses modifiers or shape
     keys whose normals the block would override; previous custom normals are restored by type

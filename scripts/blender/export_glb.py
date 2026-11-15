@@ -276,9 +276,11 @@ def _check_exported(obj, before):
            "exporting, or export with --no-quantise (ADR-0022 amendment 3)")
     corners = len(obj.data.loops)
     if len(after) != corners or len(before) != corners:
-        raise RuntimeError(f"{obj.name}: {_normal_changers(obj)} changes the corner count "
-                           f"({corners} in the mesh, {len(after)} exported), so its normals "
-                           f"cannot be quantised before tangents; {fix}")
+        raise RuntimeError(f"{obj.name}: {_normal_changers(obj)} changes topology (the corner "
+                           f"count: {corners} in the mesh, {len(after)} exported), so its "
+                           "normals cannot be quantised before tangents; apply it before "
+                           "exporting (a Triangulate: the mesh must already be triangulated), "
+                           "or export with --no-quantise (ADR-0022 amendment 3)")
     # In float64: in float32, arccos near 1 cannot resolve angles under about 0.02 degrees.
     a, b = before.astype(np.float64), after.astype(np.float64)
     lengths = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
@@ -376,9 +378,23 @@ def bake_normals(objs, **bake):
     (Cycles, the low-poly object active, an active Image Texture node in its material, and for
     selected-to-active the high-poly sources selected) and saves the image afterwards with
     `image.save()`. `bake` is passed on, for example `use_selected_to_active=True,
-    cage_extrusion=0.02`. Returns the `quantised_normals` stats."""
-    with quantised_normals(objs) as stats:
-        bpy.ops.object.bake(type="NORMAL", normal_space="TANGENT", **bake)
+    cage_extrusion=0.02`; `normal_space` defaults to "TANGENT". The bake runs in the rest
+    pose, as `check_scene` measures it (free normals do not follow deformation): every armature
+    in `objs` or deforming one of them is set to `pose_position = "REST"` for the bake and
+    restored afterwards. Returns the `quantised_normals` stats."""
+    bake.setdefault("normal_space", "TANGENT")
+    armatures = {o for o in objs if o.type == "ARMATURE"}
+    armatures |= {m.object for o in objs for m in o.modifiers
+                  if m.type == "ARMATURE" and m.object is not None}
+    saved = [(a, a.data.pose_position) for a in armatures]
+    try:
+        for a, _ in saved:
+            a.data.pose_position = "REST"
+        with quantised_normals(objs) as stats:
+            bpy.ops.object.bake(type="NORMAL", **bake)
+    finally:
+        for a, pose in saved:
+            a.data.pose_position = pose
     return stats
 
 
@@ -562,11 +578,9 @@ def main():
                   "before ADR-0022 amendment 3; the file may hold vertices that differ only in "
                   f"TANGENT ({info.get('tangent_splits')}) and GLB-MIKK may disagree", flush=True)
         elif stats["merged"]:
-            print(f"export_glb: warning: quantising the normals merged {stats['merged']} corners "
-                  "into another's tangent group, so their tangents differ from an export without "
-                  "it: bake the normal map inside quantised_normals (bake_normals), or re-bake; "
-                  "--no-quantise keeps the old tangents for a bake that cannot be redone yet",
-                  flush=True)
+            print(f"export_glb: note: {stats['merged']} corners merged; tangents follow the "
+                  "quantised normals, so the normal map must be baked inside quantised_normals "
+                  "(bake_normals); ignore this if it was", flush=True)
         if errors:
             for e in errors:
                 print(f"export_glb: error in {path}: {e}", flush=True)

@@ -648,7 +648,8 @@ tangent space.
   `MeshData::MAX_VERTICES` elements. They return `TangentDefects`; the tolerance is
   `TANGENT_TOLERANCE`. They also read `TANGENT` accessors the loader drops (meshes outside the
   default scene, primitives without `NORMAL`), so they err strict. `content-check` reads the
-  file once and passes the bytes to the count, the loader and `check_baked_tangents`.
+  file once, with the loader's own `read_glb_file` (now public), and passes the bytes to the
+  count, the loader and `check_baked_tangents`.
 - **Unchanged:**
   - the loader (a zero tangent still loads);
   - `check_baked_tangents` and the `--provenance` gate (amendment 1). The gate stays at
@@ -687,8 +688,10 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
   - On exit, each mesh's previous custom normals are restored (type and domain), each mesh on
     its own, also after an exception.
   - `main` exports inside it; `--no-quantise` exports as before (with a warning), for an asset
-    whose bake cannot be redone yet. With quantising, `main` warns when it merged corners into
-    another's tangent group (`normal_groups_merged` in the export info).
+    whose bake cannot be redone yet. With quantising, `main` prints a note when it merged corners
+    into another's tangent group (`normal_groups_merged` in the export info): standing advice
+    that the map must be baked inside the block, not an alarm, since nearly every mesh merges
+    some.
   - `verify_glb` reports `tangent_splits`: vertices equal in POSITION, NORMAL and TEXCOORD_0 but
     not in `TANGENT`, within one glTF mesh (the engine welds across the file's meshes too). It
     is information, not an error: MikkTSpace itself can give one welded vertex two tangents,
@@ -722,7 +725,8 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
   each group now has one tangent. **Re-exporting an existing asset with this script changes its
   tangents there**, and a normal map baked before is then off.
   - Bake inside the same block: `export_glb.bake_normals(objects, **bake_kwargs)` runs
-    `bpy.ops.object.bake(type="NORMAL")` inside it. Bakes made from the UI's Bake button get no
+    `bpy.ops.object.bake(type="NORMAL")` inside it (`normal_space` defaults to `TANGENT`), in
+    the rest pose: the armatures are set to `REST` for the bake and restored afterwards. Bakes made from the UI's Bake button get no
     quantisation, so a bake that goes with this convention must be scripted.
   - Measured on the repro quad, baked selected-to-active from a plane tilted 10° (128² map,
     12 237 interior texels decoded with the file's `TANGENT` and `NORMAL`): baked and exported
@@ -739,7 +743,8 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
   the repro (6 → 4 vertices, GLB-MIKK 0.3333 → 1.0000 with `--content-check`), exact restore
   (none, free normals on the corner, point and face domains, INT16 tangent-space normals,
   shared mesh data, an exception inside the block) and the guard (Edge Split, Mirror, Subdivision +
-  Triangulate, Weighted Normal and a keyed Armature raise; an Armature alone passes).
+  Triangulate, Triangulate on quads, Weighted Normal and a keyed Armature raise; an Armature
+  alone passes). A changed corner count is reported as a change of topology.
 
 **GLB-MIKK keeps the exact weld.** Amendment 2 defines GLB-MIKK as the agreement of the file's
 tangents with "the engine's own MikkTSpace on the same mesh", and §4's adapter keeps MikkTSpace's
@@ -750,7 +755,7 @@ quantised normals, Blender's exact weld and the engine's see the same normals, a
 reads 1.0000 on every test file above without a tolerance.
 
 **API additions** (additive): `moba_assets::{tangent_defects, tangent_defects_file,
-TangentDefects, TANGENT_TOLERANCE}`; in `export_glb.py`, `quantised_normals`, `bake_normals`,
+read_glb_file, TangentDefects, TANGENT_TOLERANCE}`; in `export_glb.py`, `quantised_normals`, `bake_normals`,
 `exported_normals`, `quantise`, `exporter_normals`, `tangent_splits`, `--no-quantise` and the
 `tangent_splits`, `normals_quantised` and `normal_groups_merged` fields of the export info; the
 `check_export_glb.py` script. No wire, replay, simulation-logic, state-hash or content-hash

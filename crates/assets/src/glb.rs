@@ -180,8 +180,14 @@ pub fn load_glb_file_with(path: &Path, tangents: GlbTangents) -> Result<MeshData
     load_glb_with(&read_glb_file(path)?, tangents)
 }
 
-/// The bytes of the file at `path`, refusing one larger than [`MAX_GLB_BYTES`] unread.
-fn read_glb_file(path: &Path) -> Result<Vec<u8>, GlbError> {
+/// The bytes of the `.glb` at `path`, as [`load_glb_file`] reads them: a file larger than
+/// [`MAX_GLB_BYTES`] is refused unread, and at most one byte past the cap is read if it grows
+/// meanwhile (which [`load_glb`] then refuses). For callers that pass the same bytes to
+/// several checks.
+///
+/// # Errors
+/// [`GlbError::Io`] for file errors, [`GlbError::TooLarge`] past the cap.
+pub fn read_glb_file(path: &Path) -> Result<Vec<u8>, GlbError> {
     let file = std::fs::File::open(path).map_err(|error| GlbError::Io(error.kind()))?;
     let length = file
         .metadata()

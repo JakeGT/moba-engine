@@ -1865,7 +1865,7 @@ fn check_model(
     // Read once; the counts come before the load because the loader refuses a `w` far from ±1
     // outright, and the count belongs in that refusal.
     let refused = |error| format!("{shown}: the engine's loader refuses it: {error}");
-    let bytes = read_glb(path).map_err(refused)?;
+    let bytes = moba_assets::read_glb_file(path).map_err(refused)?;
     let defects = moba_assets::tangent_defects(&bytes);
     let mesh = moba_assets::load_glb_with(&bytes, moba_assets::GlbTangents::FileOnly).map_err(
         |error| {
@@ -1927,20 +1927,6 @@ fn check_model(
         uvs: uvs.to_vec(),
         indices: mesh.indices().to_vec(),
     })
-}
-
-/// The bytes of the `.glb` at `path`, read at most one byte past the loader's cap (which then
-/// refuses it as too large), as `moba_assets::load_glb_file` reads them.
-fn read_glb(path: &Path) -> Result<Vec<u8>, moba_assets::GlbError> {
-    use std::io::Read as _;
-    let io = |error: std::io::Error| moba_assets::GlbError::Io(error.kind());
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(io)?
-        .take(moba_assets::MAX_GLB_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io)?;
-    Ok(bytes)
 }
 
 /// GLB-TANGENT: the file has baked `TANGENT`s (`baked`) and every one is a unit vector with a

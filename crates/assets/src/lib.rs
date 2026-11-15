@@ -104,7 +104,7 @@ pub use foliage::{FoliageInstance, MAX_FOLIAGE_INSTANCES, generate_foliage};
 pub use glb::{
     GlbError, GlbTangents, MAX_GLB_BYTES, MAX_JSON_BYTES, TANGENT_TOLERANCE, TangentDefects,
     check_baked_tangents, check_baked_tangents_file, load_glb, load_glb_file, load_glb_file_with,
-    load_glb_with, tangent_defects, tangent_defects_file,
+    load_glb_with, read_glb_file, tangent_defects, tangent_defects_file,
 };
 pub use grading::{
     GRADING_DIR, GradingLut, GradingLutError, MAX_GRADING_LUT_BYTES, MAX_GRADING_LUT_SIZE,

@@ -876,7 +876,8 @@ replaces each mesh's corner normals, in memory, with the exporter's own rounding
 them afterwards (ADR-0022 amendment 3).
 
 - **Re-exporting an existing asset changes its tangents** wherever corners merge, and the
-  script warns when they do (`normal_groups_merged` in the export info). A normal map baked
+  script notes it when they do (`normal_groups_merged` in the export info; ignore the note
+  if the map was baked inside the block). A normal map baked
   before is then off by up to the old tangent spread there (a median 5.8° on the Monolith's
   merged groups), so re-bake it. `--no-quantise` exports as before, with a warning, for an
   asset whose bake cannot be redone yet.
@@ -902,7 +903,8 @@ them afterwards (ADR-0022 amendment 3).
   does (Armature modifiers hidden) with and without the block, and stops with an error naming
   the object and its modifiers or shape keys when the corner count changes, the normals move by
   more than 0.01° or they are not the exporter's rounding (for example Edge Split, Mirror,
-  Subdivision, Weighted Normal, or a shape key not at 0). Apply those modifiers, or set the
+  Subdivision, Triangulate (apply it; the mesh must already be triangulated), Weighted Normal,
+  or a shape key not at 0). Apply those modifiers, or set the
   shape keys to 0, before export, or use `--no-quantise`. An Armature alone is fine.
 - A script that calls `check_scene`, `gltf_options` and `verify_glb` itself must wrap its export
   (and bake) in `quantised_normals` too.
