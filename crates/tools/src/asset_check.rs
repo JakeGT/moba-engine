@@ -273,8 +273,8 @@ const fn vocab(
     }
 }
 
-/// The §3 entries that conflict with §2 (ADR-0022 amendment 2 lists each one as a maintainer
-/// decision).
+/// The §3 entries that conflict with §2, plus Forge dark alloy's metal-chip allowance
+/// (ADR-0022 amendment 2 lists each one as an open question for the maintainer).
 pub(crate) const VOCAB: [VocabEntry; 15] = [
     vocab(
         "Void composite, matte",

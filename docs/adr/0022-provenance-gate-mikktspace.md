@@ -582,7 +582,8 @@ scale belongs in a separate `METAL` class region instead (see the open questions
    35 dB. A bake under 35 dB warns and points to `--format rgba8`. Should the default be
    `rgba8` instead?
 7. **Forge dark alloy, scaled.** Confirm the metal-chip allowance above, or move chipped scale
-   to a `METAL` class region.
+   to a `METAL` class region. The allowance has no cap: a class that is all chips passes the
+   dielectric check (the report prints the share). Should it have one?
 
 **Blender export convention** (`docs/content-authoring.md`, Blender export):
 
