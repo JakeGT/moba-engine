@@ -42,8 +42,13 @@ impl NetServer {
         let mut delta = core::mem::take(&mut self.delta);
         let mut ready_mask = 0u16;
         let mut player_mask = 0u16;
-        for slot in 0..self.config.max_clients.min(self.clients.len()) {
-            if let Some(player) = self.clients[slot].as_ref()
+        for (slot, player) in self
+            .clients
+            .iter()
+            .enumerate()
+            .take(self.config.max_clients)
+        {
+            if let Some(player) = player.as_ref()
                 && player.connected
                 && !player.spectator
             {
