@@ -6,8 +6,10 @@ The numbers here are the engine's and the art bible's, never this file's own:
   vertical FOV (`crates/client/src/app/scene_build.rs`, `crates/render/src/scene.rs`), and the
   zoom camera the same yaw and pitch at 8 m;
 - the light is Golden Crossing (`docs/art/lighting-mood.md`, option A): `sun_dir`
-  (-0.885, 0.532, 0.465) towards the sun (x east, y up, z towards the screen bottom), `[lighting]`
-  sun colour (1.0, 0.80, 0.62), intensity 1.5, IBL 0.35, the analytic zenith / horizon / ground
+  (-0.885, 0.532, 0.465) towards the sun (x east, y up; +z points up the screen at the default
+  camera, which sits on the -z side: lighting-mood's "towards the bottom of the screen" note is
+  open question 3 in ADR-0022 amendment 2), `[lighting]` sun colour (1.0, 0.80, 0.62),
+  intensity 1.5, IBL 0.35, the analytic zenith / horizon / ground
   sky with env-bake's sun-glow lobe (sun_color (2.6, 1.55, 0.85), sun_glow 6); the gameplay
   exposure targets the measured ground mean OKLab L of 0.50;
 - `L_ref` is the lane grit `#906B58` (palette-and-value §6) in that sun:

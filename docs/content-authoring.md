@@ -794,7 +794,7 @@ data cannot be mixed up:
 | `normal` | `--kind normal` | `bc5` (`rg8`) | linear tangent-space X/Y, +Y up |
 | `metallic_roughness` | `--kind data` | `bc5` (`rg8`) | linear, R metallic, G roughness |
 | `mask` | `--kind mask` | `bc4` (`r8`) | linear, R |
-| terrain `splat`, `splat2` | `--kind weights` | `bc7` (`rgba8`) | linear RGBA, one layer weight per channel; the PNG needs alpha; `rgba8` for hard junctions |
+| terrain `splat`, `splat2` | `--kind weights` | `bc7` (`rgba8`) | linear RGBA, one layer weight per channel; the PNG needs alpha; `bc7` is mode 6 only and loses a lot on splats (about 17 dB on hard junctions, about 24 dB on wavy blends; only smooth two-layer ramps reach 35 dB), so a bake under 35 dB warns: use `rgba8` for any painted splat |
 
 Bake them from PNG with mips:
 
@@ -910,10 +910,13 @@ use = "accent"                 # accent (≤ +1 EV) | gameplay (≤ +2 EV)
 ```
 
 `vocab` names the class's material-vocabulary §3 entry. Where §3 gives that entry numbers
-outside its §2 row (ADR-0022 amendment 2 lists them: the Void composites, glazed ceramic,
-Void silk, fused scorch crust, cut and polished basalt, polished black stone, wet basalt,
-the emitter lattice, and void-glass, sun-glass and polished obsidian under the unit roughness
-floor), §3 applies and the report says so; for any other entry the §2 row applies.
+outside its §2 row (ADR-0022 amendment 2 lists all 14: the Void composites, glazed ceramic,
+Void silk, fused scorch crust and fracture faces, cut and polished basalt, polished black
+stone, wet basalt, the emitter lattice, and void-glass, sun-glass and polished obsidian under
+the unit roughness floor), §3 applies and the report says so. That reading of §3 as the more
+specific rule is not yet confirmed by the maintainer. `Forge dark alloy, scaled` (`OXIDE`)
+leaves its chipped texels (metalness ≥ 0.9) out of the dielectric metalness check and reports
+their share, also pending the maintainer. For any other entry the §2 row applies.
 `material_class` takes the same table form.
 
 It reports, in order:
@@ -952,7 +955,8 @@ The review file names one to six models, each with:
 - its `.glb` and source PNGs (`base`, `normal`, `mr` or `metallic` + `roughness`, and an
   optional `emissive` mask, which needs a `[models.emissive]` table with `colour`, `strength`
   and `use` = `accent` or `gameplay`). Single-channel maps are read from R, as content-check
-  reads them; `normal_xy = true` marks an RG normal map;
+  reads them; `normal_xy = true` marks an RG normal map, and a grey + alpha normal map is
+  read as X in grey and Y in alpha with Z rebuilt, like content-check (a grey one is refused);
 - a role (`hero`, `minion`, `neutral`, `structure`, `prop`) and a faction;
 - optionally a size class from silhouettes-and-scale.md, an idle pose, `tell` joints (the
   faction tell, SIL-5) and `weapon` joints with `weapon_kind = "melee" | "ranged"` (SIL-7).
@@ -1400,8 +1404,9 @@ texture arrays. A layer without a normal map is drawn flat.
 generate_terrain`, 512² by default, about 35 ms with a 384-cell heightfield in a release build) from
 the simulation's map alone: lanes, structures, spawns and walls. A baked `splat` is a linear
 RGBA texture (`texture-bake --kind weights`; `bc7` or `--format rgba8`) whose channels are the weights of
-layers 1-4 (the source PNG must have alpha; hard painted junctions band in `bc7`, which warns
-below 35 dB, so use `rgba8` for them) over the terrain square (the board plus its margin, texel (0, 0) at the corner
+layers 1-4 (the source PNG must have alpha; `bc7` is mode 6 only: about 17 dB on hard painted
+junctions and about 24 dB on wavy blends, with only smooth two-layer ramps reaching 35 dB. A
+bake under 35 dB warns, so use `rgba8` for painted splats) over the terrain square (the board plus its margin, texel (0, 0) at the corner
 before `[0, 0]`, rows along +y); `splat2` holds layers 5-8 and must match `splat`'s size and
 mip count. With `splat` but no `splat2`, layers 5-8 get no weight.
 

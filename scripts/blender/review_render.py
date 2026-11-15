@@ -32,7 +32,10 @@ The review file (TOML; paths relative to it):
     weapon_kind = "melee"                 # melee | ranged, with `weapon`
     [models.textures]                     # source PNGs, the engine's channel packing
     base = "..."; normal = "..."          # required; normal is XYZ in RGB, or set
-    normal_xy = true                      # (optional) for X in R and Y in G, Z rebuilt
+    normal_xy = true                      # (optional) for X in R and Y in G, Z rebuilt;
+                                          # a grey + alpha PNG is always X in grey and Y in
+                                          # alpha, Z rebuilt (as content-check); grey alone
+                                          # is refused
     mr = "..."                            # R metallic, G roughness (as texture-bake --kind
                                           # data); or metallic = "..." and roughness = "..."
                                           # (each read from R, like content-check)
@@ -84,6 +87,28 @@ def fail(msg):
     sys.exit(1)
 
 
+def png_colour_type(path):
+    """The PNG colour type from the IHDR (0 grey, 2 RGB, 3 palette, 4 grey + alpha, 6 RGBA)."""
+    with open(path, "rb") as f:
+        head = f.read(26)
+    if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    return head[25]
+
+
+def normal_mode(name, path, xy):
+    """How the normal map is read, the same way content-check reads it: `ga` for grey + alpha
+    (X in grey, Y in alpha, Z rebuilt), `xy` for X and Y in R and G (`normal_xy`), else `xyz`."""
+    colour = png_colour_type(path)
+    if colour is None:
+        fail(f"{name}: textures.normal {path} is not a PNG")
+    if colour == 0:
+        fail(f"{name}: textures.normal is grey: a normal map needs X and Y (RG, RGB, or grey + alpha)")
+    if colour == 4:
+        return "ga"
+    return "xy" if xy else "xyz"
+
+
 def load_review(path):
     with open(path, "rb") as f:
         doc = tomllib.load(f)
@@ -129,6 +154,8 @@ def load_review(path):
             fail(f"{m['name']}: unknown textures {sorted(unknown)}")
         m["textures"] = {k: rel(v) for k, v in tex.items()}
         m["normal_xy"] = normal_xy
+        if os.path.isfile(m["textures"]["normal"]):
+            m["normal_mode"] = normal_mode(m["name"], m["textures"]["normal"], normal_xy)
         em = m.get("emissive")
         if "emissive" in tex and not em:
             # Dropping the emission silently would pass EMIT checks it never rendered.
@@ -174,18 +201,25 @@ def red(nt, image):
     return sep.outputs["Red"]
 
 
-def normal_colour(nt, image, xy):
-    """The normal map's colour; for an XY map, Z = sqrt(1 - X^2 - Y^2) rebuilt from R and G."""
-    if not xy:
+def normal_colour(nt, image, mode):
+    """The normal map's colour. `xyz` is used as stored; `xy` (X in R, Y in G) and `ga` (X in
+    grey, Y in alpha) rebuild Z = sqrt(1 - X^2 - Y^2), as content-check reads them."""
+    if mode == "xyz":
         return image.outputs["Color"]
     sep = nt.nodes.new("ShaderNodeSeparateColor")
     nt.links.new(image.outputs["Color"], sep.inputs["Color"])
+    if mode == "ga":
+        # Grey and alpha are separate data: keep Blender from associating one with the other.
+        image.image.alpha_mode = "CHANNEL_PACKED"
+        x_src, y_src = sep.outputs["Red"], image.outputs["Alpha"]
+    else:
+        x_src, y_src = sep.outputs["Red"], sep.outputs["Green"]
     # Decode to [-1, 1]: v * 2 - 1.
     decoded = []
-    for channel in ("Red", "Green"):
+    for src in (x_src, y_src):
         mad = nt.nodes.new("ShaderNodeMath")
         mad.operation = "MULTIPLY_ADD"
-        nt.links.new(sep.outputs[channel], mad.inputs[0])
+        nt.links.new(src, mad.inputs[0])
         mad.inputs[1].default_value = 2.0
         mad.inputs[2].default_value = -1.0
         decoded.append(mad)
@@ -211,8 +245,8 @@ def normal_colour(nt, image, xy):
     z_col.inputs[1].default_value = 0.5
     z_col.inputs[2].default_value = 0.5
     comb = nt.nodes.new("ShaderNodeCombineColor")
-    nt.links.new(sep.outputs["Red"], comb.inputs["Red"])
-    nt.links.new(sep.outputs["Green"], comb.inputs["Green"])
+    nt.links.new(x_src, comb.inputs["Red"])
+    nt.links.new(y_src, comb.inputs["Green"])
     nt.links.new(z_col.outputs[0], comb.inputs["Blue"])
     return comb.outputs["Color"]
 
@@ -235,7 +269,7 @@ def textured_material(model):
         nt.links.new(red(nt, image_node(nt, tex["metallic"], True)), bsdf.inputs["Metallic"])
     nmap = nt.nodes.new("ShaderNodeNormalMap")
     normal = image_node(nt, tex["normal"], True)
-    nt.links.new(normal_colour(nt, normal, model.get("normal_xy", False)), nmap.inputs["Color"])
+    nt.links.new(normal_colour(nt, normal, model.get("normal_mode", "xyz")), nmap.inputs["Color"])
     nt.links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
     em = model.get("emissive")
     if "emissive" in tex:  # load_review refuses an emissive map without its table

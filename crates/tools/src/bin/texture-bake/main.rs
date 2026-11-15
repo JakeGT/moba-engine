@@ -11,7 +11,8 @@
 //! `--kind` fixes the colour space and the default format: `color` (sRGB, `bc7-srgb`),
 //! `normal` (tangent XY in RG, `bc5`), `data` (linear RG such as metallic/roughness, `bc5`),
 //! `weights` (four linear channels such as a terrain splat, `bc7`; the PNG must have alpha, and
-//! a bake under 35 dB warns that hard junctions want `rgba8`) and `mask` (linear R,
+//! BC7 mode 6 loses a lot on splats, about 17 dB on hard junctions and 24 dB on wavy blends,
+//! so a bake under 35 dB warns that it wants `rgba8`) and `mask` (linear R,
 //! `bc4`). `--format` may pick the kind's 8-bit fallback instead
 //! (`rgba8-srgb`, `rg8`, `rgba8`, `r8`). Mips are filtered per kind (linear-light colour,
 //! renormalised normals); see `mips.rs`. A baked BC file reports its level-0 PSNR against
@@ -64,15 +65,16 @@ struct Png {
     alpha: bool,
 }
 
-/// Below this level-0 PSNR a `weights` bake warns: hard splat junctions band in BC7.
+/// Below this level-0 PSNR a `weights` bake warns: painted splats band in BC7 mode 6 (about
+/// 17 dB on hard junctions, 24 dB on wavy blends; only smooth two-layer ramps reach 35 dB).
 const WEIGHTS_PSNR_WARN_DB: f64 = 35.0;
 
 /// The warning for a `weights` bake at `psnr` dB, if it is low enough to show.
 fn weights_warning(psnr: f64) -> Option<String> {
     (psnr < WEIGHTS_PSNR_WARN_DB).then(|| {
         format!(
-            "warning: weights level 0 is {psnr:.2} dB (< {WEIGHTS_PSNR_WARN_DB} dB): hard splat \
-             junctions band in BC7; bake with --format rgba8 to keep them exact"
+            "warning: weights level 0 is {psnr:.2} dB (< {WEIGHTS_PSNR_WARN_DB} dB): painted \
+             splats band in BC7 mode 6; bake with --format rgba8 to keep them exact"
         )
     })
 }

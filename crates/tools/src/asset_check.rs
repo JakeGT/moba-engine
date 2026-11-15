@@ -226,10 +226,12 @@ pub(crate) fn class_range(key: &str) -> Option<&'static ClassRange> {
 }
 
 /// A material-vocabulary §3 entry whose numbers disagree with its §2 class row. Where a class
-/// names one with `vocab`, the §3 numbers apply: §3 is the more specific rule (maintainer's
-/// decision, recorded in ADR-0022 amendment 2). This is a minimal slice of PBR-VOCAB-1: only
-/// the entries that conflict are data; every other entry is checked against its §2 row.
+/// names one with `vocab`, the §3 numbers apply, reading §3 as the more specific rule. That is
+/// the A1 review's reading, not yet confirmed by the maintainer: ADR-0022 amendment 2 lists each
+/// conflict as an open decision. This is a minimal slice of PBR-VOCAB-1: only the entries that
+/// conflict are data; every other entry is checked against its §2 row.
 #[derive(Clone, Copy, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent per-entry exemptions from §3.
 pub(crate) struct VocabEntry {
     /// The §3 material name, as the manifest gives it (matched ignoring case).
     pub(crate) name: &'static str,
@@ -247,6 +249,9 @@ pub(crate) struct VocabEntry {
     pub(crate) dark_metal: bool,
     /// Its §3 roughness goes below 0.08: PBR-RGH-2's floor on heroes and minions is 0.045 here.
     pub(crate) glossy: bool,
+    /// A dielectric with bare-metal chips (metalness ≥ 0.9): chip texels are left out of the
+    /// class's dielectric metalness check and reported; partial metalness still counts.
+    pub(crate) metal_chips: bool,
 }
 
 const fn vocab(
@@ -264,12 +269,13 @@ const fn vocab(
         wet: false,
         dark_metal: false,
         glossy: false,
+        metal_chips: false,
     }
 }
 
 /// The §3 entries that conflict with §2 (ADR-0022 amendment 2 lists each one as a maintainer
 /// decision).
-pub(crate) const VOCAB: [VocabEntry; 13] = [
+pub(crate) const VOCAB: [VocabEntry; 15] = [
     vocab(
         "Void composite, matte",
         "CERAM",
@@ -300,6 +306,22 @@ pub(crate) const VOCAB: [VocabEntry; 13] = [
         "§3.1 Fused scorch: crust roughness 0.7-0.9",
         (0.70, 0.90),
     ),
+    vocab(
+        "Fused scorch (fracture faces)",
+        "GLASS",
+        "§3.1 Fused scorch (CHAR / GLASS): fracture faces roughness 0.15-0.35",
+        (0.15, 0.35),
+    ),
+    VocabEntry {
+        roughness: None,
+        metal_chips: true,
+        ..vocab(
+            "Forge dark alloy, scaled",
+            "OXIDE",
+            "§3.1 Forge dark alloy, scaled: metal 0, 1 where the scale is chipped",
+            (0.0, 0.0),
+        )
+    },
     vocab(
         "Levitating basalt (cut faces)",
         "STONE-1",
@@ -1026,8 +1048,10 @@ fn classify(
         let number: u32 = id
             .parse()
             .ok()
-            .filter(|&number| number <= 255)
-            .ok_or_else(|| format!("classes: {id:?} is not a class id 0..=255"))?;
+            .filter(|&number| number < u32::from(NO_CLASS))
+            .ok_or_else(|| {
+                format!("classes: {id:?} is not a class id 0..=254 (255 is reserved for no class)")
+            })?;
         declared.push(declare(number, decl, &format!("classes.{id}"))?);
     }
     let class_of = match (&maps.class, &manifest.material_class) {
@@ -1042,6 +1066,11 @@ fn classify(
                 .collect()
         }
         (None, Some(decl)) => {
+            if declared.len() >= usize::from(NO_CLASS) {
+                return Err(String::from(
+                    "material_class: 255 classes are already declared (at most 255 in all)",
+                ));
+            }
             declared.push(declare(0, decl, "material_class")?);
             vec![(declared.len() - 1) as u8; count]
         }
@@ -1053,19 +1082,34 @@ fn classify(
         match class.entry {
             Some(entry) => {
                 let base = class_range(entry.class).expect("vocabulary classes are §2 classes");
+                let replaces = match (entry.albedo, entry.roughness) {
+                    (Some(_), Some(_)) => format!(
+                        "replaces §2 {} albedo {}-{}, roughness {}-{}",
+                        base.rule, base.albedo.0, base.albedo.1, base.roughness.0, base.roughness.1
+                    ),
+                    (Some(_), None) => format!(
+                        "replaces §2 {} albedo {}-{}",
+                        base.rule, base.albedo.0, base.albedo.1
+                    ),
+                    (None, Some(_)) => format!(
+                        "replaces §2 {} roughness {}-{}",
+                        base.rule, base.roughness.0, base.roughness.1
+                    ),
+                    (None, None) => format!("§2 {} ranges kept", base.rule),
+                };
+                let chips = if entry.metal_chips {
+                    "; chips at metalness ≥ 0.9 are left out of the dielectric check"
+                } else {
+                    ""
+                };
                 report.push(
                     &rule,
                     None,
                     format!("{}: §3 applies", entry.name),
                     format!(
-                        "{}; replaces §2 {} albedo {}-{}, roughness {}-{} (§3 is the more \
-                         specific rule; ADR-0022 amendment 2)",
+                        "{}; {replaces}{chips} (§3 read as the more specific rule, not yet \
+                         confirmed by the maintainer; ADR-0022 amendment 2)",
                         entry.source,
-                        base.rule,
-                        base.albedo.0,
-                        base.albedo.1,
-                        base.roughness.0,
-                        base.roughness.1
                     ),
                 );
             }
@@ -1462,17 +1506,36 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         {
             let mut metalness: Vec<f32> = texels.iter().map(|&i| metal_at(i as usize)).collect();
             metalness.sort_unstable_by(f32::total_cmp);
-            let (m1, m99) = (
-                percentile_sorted(&metalness, 1.0),
-                percentile_sorted(&metalness, 99.0),
-            );
+            // A §3 entry with metal chips: texels at metalness ≥ 0.9 sort last and are left out
+            // of the dielectric reading (partial metalness still counts against it).
+            let chips = if class.entry.is_some_and(|entry| entry.metal_chips) && !want_metal {
+                metalness.iter().filter(|&&m| m >= 0.9).count()
+            } else {
+                0
+            };
+            let rest = &metalness[..metalness.len() - chips];
+            let m1 = percentile_sorted(&metalness, 1.0);
+            let m99 = if rest.is_empty() {
+                0.0
+            } else {
+                percentile_sorted(rest, 99.0)
+            };
             let (ok, limit) = if want_metal {
                 (
                     m1 >= 0.9,
-                    "metal: p1 ≥ 0.9 (outside the 0.1-0.9 transition band)",
+                    String::from("metal: p1 ≥ 0.9 (outside the 0.1-0.9 transition band)"),
+                )
+            } else if chips > 0 {
+                (
+                    m99 <= 0.1,
+                    format!(
+                        "dielectric: p99 ≤ 0.1, chipped scale left out ({:.4} of the class \
+                         at metalness ≥ 0.9, §3 metal chips)",
+                        chips as f32 / metalness.len() as f32
+                    ),
                 )
             } else {
-                (m99 <= 0.1, "dielectric: p99 ≤ 0.1")
+                (m99 <= 0.1, String::from("dielectric: p99 ≤ 0.1"))
             };
             report.push(
                 &format!("{name} metalness"),
@@ -2405,7 +2468,7 @@ mod tests {
         assert!(
             rule(&named, "PBR-VOCAB (id 0)")
                 .limit
-                .contains("§3 is the more specific")
+                .contains("§3 read as the more specific")
         );
         // The entry must belong to the declared class.
         std::fs::write(
@@ -2419,6 +2482,50 @@ mod tests {
             assert!(class_range(entry.class).is_some(), "{}", entry.name);
             assert!(vocab_entry(&entry.name.to_uppercase()).is_some());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_metal_chip_entry_leaves_chips_out_of_the_dielectric_check() {
+        let dir = scratch("chips");
+        // OXIDE at roughness 0.64, luma ~56, with 1 texel in 8 chipped to bare metal.
+        let manifest = |class: &str| {
+            format!("asset = \"alloy\"\nclass = \"prop\"\nmaterial_class = {class}\n{MAPS}")
+        };
+        let path = set(&dir, 16, [0x3A, 0x38, 0x36], 0.64, &manifest("\"OXIDE\""));
+        let mut mr = mr_map(256, 0.64);
+        for texel in mr.iter_mut().step_by(8) {
+            texel[0] = 255;
+        }
+        write_png(&dir.join("mr.png"), 16, 16, &mr);
+        let plain = check_source(&path).expect("check");
+        assert_eq!(
+            rule(&plain, "PBR-OXIDE-1 (id 0) metalness").pass,
+            Some(false)
+        );
+        std::fs::write(
+            &path,
+            manifest("{ class = \"OXIDE\", vocab = \"Forge dark alloy, scaled\" }"),
+        )
+        .expect("manifest");
+        let named = check_source(&path).expect("check");
+        let metal = rule(&named, "PBR-OXIDE-1 (id 0) metalness");
+        assert_eq!(metal.pass, Some(true), "{}", named.text());
+        assert!(
+            metal.limit.contains("chipped scale left out"),
+            "{}",
+            metal.limit
+        );
+        // Partial metalness is not a chip: it still fails.
+        for texel in mr.iter_mut().step_by(8) {
+            texel[0] = 128;
+        }
+        write_png(&dir.join("mr.png"), 16, 16, &mr);
+        let half = check_source(&path).expect("check");
+        assert_eq!(
+            rule(&half, "PBR-OXIDE-1 (id 0) metalness").pass,
+            Some(false)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2552,7 +2659,31 @@ mod tests {
             "asset = \"x\"\nclass = \"prop\"\n[classes]\n256 = \"METAL\"\n[maps]\nbase = \"b.png\"\n",
         )
         .expect("write");
-        assert!(check_source(&path).expect_err("id 256").contains("0..=255"));
+        assert!(check_source(&path).expect_err("id 256").contains("0..=254"));
+        // 255 is the no-class sentinel: refused, so a declared class never reads as unclassed.
+        std::fs::write(
+            &path,
+            "asset = \"x\"\nclass = \"prop\"\n[classes]\n255 = \"METAL\"\n[maps]\nbase = \"b.png\"\n",
+        )
+        .expect("write");
+        assert!(
+            check_source(&path)
+                .expect_err("id 255")
+                .contains("reserved")
+        );
+        // 255 ids (0..=254) plus material_class would be 256 classes: refused.
+        let mut many =
+            String::from("asset = \"x\"\nclass = \"prop\"\nmaterial_class = \"CHAR\"\n[classes]\n");
+        for id in 0..255 {
+            writeln!(many, "{id} = \"CHAR\"").expect("write");
+        }
+        many.push_str("[maps]\nbase = \"b.png\"\n");
+        std::fs::write(&path, many).expect("write");
+        assert!(
+            check_source(&path)
+                .expect_err("256 classes")
+                .contains("at most 255")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
