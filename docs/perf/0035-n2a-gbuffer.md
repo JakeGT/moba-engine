@@ -92,11 +92,26 @@ validation were clean.
   | FSR 3.1 native | 30 | 0.053 | 0.525 % | 0.0127 % |
   | FSR 3.1 overlay | 27 | 0.021 | 0.022 % | 0.0004 % |
 
-  The differences sit on the water: its depth fade and shoreline, where the bed and the
-  surface are close in depth. The likely cause is that reversed-Z stores those depths with
-  different float precision, so the fade's thresholds land a few texels differently
-  (inferred, not instrumented). The geometry and the shadows match. The G-buffer writes add no change of their own: these numbers are the same as a
-  reversed-Z-only build of the branch, captured before the G-buffer pass existed.
+  **Re-checked on 2026-11-15** with the review fixes, against `ab42718`:
+  - **Method.** The `-1.ppm` captures of `scripts/tiered-goldens.sh` (`UPSCALERS="taau fsr3"`)
+    from both builds, compared per channel. `image-check <branch> --against <main>` counts
+    the changed pixels.
+  - **Unchanged by the fixes.** All eight rows above came out identical to the digit. So the
+    review fixes, including the motion write mask (amendment 1 item 16), move no tiered
+    pixel.
+  - **How much changes.** 2.0–5.1 % of pixels change: `image-check` counts 7,000 (TAAU low)
+    to 11,729 (FSR 3.1 overlay) of 230,400. Most changes are one or two steps. In TAAU low,
+    5,114 of the 7,000 changed pixels move by 1–2, and 1,886 by more than 2.
+  - **Where.** Mapping the changes (FSR 3.1 native, kept with the raw logs) puts every
+    change above 2 on the two water strips, apart from a few isolated pixels. The 1–2 step
+    changes are spread over the ground, which fits the depth-reconstructing passes (GTAO,
+    contact shadows, the water fade) reading a reversed `D32_SFLOAT` depth whose precision
+    falls differently.
+  - **The cause** is inferred, not instrumented. Reversed-Z stores the near-coplanar water
+    surface and bed with different float precision, so the fade's thresholds land a few
+    texels differently. The geometry and the shadows match.
+  - **The G-buffer adds no change of its own.** These numbers equal those of a
+    reversed-Z-only build of the branch, captured before the G-buffer pass existed.
 - **Tiered goldens** (`scripts/tiered-goldens.sh`, `UPSCALERS="taau fsr3"`, local lavapipe):
   - every pair of runs is byte-identical;
   - the 64×36 fingerprints pass unchanged (worst `max_diff` 5, mean ≤ 0.093);
