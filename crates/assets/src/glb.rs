@@ -177,6 +177,17 @@ pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
 /// # Errors
 /// As [`load_glb_file`].
 pub fn load_glb_file_with(path: &Path, tangents: GlbTangents) -> Result<MeshData, GlbError> {
+    load_glb_with(&read_glb_file(path)?, tangents)
+}
+
+/// The bytes of the `.glb` at `path`, as [`load_glb_file`] reads them: a file larger than
+/// [`MAX_GLB_BYTES`] is refused unread, and at most one byte past the cap is read if it grows
+/// meanwhile (which [`load_glb`] then refuses). For callers that pass the same bytes to
+/// several checks.
+///
+/// # Errors
+/// [`GlbError::Io`] for file errors, [`GlbError::TooLarge`] past the cap.
+pub fn read_glb_file(path: &Path) -> Result<Vec<u8>, GlbError> {
     let file = std::fs::File::open(path).map_err(|error| GlbError::Io(error.kind()))?;
     let length = file
         .metadata()
@@ -190,7 +201,7 @@ pub fn load_glb_file_with(path: &Path, tangents: GlbTangents) -> Result<MeshData
     file.take(MAX_GLB_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| GlbError::Io(error.kind()))?;
-    load_glb_with(&bytes, tangents)
+    Ok(bytes)
 }
 
 /// The rule for shipped meshes (ADR-0022 amendment 1): a `.glb` with `TEXCOORD_0` carries
@@ -220,6 +231,107 @@ fn baked_tangents(mesh: Result<MeshData, GlbError>) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(error) => Err(format!("does not load: {error}")),
     }
+}
+
+/// How far a file tangent's `xyz` length may be from 1 and its `w` from ±1 for
+/// [`tangent_defects`]: the loader's own snap for `w` ([`MeshData::with_tangents`]). It is
+/// about ten times the error of Blender's glTF exporter, which rounds each tangent component
+/// to 4 decimals without renormalising (at most `√3 × 5e-5 ≈ 8.7e-5` in length), and far above
+/// the engine's own tangents (`MikkTSpace`, unit to `f32` rounding).
+pub const TANGENT_TOLERANCE: f32 = 1e-3;
+
+/// The file `TANGENT` elements that are not unit tangents, as [`tangent_defects`] counts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TangentDefects {
+    /// `TANGENT` elements read (each accessor once, however many primitives share it).
+    pub tangents: usize,
+    /// Elements whose `xyz` length is not within [`TANGENT_TOLERANCE`] of 1, the zero-length
+    /// ones included.
+    pub bad_length: usize,
+    /// Of `bad_length`, elements whose `xyz` is zero: an exporter writes `(0, 0, 0, ±1)` where
+    /// `MikkTSpace` found no tangent space (a degenerate or zero-UV-area triangle).
+    pub zero_length: usize,
+    /// Elements whose `w` is not within [`TANGENT_TOLERANCE`] of `+1` or `-1`.
+    pub bad_handedness: usize,
+}
+
+impl TangentDefects {
+    /// No defect: every element is a unit `xyz` with a `±1` handedness.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.bad_length == 0 && self.bad_handedness == 0
+    }
+}
+
+/// Counts the raw `TANGENT` elements of every primitive in a `.glb` whose `xyz` is not unit
+/// length or whose `w` is not `±1`, both within [`TANGENT_TOLERANCE`] (glTF 2.0 §3.7.2.1
+/// requires unit `xyz` and `w` of `±1`).
+///
+/// The loader cannot show these: it normalises `xyz`, keeps a zero tangent as zero (the shader
+/// then keeps the geometric normal) and snaps or refuses `w`. This reads the file's own
+/// numbers, for `content-check --source`'s GLB-TANGENT rule (ADR-0022 amendment 3). Every
+/// mesh's primitives are read, in a scene or not. Never panics; at most
+/// [`MeshData::MAX_VERTICES`] elements are read.
+///
+/// # Errors
+/// [`GlbError::TooLarge`], a chunk or JSON error, [`GlbError::BadAccessor`] for a `TANGENT`
+/// accessor that is not `f32` VEC4 in the BIN chunk, and [`MeshError::TooManyVertices`] past the
+/// element cap.
+pub fn tangent_defects(bytes: &[u8]) -> Result<TangentDefects, GlbError> {
+    if bytes.len() > MAX_GLB_BYTES {
+        return Err(GlbError::TooLarge);
+    }
+    let (json, bin) = split_chunks(bytes)?;
+    let root: gltf::json::Root =
+        gltf::json::deserialize::from_slice(json).map_err(GlbError::Json)?;
+    let accessors: std::collections::BTreeSet<usize> = root
+        .meshes
+        .iter()
+        .flat_map(|mesh| &mesh.primitives)
+        .filter_map(|primitive| {
+            primitive
+                .attributes
+                .get(&Checked::Valid(Semantic::Tangents))
+                .map(gltf::json::Index::value)
+        })
+        .collect();
+    let tolerance = f64::from(TANGENT_TOLERANCE);
+    // False for a NaN, so a NaN counts as a defect.
+    let within = |value: f64| (value - 1.0).abs() <= tolerance;
+    let mut defects = TangentDefects::default();
+    for index in accessors {
+        let tangents = accessor(&root, bin, index, Type::Vec4, &[ComponentType::F32])?;
+        defects.tangents += tangents.count;
+        if defects.tangents > MeshData::MAX_VERTICES {
+            return Err(MeshError::TooManyVertices.into());
+        }
+        for element in 0..tangents.count {
+            let [x, y, z, w] = tangents
+                .f32s::<4>(element)
+                .ok_or(GlbError::BadAccessor)?
+                .map(f64::from);
+            let length = (x * x + y * y + z * z).sqrt();
+            if !within(length) {
+                defects.bad_length += 1;
+                if length == 0.0 {
+                    defects.zero_length += 1;
+                }
+            }
+            if !within(w.abs()) {
+                defects.bad_handedness += 1;
+            }
+        }
+    }
+    Ok(defects)
+}
+
+/// [`tangent_defects`] on the file at `path` (read as [`load_glb_file`] does).
+///
+/// # Errors
+/// [`GlbError::Io`] for file errors, otherwise as [`tangent_defects`].
+pub fn tangent_defects_file(path: &Path) -> Result<TangentDefects, GlbError> {
+    tangent_defects(&read_glb_file(path)?)
 }
 
 /// Parses a binary glTF file into one merged, validated mesh, skinned if it uses a skin.
@@ -1447,7 +1559,7 @@ mod tests {
         assert!(flat.tangents().expect("generated")[0][3] < 0.0);
     }
 
-    /// The triangle with a `TANGENT` accessor (bufferView 3, at byte 80) of `data`.
+    /// The triangle with a `TANGENT` accessor (bufferView 3, at byte 80) of `data`, loaded.
     fn with_tangents(
         extra_node: &str,
         component: u32,
@@ -1455,6 +1567,17 @@ mod tests {
         count: u32,
         data: Vec<u8>,
     ) -> Result<MeshData, GlbError> {
+        load_glb(&tangent_glb(extra_node, component, kind, count, data))
+    }
+
+    /// The bytes of [`with_tangents`]'s file.
+    fn tangent_glb(
+        extra_node: &str,
+        component: u32,
+        kind: &str,
+        count: u32,
+        data: Vec<u8>,
+    ) -> Vec<u8> {
         let json = triangle_json(extra_node, POSITION_ACCESSOR)
             .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TANGENT":3}"#)
             .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
@@ -1471,7 +1594,96 @@ mod tests {
         let mut bin = triangle_bin();
         bin.extend([0, 0]); // pad the u16 indices to 80 bytes
         bin.extend(data);
-        load_glb(&glb(&json, Some(&bin)))
+        glb(&json, Some(&bin))
+    }
+
+    /// GLB-TANGENT's counts (ADR-0022 amendment 3) come from the file's own numbers, which the
+    /// loader normalises, keeps as zero or snaps.
+    #[test]
+    fn tangent_defects_count_the_files_own_tangents() {
+        let count =
+            |values: &[f32]| tangent_defects(&tangent_glb("", 5126, "VEC4", 3, floats(values)));
+        let clean = count(&[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.6, 0.8, 0.0, 1.0])
+            .expect("unit tangents");
+        assert_eq!(clean.tangents, 3);
+        assert!(clean.is_clean(), "{clean:?}");
+        // Blender's exporter rounds each component to 4 decimals without renormalising: within.
+        let rounded = count(&[
+            0.9806, -0.1961, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+        ]);
+        assert!(rounded.expect("rounded").is_clean());
+        // Zero (an exporter's "no tangent space"), half length and just past the tolerance.
+        let lengths = count(&[
+            0.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, -1.0, 1.0015, 0.0, 0.0, 1.0,
+        ])
+        .expect("bad lengths");
+        assert_eq!((lengths.bad_length, lengths.zero_length), (3, 1));
+        assert_eq!(lengths.bad_handedness, 0);
+        // The loader takes the zero and the half tangent (normalised) without complaint.
+        assert!(
+            with_tangents(
+                "",
+                5126,
+                "VEC4",
+                3,
+                floats(&[0.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0, 1.0])
+            )
+            .is_ok()
+        );
+        // Handedness: 0, 0.5 and NaN are defects; NaN xyz is a length defect.
+        let handed = count(&[
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.5,
+            f32::NAN,
+            0.0,
+            0.0,
+            f32::NAN,
+        ])
+        .expect("bad handedness");
+        assert_eq!(
+            (handed.bad_handedness, handed.bad_length, handed.zero_length),
+            (3, 1, 0)
+        );
+        // A file without TANGENT has nothing to count; a malformed accessor is an error.
+        let json = triangle_json("", POSITION_ACCESSOR);
+        let plain = tangent_defects(&glb(&json, Some(&triangle_bin()))).expect("no tangents");
+        assert_eq!(plain, TangentDefects::default());
+        assert!(matches!(
+            tangent_defects(&tangent_glb("", 5126, "VEC3", 3, floats(&[0.0; 12]))),
+            Err(GlbError::BadAccessor)
+        ));
+        assert!(tangent_defects(b"glTF").is_err());
+        // Every committed sample mesh's tangents are unit (A0, sample-mesh); the skinned
+        // sentinel has no UVs and no TANGENT.
+        let samples: [(&str, &[u8], bool); 4] = [
+            (
+                "sentinel",
+                include_bytes!("../../../content/models/sentinel.glb"),
+                true,
+            ),
+            (
+                "crystal",
+                include_bytes!("../../../content/models/crystal.glb"),
+                true,
+            ),
+            (
+                "rampart",
+                include_bytes!("../../../content/models/rampart.glb"),
+                true,
+            ),
+            ("sentinel-skinned", SKINNED, false),
+        ];
+        for (name, bytes, has_tangents) in samples {
+            let shipped = tangent_defects(bytes).expect(name);
+            assert_eq!(shipped.tangents > 0, has_tangents, "{name}: {shipped:?}");
+            assert!(shipped.is_clean(), "{name}: {shipped:?}");
+        }
     }
 
     #[test]
