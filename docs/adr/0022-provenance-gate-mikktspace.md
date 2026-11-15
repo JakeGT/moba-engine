@@ -404,8 +404,8 @@ hash or the content hash: they read source files and write reports, sheets and K
 |---|---|---|
 | `content-check --source <asset>.source.toml` | Material validation and texel density on an asset's source maps and exported `.glb` | Roadmap §9.4's pipeline ("material validation (delight, albedo 30–240 sRGB, metals ≥ 180, roughness variance, normal length)", "content-check (… PBR, texel density …)"), §9.1's texel targets, and the approved bible: material-vocabulary §1.1, §2 and §6, palette-and-value (PAL, VAL-1), checks.md |
 | `scripts/blender/review_render.py` + `review-sheet` | Review-render contact sheets with numeric checks | Roadmap §9.4 "New tools" (46 m at 1440p and 4K, 8 m zoom, turntable, lineup, numeric readability checks); checks.md; silhouettes-and-scale (SIL-*); palette-and-value (CON-1, CON-4, VAL-*); material-vocabulary §8 (PBR-EMIT-*); lighting-mood (Golden Crossing) |
-| `scripts/blender/export_glb.py` | The Blender → `.glb` export convention, checked before and after export, and a provenance stub | ADR-0007 (the `.glb` format and loader limits) and Amendment 1 (shipped meshes carry baked MikkTSpace `TANGENT`). No ADR or roadmap item names an exporter; §9.4's UV, bake and rig stages imply one. **Open question for the maintainer:** does the convention need its own ADR? |
-| `texture-bake --kind weights` | Four linear channels (BC7 or `rgba8`) | The terrain splat (`docs/content-authoring.md`, Terrain) is linear RGBA, which `--kind data` (two channels) could not write. A documentation gap, not a format change |
+| `scripts/blender/export_glb.py` | The Blender → `.glb` export convention, checked before and after export, and a provenance stub | ADR-0007 (the `.glb` format and loader limits) and Amendment 1 (shipped meshes carry baked MikkTSpace `TANGENT`). No ADR or roadmap item names an exporter; §9.4's UV, bake and rig stages imply one. It needs no ADR of its own: this amendment records the convention (the A1 reviewer's view, replacing the earlier open question) |
+| `texture-bake --kind weights` | Four linear channels (BC7 or `rgba8`) | The terrain splat (`docs/content-authoring.md`, Terrain) is linear RGBA, which `--kind data` (two channels) could not write. A documentation gap, not a format change. A PNG without alpha is refused (the fourth weight would read 1.0). BC7 here is mode 6 only, one RGBA line per 4×4 block: painted hard junctions between three or four layers come out near 17 dB in the unit test, so a bake under 35 dB warns and points to `--format rgba8`, which is exact |
 
 Not in this PR: roadmap §9.4's `normal-bake` and the `clusterlod` mode of `mesh-bake` (A1
 covers ingest checks, not new bakers), and every vocabulary-level rule (below). No new crate
@@ -416,26 +416,71 @@ the KTX2 output is the engine's own `texture-bake`.
 **`content-check --source`.** A separate mode: it is never part of the pack check or of
 `--provenance --check`, and nothing in CI runs it on content (the source maps live in the art
 repository). The rule thresholds are §1.1, §2 and §6 read literally; the A3 prototypes' widened
-ranges and tolerances are not carried over.
+ranges and tolerances are not carried over. Maps are held at their file's depth and channel
+count, and the single-use maps (normal, AO, emissive, team mask) are read by their own rule:
+a 4096² hero with seven RGB maps peaks at 414 MiB.
 
 - **Classes** come from a class-id map (`maps.class`, `class_step` per id) and the
   manifest's `[classes]` table naming material-vocabulary §2 rows. Per-class albedo,
   roughness and metalness are read on *interior* texels (all eight neighbours covered and the
   same class), so bleed and seams do not count against a class.
+- **§3 over §2.** A class may name its §3 entry: `"2" = { class = "CERAM", vocab = "Void
+  composite, matte" }` (or `material_class` in the same form). Where the entry is one of the
+  §2/§3 conflicts listed below, its §3 numbers replace the §2 row for that class, and the report
+  prints which entry applied and why. Any other name is reported and the §2 row applies. This
+  is a minimal slice of PBR-VOCAB-1: only the conflicts are data.
+- **UV coverage** rasterises the UVs at texel centres, wrapping tiling UVs. A UV more than
+  2^28 texels from the origin or across one triangle is refused (no tiling explains it, and it
+  would overflow the raster). The work is bounded at 64 texel visits per texel of the map (at
+  least 2^28); past it the report says "coverage not measured" and counts every texel, padding
+  included.
 - **Texel density** (TD-1) is the area-weighted p5/p50/p95 of px/m over the model's
   triangles at the shipped size. It passes or fails only where §9.1 gives a px/m target
   (structures, props, terrain layers); heroes, minions and neutrals are reported, because §9.1
-  gives them texture sizes (TD-2), not densities.
-- **Normal length** (PBR-NRM-1) is 1 ± 0.02 per texel and PBR-NRM-2 checks X² + Y² ≤ 1 within
-  one code of rounding. **Delighting** (PBR-DELIGHT-1) is the correlation of albedo luma with
-  AO over 8×8 blocks, r < 0.3.
+  gives them texture sizes (TD-2), not densities. With a target and nothing to measure (no
+  model with UV'd triangles and no `tile_m` > 0) it fails.
+- **Normals.** A missing normal map fails. PBR-NRM-1 is 1 ± 0.02 per texel on an XYZ map; an
+  XY map (grey + alpha: X in grey, Y in alpha; or RG in RGB with `normal_xy = true`) has no
+  stored length and reports only. PBR-NRM-2 checks X² + Y² ≤ 1 within one code of rounding,
+  **on the source PNG as a proxy for the BC5 bake** the rule names.
+- **Delighting** (PBR-DELIGHT-1) is the correlation of albedo luma with AO over 8×8 blocks,
+  r < 0.3, **within each class**: only blocks wholly inside one class's interior texels count,
+  so a dark material in the cavities is not read as painted-in shadow.
+- **Readings.** VAL-1 is read at p1/p99 of the covered texels. PBR-EMIT-1 is the declared
+  colour × strength against a single `L_ref` (the map's lighting, Golden Crossing by default),
+  not per pixel. PAL-1 applies to terrain layers only: the manifest has no ground-decal class.
+  Neutral monsters take PBR-RGH-2's 0.045 floor: the 0.08 floor names heroes and minions.
+- **TINT-1** loads the team mask and checks its size against the base map; a missing or
+  wrong-sized mask fails.
 - **Export checks** load each model with the engine's bounded loader (`FileOnly`): the name
   rule, the loader limits, baked `TANGENT` (Amendment 1), feet at y = 0 (or `hover_m`), and,
   as information, the agreement of the file's tangents with the engine's own MikkTSpace on the
   same mesh.
 - **Not built** (each needs §3's vocabulary as data, an accent mask, or the §6.6 material
-  model): PBR-VOCAB-1, PBR-FORGE-1, PBR-VOID-1, PBR-VOID-2, LANE-1, PBR-HEAT-1, EMB-1,
+  model): PBR-VOCAB-1 beyond the conflicts, PBR-FORGE-1, PBR-VOID-1 (its median-luma half here,
+  its projected-area half in the review renders), PBR-VOID-2, LANE-1, PBR-HEAT-1, EMB-1,
   PBR-GLASS-1, PBR-SKIN-1 and PAL-3. They are listed as `not built` in every report.
+
+**§2/§3 conflicts: maintainer decisions to confirm.** Material-vocabulary §3 gives these
+entries numbers outside their §2 class row. The A1 review decided that §3, the more specific
+rule, applies when a class names the entry with `vocab`; each one is listed here for the
+maintainer to confirm or overrule:
+
+| §3 entry (`vocab`) | §2 row | §3 numbers applied | Conflict |
+|---|---|---|---|
+| Void composite, matte | `CERAM` 0.70–0.95 | roughness 0.55–0.80 | below the §2 floor |
+| Void composite, glazed | `CERAM` 0.70–0.95 | base roughness 0.5–0.7 | below the §2 floor |
+| Heat-shield ceramic, glazed | `CERAM` 0.70–0.95 | base roughness 0.6–0.8 | below the §2 floor |
+| Void silk | `CLOTH` 0.70–1.0 | roughness 0.55–0.80 | below the §2 floor |
+| Fused scorch (crust) | `CHAR` 0.85–1.0 | roughness 0.7–0.9 | below the §2 floor |
+| Levitating basalt (cut faces) | `STONE-1` 0.55–0.95 | roughness 0.4–0.55 | below the §2 floor |
+| Forge basalt masonry (polished treads) | `STONE-1` 0.55–0.95 | roughness 0.35–0.5 | below the §2 floor |
+| Polished black stone | `STONE-2` 0.05–0.35 | roughness 0.15–0.40 | above the §2 ceiling |
+| Basalt, wet | `STONE-1` 0.55–0.95 | roughness 0.10–0.30; exempt from PBR-RGH-1 (§1.1's wet-mask exemption) | below the §2 floor |
+| Emitter lattice | `METAL` albedo 180–255 | metal 1 with the albedo of "Forge dark alloy, scaled" (luma 56; its `OXIDE` range 30–140), roughness 0.35–0.60; left out of PBR-ALB-2 | dark metal against PBR-METAL-1 and PBR-ALB-2 |
+| Void-glass | PBR-RGH-2 0.08 on heroes and minions | roughness 0.045–0.15; floor 0.045 | below the unit floor |
+| Sun-glass | PBR-RGH-2 0.08 on heroes and minions | roughness 0.05–0.20; floor 0.045 | below the unit floor |
+| Obsidian metamaterial, polished (blades) | PBR-RGH-2 0.08 on heroes and minions | roughness 0.05–0.20; floor 0.045 | below the unit floor |
 
 **Review renders: departures from §9.4's wording.**
 
@@ -455,14 +500,24 @@ ranges and tolerances are not carried over.
    242.3°, **12.4° apart**. The default camera looks almost into the sun, so every asset faces
    the camera from its shade side and casts its shadow towards the viewer.
 5. **1080p silhouettes** are added. checks.md lists 1080p, and SIL-3 and SIL-8 are defined
-   there. The 4K frame is beauty only.
+   there. The 4K frame is beauty only. checks.md's "46 m at 1080p" contact sheet is **not
+   rendered**: 1080p appears only as the silhouettes, and the 46 m sheet shows 1440p and 4K.
+6. **Sky.** The analytic sky carries env-bake's sun-glow lobe, `sun_color × max(dot(d, sun),
+   0)^sun_glow × smoothstep(−0.12, 0.04, y)` with Golden Crossing's env values (2.6, 1.55, 0.85)
+   and 6. `render_meta.json` pins both, and `review-sheet` refuses a render without them. The
+   ground blend below the horizon is a hard switch, not env-bake's 0.15 smoothstep (it is never
+   seen from the gameplay camera).
+7. **Channels.** `review_render.py` reads the packed MR map as R metallic, G roughness (the
+   engine's packing, as content-check), single metallic, roughness and emissive maps from R,
+   and an XY normal map (`normal_xy`) with Z rebuilt. An emissive map without its
+   `[models.emissive]` table is refused, as in content-check.
 
 **Review renders: readings of open rules** (agent-derived, for the maintainer to confirm).
 
 - **Yaws.** "Tested … at eight yaw angles" is read literally: SIL-5, SIL-6, melee SIL-7 and
-  SIL-8 must hold at every yaw. Only ranged SIL-7 has its own quorum (≥ 6 of 8). **Question:**
-  should SIL-5, SIL-6 and melee SIL-7 have a quorum too? A melee weapon behind the body fails
-  from two yaws (both slice minions fail SIL-7 at 6 of 8).
+  SIL-8 must hold at every yaw. Only ranged SIL-7 has its own quorum (≥ 6 of 8). A melee weapon
+  behind the body fails from two yaws (both slice minions fail SIL-7 at 6 of 8); see the open
+  questions.
 - **SIL-1 and SIL-2** measure the `.glb`'s bind-pose bounds, halos and raised weapons
   included. A model without a declared size class is reported only.
 - **SIL-3** compares hero silhouettes at the same yaw, aligned at the bottom-centre of their
@@ -474,16 +529,36 @@ ranges and tolerances are not carried over.
   box with the weapon's pixels against without them.
 - **SIL-8** renders the 1080p silhouette at 4×4 samples per pixel. A part is a connected run
   of samples that no 4×4 square fits in (under 1 px at 1080p) and that is at least 8 samples
-  (2 px) long; shorter runs are tapering tips.
+  (2 px) long; shorter runs are tapering tips. The square test is axis-aligned, so it is
+  anisotropic: a diagonal part needs about √2 times the width of a horizontal or vertical one
+  (4√2 ≈ 5.7 samples, 1.4 px at 1080p) to pass.
 - **SIL-4 and SIL-9** stay human checks: one pose is rendered per review.
 - **CON-1 and CON-4** compare the mean OKLab L of the model's pixels with the ground pixels in
-  a ring 3× its bounding box (the box itself excluded), at 46 m and 1440p.
+  a ring 3× its bounding box (the box itself excluded), at 46 m and 1440p. A ring with no
+  ground pixels is a failure ("no ground ring"), not a pass.
 - **VAL-2 to VAL-4** are capture rules in checks.md, read here on the review frame. VAL-2 uses
-  the bare ground. VAL-3 (p1) and VAL-4 (p99, emissive pixels excluded) use each model and its
-  3× ring, shadows included.
+  the bare ground: ground pixels outside every model's 3× box. VAL-3 (p1) uses the ground
+  inside those boxes, cast shadows included, never model pixels. VAL-4 (p99, emissive pixels
+  excluded) uses each model and its 3× box.
 - **Rendered PBR-EMIT.** EMIT-1r is the p99 EV over `L_ref` of the model's emissive pixels.
   EMIT-2r is the share of its pixels above 0.25 `L_ref`, against §8's caps. EMIT-3 is the
   emissive share of the lineup frame, not of a map capture.
+- **Sheets** wrap a row that would run past the margin and scale an image wider than the sheet
+  down to fit, saying so in its caption; nothing is clipped.
+- **Not built or human:** SIL-4, SIL-9, PAL-3, VOID-1, EMB-1, PBR-HEAT-1, the rendered half of
+  PBR-WEAR-1, the projected-area half of PBR-VOID-1, SIL-2's "no capes, halos or orbiting parts
+  on minions" (human, on the turntable sheet) and VFX-9 (no VFX in these renders).
+
+**Open questions for the maintainer** (recorded, not decided):
+
+1. **A yaw quorum.** Should SIL-5, SIL-6 and melee SIL-7 pass at 6 of 8 yaws, as ranged SIL-7
+   does, rather than at every yaw?
+2. **The §2/§3 conflicts** in the table above: confirm that §3 applies to each.
+3. **lighting-mood's axis note.** It says `sun_dir`'s +z points "towards the bottom of the
+   screen at the default camera". At `Camera::orbit(…, −0.7, 0.95)` the camera sits on the −z
+   side, so +z points **up** the screen. With that camera, Golden Crossing puts the camera
+   12.4° from the sun's azimuth, and long shadows run towards the viewer, nearly straight down
+   the screen: does that meet SHD-3's intent (no long shadows along the screen's vertical)?
 
 **Blender export convention** (`docs/content-authoring.md`, Blender export):
 
@@ -492,12 +567,22 @@ ranges and tolerances are not carried over.
 - feet at z = 0, or `--hover`;
 - triangulated meshes, applied scale and one UV map;
 - material slots named `<asset>` or `<asset>-<suffix>`;
-- joints in `[A-Za-z0-9_-]{1,32}`, at most 32 per skin, clips sampled at 30 fps;
+- no mirrored (negative) scale;
+- joints in `[A-Za-z0-9_-]{1,32}`, at most 32 per armature (the Low tier's skin cap; stricter
+  than `budget.rs`, which only marks such a model Over on Low and lets Medium and High take
+  it);
+- clips sampled at 30 fps; clip names are free, and `animations/<model>.toml` maps them to
+  engine states (ADR-0012);
 - MikkTSpace `TANGENT` exported, and no images, vertex colours, Draco or meshopt compression.
 
-The script refuses a scene that breaks the convention before writing anything. It re-reads
-the written file's glTF JSON, and it writes a `provenance-stub.toml` draft entry that the gate
-never reads. Exporting the A3 Ember Scarab with it gives a file whose tangents agree with the
+The script refuses a scene that breaks the convention before writing anything; feet are
+measured in the rest pose at frame 0. It exports under a temporary name, re-reads the glTF
+JSON, and renames only a verified file, so an error or an exception leaves no `.glb`. It writes
+a `provenance-stub.toml` draft entry that the gate never reads. Both Blender scripts exit 1 on
+any exception (Blender itself exits 0 after an uncaught one), and the documented commands add
+`--python-exit-code 1` for failures before the script starts. `review_render.py` deletes a
+stale `render_meta.json` when it starts and writes the new one last, by rename, with `.glb`
+paths relative to it. Exporting the A3 Ember Scarab with it gives a file whose tangents agree with the
 engine's MikkTSpace on 100 % of corners (GLB-MIKK 1.0000).
 
 **API additions** (tools only): `content-check --source` and `--json` with it; the

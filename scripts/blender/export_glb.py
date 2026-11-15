@@ -1,31 +1,38 @@
 """Export a Blender asset to the engine's runtime glTF, headless, by the export convention.
 
-    blender --background <asset>.blend --python scripts/blender/export_glb.py -- \
+    blender --background --python-exit-code 1 <asset>.blend --python scripts/blender/export_glb.py -- \
         --out <dir> [--asset NAME] [--collection NAME] [--hover METRES] [--notes TEXT]
 
 The convention is in docs/content-authoring.md, "Blender export (A1)": metres, Z up in Blender
 (+Y up in the file), the model faces -Y in Blender (+Z in the engine), feet on z = 0; triangulated
 meshes; one UV set read (TEXCOORD_0); baked MikkTSpace TANGENT (ADR-0022 amendment 1); material
 slots named `<asset>` or `<asset>-<suffix>` for shading models, never texture sets; no images,
-vertex colours, Draco or meshopt; joints and clips by the engine's names; clips sampled at 30 fps.
+vertex colours, Draco or meshopt; joint names by the engine's rule, at most 32 per armature;
+clips sampled at 30 fps (clip names are free: `animations/<asset>.toml` maps them to engine states,
+ADR-0012); no mirrored (negative) scale.
 
 Writes `<out>/<asset>.glb` and `<out>/<asset>.provenance-stub.toml` (a draft ADR-0022 entry to
-finish by hand). Exits 1, writing nothing, when the scene breaks the convention, and checks the
-written file's glTF JSON afterwards. Then run the engine's own checks on it:
+finish by hand). Exits 1, writing nothing, when the scene breaks the convention or the script
+fails: the file is exported under a temporary name, its glTF JSON checked, and only then renamed.
+`--python-exit-code 1` also makes Blender exit 1 if the script cannot even start. Then run the
+engine's own checks on it:
 `content-check --source <asset>.source.toml` (loader limits, baked tangents, feet, texel density).
 """
 import json
 import os
 import struct
 import sys
+import traceback
 
 import bpy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from moba_blender import argv_after_dashdash, valid_name  # noqa: E402
 
-CLIP_NAMES = {"idle", "run", "walk", "attack", "cast1", "cast2", "cast3", "death", "recall", "hit"}
-MAX_JOINTS = 32            # the Low tier's skin cap (content-authoring.md, budgets)
+# Per armature: the Low tier's skin cap. Stricter than `crates/assets/src/budget.rs`, which only
+# marks a model over 32 joints as Over on Low and lets Medium (48) and High (64) take it: an
+# export the Low tier cannot show is refused here.
+MAX_JOINTS = 32
 MAX_VERTICES = 65536       # ADR-0007 loader limits
 MAX_INDICES = 393216
 MAX_GLB_BYTES = 16 << 20
@@ -79,12 +86,50 @@ def check_scene(opts, objs):
     meshes = [o for o in objs if o.type == "MESH"]
     if not meshes:
         errors.append("nothing to export: no visible mesh outside HIGH collections")
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    min_z = float("inf")
     for o in objs:
         scale = o.matrix_world.to_scale()
-        if any(abs(s - 1.0) > 1e-4 for s in scale):
+        if o.matrix_world.to_3x3().determinant() < 0:
+            errors.append(f"{o.name}: mirrored (negative) scale; flips its winding and tangent "
+                          "handedness (apply it, then recalculate normals)")
+        elif any(abs(s - 1.0) > 1e-4 for s in scale):
             errors.append(f"{o.name}: unapplied scale {tuple(round(s, 4) for s in scale)} (apply it)")
+    # Feet are measured in the rest pose at frame 0, not wherever the timeline or an action
+    # left the rig.
+    armatures = [o for o in objs if o.type == "ARMATURE"]
+    saved_frame = scene.frame_current
+    saved_pose = {o.name: o.data.pose_position for o in armatures}
+    for o in armatures:
+        o.data.pose_position = "REST"
+    scene.frame_set(0)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    min_z = float("inf")
+    try:
+        min_z = mesh_checks(meshes, depsgraph, asset, errors, warnings)
+    finally:
+        for o in armatures:
+            o.data.pose_position = saved_pose[o.name]
+        scene.frame_set(saved_frame)
+    if meshes and abs(min_z - opts["hover"]) > 0.01:
+        errors.append(f"lowest vertex at z = {min_z:.3f} m in the rest pose at frame 0; the convention "
+                      f"is z = {opts['hover']:.3f} (feet on the ground, or --hover)")
+    for o in armatures:
+        names = [b.name for b in o.data.bones]
+        if len(names) > MAX_JOINTS:
+            errors.append(f"armature {o.name}: {len(names)} joints; the exporter refuses over "
+                          f"{MAX_JOINTS} per skin (the Low tier's cap, stricter than budget.rs)")
+        bad = [j for j in names if not valid_name(j, 32)]
+        if bad:
+            errors.append(f"armature {o.name}: joint names outside [A-Za-z0-9_-]{{1,32}}: {bad}")
+    clips = sorted(a.name for a in bpy.data.actions if a.users)
+    if clips:
+        warnings.append(f"clips {clips}: names are free; map them to engine states in "
+                        f"animations/{asset}.toml (ADR-0012)")
+    return errors, warnings
+
+
+def mesh_checks(meshes, depsgraph, asset, errors, warnings):
+    """Triangles, UVs, colour attributes and slot names; returns the lowest world z."""
+    min_z = float("inf")
     for o in meshes:
         ev = o.evaluated_get(depsgraph)
         me = ev.to_mesh()
@@ -106,19 +151,7 @@ def check_scene(opts, objs):
             name = slot.material.name if slot.material else ""
             if not (name == asset or (name.startswith(asset + "-") and valid_name(name, 32))):
                 errors.append(f"{o.name}: material slot {name!r} is not `{asset}` or `{asset}-<suffix>`")
-    if meshes and abs(min_z - opts["hover"]) > 0.01:
-        errors.append(f"lowest vertex at z = {min_z:.3f} m; the convention is z = {opts['hover']:.3f} "
-                      "(feet on the ground, or --hover)")
-    joints = [b.name for o in objs if o.type == "ARMATURE" for b in o.data.bones]
-    if len(joints) > MAX_JOINTS:
-        errors.append(f"{len(joints)} joints; the Low tier caps a skin at {MAX_JOINTS}")
-    bad = [j for j in joints if not valid_name(j, 32)]
-    if bad:
-        errors.append(f"joint names outside [A-Za-z0-9_-]{{1,32}}: {bad}")
-    for action in bpy.data.actions:
-        if action.users and action.name not in CLIP_NAMES:
-            warnings.append(f"clip {action.name!r} is not an engine state name ({', '.join(sorted(CLIP_NAMES))})")
-    return errors, warnings
+    return min_z
 
 
 def gltf_options(path):
@@ -141,7 +174,10 @@ def gltf_options(path):
 def verify_glb(path):
     """Reads the written file's glTF JSON back: the convention's file-level rules."""
     errors = []
-    data = open(path, "rb").read()
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 20:
+        return ["shorter than a GLB header"], {}
     magic, version, length = struct.unpack_from("<III", data, 0)
     if magic != 0x46546C67 or version != 2 or length != len(data):
         return ["not a GLB v2 file"], {}
@@ -218,20 +254,35 @@ def main():
         sys.exit(1)
     os.makedirs(opts["out"], exist_ok=True)
     path = os.path.join(opts["out"], opts["asset"] + ".glb")
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in objs:
-        o.select_set(True)
-    bpy.ops.export_scene.gltf(**gltf_options(path))
-    errors, info = verify_glb(path)
-    if errors:
-        for e in errors:
-            print(f"export_glb: error in {path}: {e}", flush=True)
-        os.remove(path)
-        sys.exit(1)
+    # Exported under a temporary name and renamed only once verified, so an error or an
+    # exception never leaves an unchecked file at `path`.
+    partial = os.path.join(opts["out"], "." + opts["asset"] + ".partial.glb")
+    try:
+        bpy.ops.object.select_all(action="DESELECT")
+        for o in objs:
+            o.select_set(True)
+        bpy.ops.export_scene.gltf(**gltf_options(partial))
+        errors, info = verify_glb(partial)
+        if errors:
+            for e in errors:
+                print(f"export_glb: error in {path}: {e}", flush=True)
+            sys.exit(1)
+        os.replace(partial, path)
+    finally:
+        if os.path.exists(partial):
+            os.remove(partial)
     stub = os.path.join(opts["out"], opts["asset"] + ".provenance-stub.toml")
     with open(stub, "w", encoding="utf-8", newline="\n") as f:
         f.write(provenance_stub(opts, info))
     print(f"export_glb: wrote {path} ({json.dumps(info)}) and {stub}", flush=True)
 
 
-main()
+if __name__ == "__main__":
+    # Blender keeps running (and exits 0) after an uncaught exception in a --python script.
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001 - any failure must be exit 1
+        traceback.print_exc()
+        sys.exit(1)

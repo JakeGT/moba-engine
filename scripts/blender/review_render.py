@@ -1,8 +1,8 @@
 """Review renders (roadmap §9.4): the raw frames `review-sheet` turns into contact sheets.
 
-    flock /home/jaket/Projects/MOBA/handoff/gpu.lock \
-        blender --background --factory-startup --python scripts/blender/review_render.py -- \
-        <asset>.review.toml [--samples N] [--cpu]
+    flock /path/to/gpu.lock \
+        blender --background --factory-startup --python-exit-code 1 \
+        --python scripts/blender/review_render.py -- <asset>.review.toml [--samples N] [--cpu]
 
 Then `review-sheet <out>/render_meta.json` checks the numbers and composes the sheets.
 
@@ -31,12 +31,15 @@ The review file (TOML; paths relative to it):
     weapon = ["blade"]                    # optional: joints of the weapon (SIL-7)
     weapon_kind = "melee"                 # melee | ranged, with `weapon`
     [models.textures]                     # source PNGs, the engine's channel packing
-    base = "..."; normal = "..."          # required
+    base = "..."; normal = "..."          # required; normal is XYZ in RGB, or set
+    normal_xy = true                      # (optional) for X in R and Y in G, Z rebuilt
     mr = "..."                            # R metallic, G roughness (as texture-bake --kind
                                           # data); or metallic = "..." and roughness = "..."
-    emissive = "..."                      # optional mask (x colour x strength)
-    [models.emissive]
+                                          # (each read from R, like content-check)
+    emissive = "..."                      # optional mask in R (x colour x strength)
+    [models.emissive]                     # required with an emissive map
     colour = "#FFE6BE"; strength = 0.19
+    use = "accent"                        # accent (<= +1 EV) | gameplay (<= +2 EV), PBR-EMIT-1
 
 Frames written to `out` (8-bit sRGB AgX unless noted):
 
@@ -54,6 +57,7 @@ import math
 import os
 import sys
 import tomllib
+import traceback
 
 import bpy
 import numpy as np
@@ -117,7 +121,24 @@ def load_review(path):
         tex = m.get("textures", {})
         if not {"base", "normal"} <= set(tex) or not ("mr" in tex or {"metallic", "roughness"} <= set(tex)):
             fail(f"{m['name']}: textures need base, normal and mr (or metallic and roughness)")
+        normal_xy = tex.pop("normal_xy", False)
+        if not isinstance(normal_xy, bool):
+            fail(f"{m['name']}: textures.normal_xy must be true or false")
+        unknown = set(tex) - {"base", "normal", "mr", "metallic", "roughness", "emissive"}
+        if unknown:
+            fail(f"{m['name']}: unknown textures {sorted(unknown)}")
         m["textures"] = {k: rel(v) for k, v in tex.items()}
+        m["normal_xy"] = normal_xy
+        em = m.get("emissive")
+        if "emissive" in tex and not em:
+            # Dropping the emission silently would pass EMIT checks it never rendered.
+            fail(f"{m['name']}: textures.emissive needs a [models.emissive] table (colour, strength, use)")
+        if em is not None:
+            if set(em) - {"colour", "strength", "use"} or not {"colour", "strength"} <= set(em):
+                fail(f"{m['name']}: [models.emissive] takes colour, strength and use")
+            if em.get("use", "accent") not in ("accent", "gameplay"):
+                fail(f"{m['name']}: emissive use must be accent or gameplay")
+            em.setdefault("use", "accent")
         for p in [m["glb"], *m["textures"].values()]:
             if not os.path.isfile(p):
                 fail(f"{m['name']}: missing {p}")
@@ -146,6 +167,56 @@ def image_node(nt, path, non_color):
     return node
 
 
+def red(nt, image):
+    """The R channel of an image node (single-channel maps are read from R, like content-check)."""
+    sep = nt.nodes.new("ShaderNodeSeparateColor")
+    nt.links.new(image.outputs["Color"], sep.inputs["Color"])
+    return sep.outputs["Red"]
+
+
+def normal_colour(nt, image, xy):
+    """The normal map's colour; for an XY map, Z = sqrt(1 - X^2 - Y^2) rebuilt from R and G."""
+    if not xy:
+        return image.outputs["Color"]
+    sep = nt.nodes.new("ShaderNodeSeparateColor")
+    nt.links.new(image.outputs["Color"], sep.inputs["Color"])
+    # Decode to [-1, 1]: v * 2 - 1.
+    decoded = []
+    for channel in ("Red", "Green"):
+        mad = nt.nodes.new("ShaderNodeMath")
+        mad.operation = "MULTIPLY_ADD"
+        nt.links.new(sep.outputs[channel], mad.inputs[0])
+        mad.inputs[1].default_value = 2.0
+        mad.inputs[2].default_value = -1.0
+        decoded.append(mad)
+    xy_vec = nt.nodes.new("ShaderNodeCombineXYZ")
+    nt.links.new(decoded[0].outputs[0], xy_vec.inputs["X"])
+    nt.links.new(decoded[1].outputs[0], xy_vec.inputs["Y"])
+    dot = nt.nodes.new("ShaderNodeVectorMath")
+    dot.operation = "DOT_PRODUCT"
+    nt.links.new(xy_vec.outputs[0], dot.inputs[0])
+    nt.links.new(xy_vec.outputs[0], dot.inputs[1])
+    rest = nt.nodes.new("ShaderNodeMath")
+    rest.operation = "SUBTRACT"
+    rest.use_clamp = True
+    rest.inputs[0].default_value = 1.0
+    nt.links.new(dot.outputs["Value"], rest.inputs[1])
+    z = nt.nodes.new("ShaderNodeMath")
+    z.operation = "SQRT"
+    nt.links.new(rest.outputs[0], z.inputs[0])
+    # Back to colour: (x, y, z) * 0.5 + 0.5, with R and G as stored.
+    z_col = nt.nodes.new("ShaderNodeMath")
+    z_col.operation = "MULTIPLY_ADD"
+    nt.links.new(z.outputs[0], z_col.inputs[0])
+    z_col.inputs[1].default_value = 0.5
+    z_col.inputs[2].default_value = 0.5
+    comb = nt.nodes.new("ShaderNodeCombineColor")
+    nt.links.new(sep.outputs["Red"], comb.inputs["Red"])
+    nt.links.new(sep.outputs["Green"], comb.inputs["Green"])
+    nt.links.new(z_col.outputs[0], comb.inputs["Blue"])
+    return comb.outputs["Color"]
+
+
 def textured_material(model):
     tex, name = model["textures"], model["name"]
     mat = bpy.data.materials.new(f"review-{name}")
@@ -160,18 +231,19 @@ def textured_material(model):
         nt.links.new(sep.outputs["Red"], bsdf.inputs["Metallic"])
         nt.links.new(sep.outputs["Green"], bsdf.inputs["Roughness"])
     else:
-        nt.links.new(image_node(nt, tex["roughness"], True).outputs["Color"], bsdf.inputs["Roughness"])
-        nt.links.new(image_node(nt, tex["metallic"], True).outputs["Color"], bsdf.inputs["Metallic"])
+        nt.links.new(red(nt, image_node(nt, tex["roughness"], True)), bsdf.inputs["Roughness"])
+        nt.links.new(red(nt, image_node(nt, tex["metallic"], True)), bsdf.inputs["Metallic"])
     nmap = nt.nodes.new("ShaderNodeNormalMap")
-    nt.links.new(image_node(nt, tex["normal"], True).outputs["Color"], nmap.inputs["Color"])
+    normal = image_node(nt, tex["normal"], True)
+    nt.links.new(normal_colour(nt, normal, model.get("normal_xy", False)), nmap.inputs["Color"])
     nt.links.new(nmap.outputs["Normal"], bsdf.inputs["Normal"])
     em = model.get("emissive")
-    if "emissive" in tex and em:
+    if "emissive" in tex:  # load_review refuses an emissive map without its table
         tint = nt.nodes.new("ShaderNodeMix")
         tint.data_type = "RGBA"
         tint.blend_type = "MULTIPLY"
         tint.inputs["Factor"].default_value = 1.0
-        nt.links.new(image_node(nt, tex["emissive"], True).outputs["Color"], tint.inputs[6])
+        nt.links.new(red(nt, image_node(nt, tex["emissive"], True)), tint.inputs[6])
         tint.inputs[7].default_value = mb.hex_linear(em["colour"]) + (1.0,)
         nt.links.new(tint.outputs[2], bsdf.inputs["Emission Color"])
         bsdf.inputs["Emission Strength"].default_value = float(em["strength"])
@@ -453,6 +525,10 @@ def main():
     cpu = "--cpu" in args
     out = review["out"]
     os.makedirs(out, exist_ok=True)
+    # A stale render_meta.json would let review-sheet sign off frames this run did not finish.
+    meta_path = os.path.join(out, "render_meta.json")
+    if os.path.exists(meta_path):
+        os.remove(meta_path)
 
     scene = clear_scene()
     r = Renderer(scene, review["samples"], cpu)
@@ -506,6 +582,7 @@ def main():
         "sun": {"dir": list(mb.SUN_DIR), "colour": list(mb.SUN_COLOR), "intensity": mb.SUN_INTENSITY,
                 "elevation_deg": mb.sun_elevation_deg()},
         "sky": {"ibl": mb.IBL, "zenith": list(mb.ZENITH), "horizon": list(mb.HORIZON),
+                "sun_color": list(mb.SKY_SUN_COLOR), "sun_glow": mb.SKY_SUN_GLOW,
                 "ground": list(mb.GROUND)},
         "ground_hex": mb.ASH_HEX, "lane_hex": mb.LANE_HEX, "l_ref": mb.l_ref(),
         "post_m": mb.REFERENCE_POST_M, "view_transform": "AgX",
@@ -640,7 +717,8 @@ def main():
         place(m, m["slot"])
 
     meta["models"] = [{
-        "name": m["name"], "glb": m["glb"], "role": m["role"], "size_class": m.get("size_class", ""),
+        # Relative to render_meta.json, so the render folder can be moved or shared.
+        "name": m["name"], "glb": os.path.relpath(m["glb"], out), "role": m["role"], "size_class": m.get("size_class", ""),
         "faction": m["faction"], "hover_m": float(m.get("hover_m", 0.0)),
         "pose": {"clip": (m.get("pose") or {}).get("clip", ""), "frame": m["frame"],
                  "applied": m["pose_applied"]},
@@ -650,9 +728,20 @@ def main():
         "emissive": m.get("emissive") or {},
     } for m in models]
     meta["frames"] = frames
-    with open(os.path.join(out, "render_meta.json"), "w", encoding="utf-8", newline="\n") as f:
+    # Written last and renamed into place: render_meta.json exists only for a finished run.
+    partial = meta_path + ".partial"
+    with open(partial, "w", encoding="utf-8", newline="\n") as f:
         json.dump(meta, f, indent=1)
-    print(f"review_render: wrote {os.path.join(out, 'render_meta.json')}", flush=True)
+    os.replace(partial, meta_path)
+    print(f"review_render: wrote {meta_path}", flush=True)
 
 
-main()
+if __name__ == "__main__":
+    # Blender keeps running (and exits 0) after an uncaught exception in a --python script.
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001 - any failure must be exit 1
+        traceback.print_exc()
+        sys.exit(1)

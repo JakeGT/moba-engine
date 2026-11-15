@@ -8,7 +8,8 @@ The numbers here are the engine's and the art bible's, never this file's own:
 - the light is Golden Crossing (`docs/art/lighting-mood.md`, option A): `sun_dir`
   (-0.885, 0.532, 0.465) towards the sun (x east, y up, z towards the screen bottom), `[lighting]`
   sun colour (1.0, 0.80, 0.62), intensity 1.5, IBL 0.35, the analytic zenith / horizon / ground
-  sky; the gameplay exposure targets the measured ground mean OKLab L of 0.50;
+  sky with env-bake's sun-glow lobe (sun_color (2.6, 1.55, 0.85), sun_glow 6); the gameplay
+  exposure targets the measured ground mean OKLab L of 0.50;
 - `L_ref` is the lane grit `#906B58` (palette-and-value §6) in that sun:
   `luminance(lane) x 1.5 x sin(28 deg)` (material-vocabulary §1.1).
 
@@ -32,6 +33,10 @@ SUN_COLOR = (1.0, 0.80, 0.62)
 SUN_INTENSITY = 1.5
 IBL = 0.35
 ZENITH, HORIZON, GROUND = (0.16, 0.22, 0.36), (0.95, 0.62, 0.38), (0.18, 0.11, 0.07)
+# The env bake's glow lobe (lighting-mood.md option A, env-bake `sky.rs`): its own colour, not
+# the [lighting] sun's.
+SKY_SUN_COLOR = (2.6, 1.55, 0.85)
+SKY_SUN_GLOW = 6.0
 ASH_HEX = "#6B6560"
 LANE_HEX = "#906B58"
 TARGET_GROUND_L = 0.50
@@ -86,7 +91,7 @@ def orbit_offset(yaw, pitch):
 def setup_cycles(scene, prefer=("OPTIX", "CUDA", "HIP")):
     """Cycles on the first GPU backend found, else the CPU. Returns (backend, [device names]).
 
-    Run every render or bake under `flock /home/jaket/Projects/MOBA/handoff/gpu.lock blender ...`
+    Run every render or bake under `flock /path/to/gpu.lock blender ...`
     on the maintainer's machine (the GPU-lock rule): the lock also covers CPU fallbacks.
     """
     scene.render.engine = "CYCLES"
@@ -159,6 +164,39 @@ def add_sky(scene):
     nt.links.new(below.outputs[0], mix.inputs["Factor"])
     nt.links.new(sky.outputs[2], mix.inputs[6])
     mix.inputs[7].default_value = GROUND + (1.0,)
-    nt.links.new(mix.outputs[2], bg.inputs["Color"])
+    # env-bake's sun glow: sun_color x max(dot(d, sun), 0)^sun_glow x smoothstep(-0.12, 0.04, y),
+    # with y the engine's up (Blender z). `Generated` is the unit view direction in world space.
+    cosine = nt.nodes.new("ShaderNodeVectorMath")
+    cosine.operation = "DOT_PRODUCT"
+    nt.links.new(tc.outputs["Generated"], cosine.inputs[0])
+    cosine.inputs[1].default_value = tuple(e2b(SUN_DIR).normalized())
+    # Clamp before the power: an even exponent would light the anti-sun side too.
+    facing = nt.nodes.new("ShaderNodeMath")
+    facing.operation = "MAXIMUM"
+    nt.links.new(cosine.outputs["Value"], facing.inputs[0])
+    facing.inputs[1].default_value = 0.0
+    positive = nt.nodes.new("ShaderNodeMath")
+    positive.operation = "POWER"
+    nt.links.new(facing.outputs[0], positive.inputs[0])
+    positive.inputs[1].default_value = SKY_SUN_GLOW
+    fade = nt.nodes.new("ShaderNodeMapRange")
+    fade.interpolation_type = "SMOOTHSTEP"
+    fade.clamp = True
+    nt.links.new(sep.outputs["Z"], fade.inputs["Value"])
+    fade.inputs["From Min"].default_value = -0.12
+    fade.inputs["From Max"].default_value = 0.04
+    fade.inputs["To Min"].default_value = 0.0
+    fade.inputs["To Max"].default_value = 1.0
+    weight = nt.nodes.new("ShaderNodeMath")
+    weight.operation = "MULTIPLY"
+    nt.links.new(positive.outputs[0], weight.inputs[0])
+    nt.links.new(fade.outputs["Result"], weight.inputs[1])
+    glow = nt.nodes.new("ShaderNodeMix")
+    glow.data_type = "RGBA"
+    glow.blend_type = "ADD"
+    nt.links.new(weight.outputs[0], glow.inputs["Factor"])
+    nt.links.new(mix.outputs[2], glow.inputs[6])
+    glow.inputs[7].default_value = SKY_SUN_COLOR + (1.0,)
+    nt.links.new(glow.outputs[2], bg.inputs["Color"])
     bg.inputs["Strength"].default_value = IBL
     return world

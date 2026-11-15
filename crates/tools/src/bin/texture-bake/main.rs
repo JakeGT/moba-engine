@@ -10,7 +10,8 @@
 //!
 //! `--kind` fixes the colour space and the default format: `color` (sRGB, `bc7-srgb`),
 //! `normal` (tangent XY in RG, `bc5`), `data` (linear RG such as metallic/roughness, `bc5`),
-//! `weights` (four linear channels such as a terrain splat, `bc7`) and `mask` (linear R,
+//! `weights` (four linear channels such as a terrain splat, `bc7`; the PNG must have alpha, and
+//! a bake under 35 dB warns that hard junctions want `rgba8`) and `mask` (linear R,
 //! `bc4`). `--format` may pick the kind's 8-bit fallback instead
 //! (`rgba8-srgb`, `rg8`, `rgba8`, `r8`). Mips are filtered per kind (linear-light colour,
 //! renormalised normals); see `mips.rs`. A baked BC file reports its level-0 PSNR against

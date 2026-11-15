@@ -148,17 +148,24 @@ the semver check):
     palette chroma, emissive EV and area, dust and the team mask (material-vocabulary §1.1,
     §2 and §6). It also checks roadmap §9.1's texel density and the export (loader limits,
     baked `TANGENT`, feet at y = 0). The mode is separate from the pack check and `--provenance`.
+    A class may name its material-vocabulary §3 entry (`vocab`): where §3 conflicts with its
+    §2 row, §3 applies (the conflicts are listed for the maintainer in the amendment). Maps
+    stay at their file's depth, so a 4096² hero peaks near 414 MiB; UVs no tiling explains are
+    refused, and UVs that tile past the raster budget report coverage as not measured.
   - `scripts/blender/review_render.py` renders review frames in Golden Crossing light from the
     engine's default camera (46 m at 1440p and 4K, 8 m zoom, turntable, lineup, flat
     silhouettes at 8 yaws). The new `review-sheet` refuses frames made with any other camera
     or sun. It then checks CON-1, CON-4, VAL-2 to VAL-4, the rendered PBR-EMIT-1 to -3 and
     SIL-1 to SIL-8, and writes five contact sheets and `metrics.json`. Every sheet prints the
     camera, the sun and their 12.4° gap: assets face the default camera from their shade side.
+    The sky carries env-bake's sun-glow lobe, which `render_meta.json` pins.
   - `scripts/blender/export_glb.py` is the headless Blender → `.glb` export convention
     (metres, axes, feet, names, material slots, baked MikkTSpace `TANGENT`). It refuses a
-    scene that breaks the convention and writes a provenance stub.
+    scene that breaks the convention, writes only a verified file, and writes a provenance
+    stub. Both Blender scripts exit 1 on any exception.
   - `texture-bake --kind weights` bakes four linear channels for the terrain splat (`--kind
-    data` has two). `moba-tools` gains `serde` and `toml`, both already in the workspace, and
+    data` has two). It refuses a PNG without alpha and warns below 35 dB, where hard
+    junctions want `--format rgba8`. `moba-tools` gains `serde` and `toml`, both already in the workspace, and
     `glam` as a dev-dependency.
 - **Asset licence and provenance gate, and MikkTSpace tangents (next-gen roadmap A0,
   [ADR-0022](docs/adr/0022-provenance-gate-mikktspace.md)):**
