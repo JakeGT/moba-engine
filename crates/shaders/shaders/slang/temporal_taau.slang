@@ -9,8 +9,9 @@
 //   3. the upsampled current sample: the render samples around the pixel weighted by a
 //      Blackman-Harris kernel (its Gaussian fit) of their jittered distance; the largest
 //      weight is the pixel's confidence;
-//   4. a variance clip in YCoCg (gamma 1.0, 1.25 on static pixels, narrowed by 0.5 x tc_mask)
-//      towards the mean;
+//   4. a variance clip in YCoCg toward the mean of mean +- gamma x sigma (gamma 1.0, 1.25 on
+//      static pixels, narrowed by 0.5 x tc_mask), blended into a per-channel clamp where the
+//      box is narrower than CLAMP_EXTENT (ADR-0021 amendment 7);
 //   5. a luminance-weighted blend (1 / (1 + L)) against fireflies.
 // Ghosting rules: base history weight 0.9 at native rising to 0.95 at 2x, lowered by the
 // current sample's confidence; falling linearly to 0.8 at 8 output pixels of motion per
@@ -60,6 +61,9 @@ static const uint DEBUG_REACTIVE = 2;
 static const uint DEBUG_TC = 3;
 static const uint DEBUG_DISOCCLUSION = 4;
 static const uint DEBUG_CONFIDENCE = 5;
+// Below this half-extent (tonemapped YCoCg) the history box blends from the clip into a
+// per-channel clamp (ADR-0021 amendment 7).
+static const float CLAMP_EXTENT = 0.004;
 
 static const int TILE = 16;
 static const int BORDER_TILE = TILE + 2;
@@ -211,22 +215,28 @@ float3 resolve_pixel(int2 out_pixel, bool store)
         {
             history_weight = 0.0;
         }
-        // 4. Variance clip towards the mean.
+        // 4. Variance clip into the neighbourhood box (a clamp where the box is degenerate).
         float3 mean = m1 / 9.0;
         float3 sigma = sqrt(max(m2 / 9.0 - mean * mean, float3(0.0, 0.0, 0.0)));
         float gamma = (length(m) < 0.05 ? 1.25 : 1.0) - 0.5 * tc;
         float3 h = to_ycocg(history * exposure_value / (1.0 + luma(history * exposure_value)));
         float3 lo = mean - gamma * sigma;
         float3 hi = mean + gamma * sigma;
+        // The clip pulls the history toward the box's centre along its whole offset, scaled by
+        // the most-violated axis. Where the box is degenerate on an axis (flat chroma: a few
+        // 1e-5 wide) a sub-step change on that axis rescaled the whole offset, luma included,
+        // and moved the pixel by up to 15/255; there a per-channel clamp is used instead,
+        // blended continuously by the narrowest half-extent (ADR-0021 amendment 7). A clamp
+        // alone keeps more of a bright history at the box's corners (the ghost probe's
+        // particle smear), so the clip stays wherever the box is wider than CLAMP_EXTENT.
         float3 centre = 0.5 * (hi + lo);
-        float3 extent = max(0.5 * (hi - lo), float3(1e-5, 1e-5, 1e-5));
+        float3 half_box = 0.5 * (hi - lo);
         float3 offset = h - centre;
-        float3 units = abs(offset / extent);
+        float3 units = abs(offset / max(half_box, float3(1e-5, 1e-5, 1e-5)));
         float largest = max(units.x, max(units.y, units.z));
-        if (largest > 1.0)
-        {
-            h = centre + offset / largest;
-        }
+        float3 clipped_h = largest > 1.0 ? centre + offset / largest : h;
+        float narrowest = min(half_box.x, min(half_box.y, half_box.z));
+        h = lerp(clamp(h, lo, hi), clipped_h, saturate(narrowest / CLAMP_EXTENT));
         float3 clipped = from_ycocg(h);
         // Back from the tonemapped space.
         float l = luma(clipped);
@@ -315,7 +325,7 @@ void main(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
     float3 h = rcas_in(resolved[(cell.y + 1) * BORDER_TILE + cell.x], ex);
     float3 mn4 = min(min(b, d), min(f, h));
     float3 mx4 = max(max(b, d), max(f, h));
-    float3 hit_min = mn4 / max(4.0 * mx4, float3(1e-5, 1e-5, 1e-5));
+    float3 hit_min = mn4 / max(4.0 * mx4, float3(0.01, 0.01, 0.01));
     float3 hit_max = (1.0 - mx4) / min(4.0 * mn4 - 4.0, float3(-1e-5, -1e-5, -1e-5));
     float3 lobe3 = max(-hit_min, hit_max);
     // The RCAS limit (0.25 - 1/16) keeps the kernel's centre weight positive.

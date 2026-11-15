@@ -44,7 +44,7 @@ use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::memory::MemoryStats;
 use crate::passes::contact::ContactPass;
-use crate::passes::deferred::{DeferredPass, DeferredTargets};
+use crate::passes::deferred::{DeferredPass, DeferredTargets, DeferredViews};
 use crate::passes::fog::FogPass;
 use crate::passes::gameplay_overlay::{GameplayOverlay, OverlayBlock, OverlayImages};
 use crate::passes::gbuffer_debug::{GBufferDebugPass, GBufferDebugTargets};
@@ -53,7 +53,7 @@ use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
     CullSettings, MainFrame, MainViewSpec, OutlineIdTarget, OverlayPrepassTarget, PrepassTarget,
-    ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget, SkyTargets,
+    ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget, SimpleWaterTargets,
     TcMaskTarget, ViewBudget, WaterTargets,
 };
 use crate::passes::vfx::{
@@ -865,6 +865,18 @@ impl Renderer {
                 eprintln!("[render] temporal AA needs compute on the graphics queue; using FXAA");
                 post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
             }
+            // TAAU's 16 x 16 workgroups: every probed device reports 1024, but the core
+            // minimum is 128 (ADR-0023 amendment 2 item 17).
+            if post_config.anti_aliasing == AntiAliasing::Temporal
+                && device.max_compute_work_group_invocations < 256
+            {
+                eprintln!(
+                    "[render] temporal AA needs 256 compute invocations per workgroup \
+                     (maxComputeWorkGroupInvocations {}); using FXAA",
+                    device.max_compute_work_group_invocations
+                );
+                post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
+            }
         } else if post_config.anti_aliasing == AntiAliasing::Temporal {
             eprintln!("[render] temporal AA is tiered-only (ADR-0021 §7); using FXAA");
             post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
@@ -873,7 +885,13 @@ impl Renderer {
         // ADR-0023 §2 (N2b): the deferred lighting reads the G-buffer, which exists only with
         // temporal AA (amendment 1 item 8), and stores into `hdr` as a storage image, which
         // `R16G16B16A16_SFLOAT` always supports (the packed format need not).
-        let deferred = tiered && temporal && config.deferred;
+        let mut deferred = tiered && temporal && config.deferred;
+        // A device admitted to Tiered that cannot run the deferred passes lights forward
+        // (ADR-0023 amendment 2 items 13 and 17), with one log line.
+        if deferred && let Some(reason) = crate::passes::deferred::unsupported(&device) {
+            eprintln!("[render] deferred lighting unavailable ({reason}); lighting forward");
+            deferred = false;
+        }
         if deferred && hdr_format != vk::Format::R16G16B16A16_SFLOAT {
             hdr_format = vk::Format::R16G16B16A16_SFLOAT;
         }
@@ -1135,6 +1153,7 @@ impl Renderer {
                 overlay: tiered,
                 depth: frame_spec.depth,
                 deferred: frame_spec.has_deferred(),
+                sky: world_config.sky,
             },
             config.skinning,
             CullSettings {
@@ -2447,6 +2466,21 @@ impl Renderer {
         let contact = view(resources.contact);
         self.lighting
             .bind_transients(&self.device, shadow, contact, ao);
+        // N2b: the deferred passes' sets name the G-buffer, the depth and `hdr`.
+        if let (Some(pass), Some(temporal)) = (&self.deferred, resources.temporal) {
+            let gbuffer = temporal.gbuffer.map(|id| view(Some(id)));
+            if let ([Some(gb0), Some(gb1), Some(gb2)], Some(depth), Some(hdr)) = (
+                gbuffer,
+                view(Some(resources.depth)),
+                view(Some(resources.hdr)),
+            ) {
+                pass.bind_targets(&DeferredViews {
+                    gbuffer: [gb0, gb1, gb2],
+                    depth,
+                    hdr,
+                });
+            }
+        }
         if let (Some(pass), Some(depth)) = (&self.contact, view(Some(resources.depth))) {
             pass.bind_depth(&self.device, depth);
         }
@@ -3030,18 +3064,14 @@ impl Renderer {
         let prepass = self.frame_spec.has_prepass();
         // N2b: the frame graph has the deferred passes (and the tile buffer) only then.
         let deferred = resources.tiles.is_some() && self.deferred.is_some();
-        let deferred_targets =
-            resources
-                .temporal
-                .filter(|_| deferred)
-                .map(|temporal| DeferredTargets {
-                    gbuffer: temporal.gbuffer.map(|id| self.transient(id).view()),
-                    depth: depth_view,
-                    hdr: hdr_view,
-                    camera: self.scene.camera_set(frame_index),
-                    lighting: self.lighting.set(frame_index),
-                    render_size: render_extent,
-                });
+        let deferred_targets = resources
+            .temporal
+            .filter(|_| deferred)
+            .map(|_| DeferredTargets {
+                camera: self.scene.camera_set(frame_index),
+                lighting: self.lighting.set(frame_index),
+                render_size: render_extent,
+            });
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
         self.profiler.begin_frame(command_buffers[0], frame_index);
@@ -3090,7 +3120,10 @@ impl Renderer {
                         gbuffer_store: deferred
                             || self.frame_spec.gbuffer_debug
                             || self.frame_spec.readback,
-                        hdr: deferred.then_some((hdr_view, self.config.clear_color)),
+                        hdr: deferred.then_some((
+                            hdr_view,
+                            (!self.world_config.sky).then_some(self.config.clear_color),
+                        )),
                         lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                     },
@@ -3172,23 +3205,22 @@ impl Renderer {
                 ),
                 PassKind::LightClassify => {
                     if let (Some(pass), Some(targets)) = (&self.deferred, &deferred_targets) {
-                        pass.record_classify(command_buffer, frame_index, targets);
+                        pass.record_classify(command_buffer, targets);
                     }
                 }
                 PassKind::DeferredLight => {
                     if let (Some(pass), Some(targets)) = (&self.deferred, &deferred_targets) {
-                        pass.record_light(command_buffer, frame_index, targets);
+                        pass.record_light(command_buffer, targets);
                     }
                 }
-                PassKind::Sky => self.scene.record_sky_pass(
+                PassKind::SimpleWater => self.scene.record_simple_water_pass(
                     &self.device,
                     command_buffer,
                     frame_index,
-                    &SkyTargets {
+                    &SimpleWaterTargets {
                         hdr: hdr_view,
                         depth: depth_view,
                         extent: render_extent,
-                        sky: self.world_config.sky,
                         lighting: self.lighting.set(frame_index),
                     },
                 ),

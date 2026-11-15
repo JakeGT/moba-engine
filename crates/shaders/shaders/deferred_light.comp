@@ -9,8 +9,10 @@
 // shadows, clustered point lights, ambient, AO and map stylisation, so a deferred pixel and a
 // forward one at the same point evaluate the same lights with the same caps (§2b, §5b). Then
 // fog of war (unless `NO_FOG_OF_WAR`) and height fog, as the forward fragment stages apply
-// them. The G-buffer pass wrote emissive into `hdr`; it is added before the fog, as the
-// forward `shade()` adds it, and the result replaces it.
+// them. The G-buffer pass wrote the units' emissive into `hdr` (the terrain and the foliage
+// leave it unwritten, an empty write mask); a unit's is read and added before the fog, as the
+// forward `shade()` adds it, and the result replaces every lit pixel. The sky, also drawn by
+// the G-buffer pass, is never in a listed tile's lit pixels.
 //
 // Permutations (crates/shaders/build.rs): the default build is the standard tiles' fast path
 // (`STANDARD` and `UNLIT` only); `DEFERRED_EXTENDED` adds the other models (N2b: `FOLIAGE`,
@@ -19,6 +21,11 @@
 // Bindings: set 0 the camera block, set 1 this pass's inputs (below), set 3 the scene
 // lighting set. `DeferredPush` mirrors `DeferredPush` in crates/render/src/passes/deferred.rs
 // (a SPIR-V layout test checks the offsets).
+//
+// The debug views (MOBA_DEBUG_VIEW=lit-only|light-count|tiles) are the specialisation
+// constant `DEBUG_VIEW`, fixed when the pipelines are built, so the shipped pipelines have no
+// debug branches. Their colours are scene-linear, before exposure: the composite's exposure
+// scales them like the frame (this pass runs before the exposure is measured).
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
@@ -48,8 +55,6 @@ layout(std430, set = 1, binding = 5) readonly buffer Tiles {
 layout(push_constant) uniform DeferredPush {
     uvec2 render_size;  // this frame's rendered sub-rectangle
     uint list_offset;   // word offset of this dispatch's tile list in `tiles`
-    uint debug;         // 0 off, 1 lit-only, 2 light-count, 3 tiles (MOBA_DEBUG_VIEW)
-    float inv_exposure; // 1 / the composite's exposure, for the debug views' colours
     uint tile_class;    // 1 standard, 2 extended (its count's word, the tiles view's colour)
     uint row_width;     // groups per row of the indirect dispatch (the layout's `tiles_x`)
     uint capacity;      // tiles each list holds
@@ -57,6 +62,8 @@ layout(push_constant) uniform DeferredPush {
 
 const uint TILE_COUNT_WORD = 9u;
 
+// 0 off, 1 lit-only, 2 light-count, 3 tiles (`TemporalDebugView::deferred_view`).
+layout(constant_id = 0) const uint DEBUG_VIEW = 0u;
 const uint DEBUG_LIT_ONLY = 1u;
 const uint DEBUG_LIGHT_COUNT = 2u;
 const uint DEBUG_TILES = 3u;
@@ -97,13 +104,13 @@ void main() {
     }
     float depth = texelFetch(scene_depth, pixel, 0).r;
     if (DEPTH_IS_FAR(depth)) {
-        return; // The sky pass draws it.
+        return; // The G-buffer pass drew the sky.
     }
     SurfaceParams s = decode_gbuffer(
         texelFetch(gbuffer0, pixel, 0), texelFetch(gbuffer1, pixel, 0),
         texelFetch(gbuffer2, pixel, 0));
     if (s.model == GBUFFER_MODEL_UNLIT) {
-        return; // Emissive only: the G-buffer pass wrote it.
+        return; // Emissive only: the G-buffer pass wrote it (no shipped surface is UNLIT).
     }
     moba_pixel_center = vec2(pixel) + 0.5;
     // The scene renders with a flipped viewport: NDC +Y is the top of the image. The camera's
@@ -113,9 +120,9 @@ void main() {
     vec3 world_pos = world_h.xyz / world_h.w;
 
     bool unit = (s.flags & GBUFFER_FLAG_UNIT) != 0u;
-    vec3 albedo = push.debug == DEBUG_LIT_ONLY ? vec3(1.0) : s.base_color;
+    vec3 albedo = DEBUG_VIEW == DEBUG_LIT_ONLY ? vec3(1.0) : s.base_color;
     Surface surface = default_surface(albedo, s.normal, world_pos, s.roughness);
-    surface.metallic = push.debug == DEBUG_LIT_ONLY ? 0.0 : s.metallic;
+    surface.metallic = DEBUG_VIEW == DEBUG_LIT_ONLY ? 0.0 : s.metallic;
     surface.occlusion = s.ao;
     // Today's map rim on units only, as the forward unit, skinned and VAT draws have it
     // (the terrain and foliage zero it). Per-material rim, wrap, ramp and specular overrides
@@ -129,8 +136,11 @@ void main() {
         surface.geometric_normal = vec3(0.0, 1.0, 0.0);
     }
 #endif
-    vec4 prior = imageLoad(hdr, pixel);
-    surface.emissive = push.debug == DEBUG_LIT_ONLY ? vec3(0.0) : prior.rgb;
+    // Only the units emit (`default_surface` has none): the other surfaces' `hdr` texels were
+    // never written this frame, so they are not read.
+    if (unit && DEBUG_VIEW != DEBUG_LIT_ONLY) {
+        surface.emissive = imageLoad(hdr, pixel).rgb;
+    }
     vec3 lit = shade(surface);
 #ifdef DEFERRED_EXTENDED
     if (s.model == GBUFFER_MODEL_FOLIAGE) {
@@ -153,13 +163,13 @@ void main() {
     } else {
         lit = apply_height_fog(lit, world_pos);
     }
-    if (push.debug == DEBUG_LIGHT_COUNT) {
-        lit = heat(column_lights(world_pos)) * push.inv_exposure;
-    } else if (push.debug == DEBUG_TILES) {
+    if (DEBUG_VIEW == DEBUG_LIGHT_COUNT) {
+        lit = heat(column_lights(world_pos));
+    } else if (DEBUG_VIEW == DEBUG_TILES) {
         // Standard tiles green, extended orange, over the lit frame; tile edges darker.
         vec3 tint = push.tile_class == 2u ? vec3(1.0, 0.55, 0.1) : vec3(0.2, 1.0, 0.3);
         bool edge = any(equal(gl_LocalInvocationID.xy, uvec2(0u)));
-        lit = mix(lit, tint * push.inv_exposure, edge ? 0.8 : 0.35);
+        lit = mix(lit, tint, edge ? 0.8 : 0.35);
     }
     imageStore(hdr, pixel, vec4(lit, 1.0));
 }

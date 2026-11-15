@@ -46,7 +46,8 @@ layout(location = 4) out uint out_id;
 #endif
 #ifdef GBUFFER_HDR
 // N2b (ADR-0023 §1a, §2): the light-accumulation target, after the outline IDs when they are
-// attached. The deferred lighting adds the lit surface to it.
+// attached. The deferred lighting reads it as the unit's emissive and replaces it with the
+// lit, fogged surface.
 #ifdef PREPASS_IDS
 layout(location = 5) out vec4 out_hdr;
 #else
@@ -95,7 +96,8 @@ void main() {
     out_id = in_outline_slot == 0u ? 8u : in_outline_slot;
 #endif
 #ifdef GBUFFER_HDR
-    // Emissive goes straight into the light accumulation (§1a); the lighting adds the rest.
+    // Emissive goes straight into the light accumulation (§1a); the lighting reads it, adds
+    // the lit surface and stores the sum over it.
     out_hdr = vec4(min(surface.emissive, vec3(MOBA_MAX_RADIANCE)), 1.0);
 #endif
 #else

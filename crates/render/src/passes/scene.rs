@@ -246,9 +246,11 @@ pub(crate) struct PrepassTarget {
     /// (the forward frame) the targets are `DONT_CARE`, so a tile-based or compressing GPU
     /// need not write them out.
     pub(crate) gbuffer_store: bool,
-    /// The deferred frame's light-accumulation target (N2b, ADR-0023 §2) and its clear
-    /// colour: cleared, then the emissive written, after the G-buffer and the IDs.
-    pub(crate) hdr: Option<(vk::ImageView, [f32; 4])>,
+    /// The deferred frame's light-accumulation target (N2b, ADR-0023 §2), after the G-buffer
+    /// and the IDs: the units write their emissive and the sky its radiance, and the lighting
+    /// overwrites every other pixel, so it is not loaded (`DONT_CARE`). Without the sky its
+    /// clear colour is given: the background keeps it.
+    pub(crate) hdr: Option<(vk::ImageView, Option<[f32; 4]>)>,
     /// The main view's lighting set (the G-buffer prepass's fragment stages read it).
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) extent: vk::Extent2D,
@@ -560,14 +562,12 @@ pub(crate) struct WaterTargets {
 }
 
 /// The deferred frame's `sky` pass targets (N2b, ADR-0023 §2a, §11).
-pub(crate) struct SkyTargets {
+pub(crate) struct SimpleWaterTargets {
     /// The lit `hdr`, loaded and stored.
     pub(crate) hdr: vk::ImageView,
     /// Read-only (tested and sampled-capable).
     pub(crate) depth: vk::ImageView,
     pub(crate) extent: vk::Extent2D,
-    /// Draw the sky (the world's `sky`); otherwise the background keeps the clear colour.
-    pub(crate) sky: bool,
     pub(crate) lighting: vk::DescriptorSet,
 }
 
@@ -594,6 +594,9 @@ pub(crate) struct SceneSetSpec {
     pub(crate) depth: DepthConvention,
     /// The deferred lighting (ADR-0023 §2, N2b): the G-buffer pass also writes `hdr`.
     pub(crate) deferred: bool,
+    /// The world draws the sky (`WorldConfig::sky`): the deferred frame's G-buffer pass
+    /// writes its radiance into `hdr`; without it the background keeps the clear colour.
+    pub(crate) sky: bool,
 }
 
 impl ScenePipelines {
@@ -619,6 +622,7 @@ impl ScenePipelines {
             overlay,
             depth,
             deferred,
+            sky: world_sky,
         } = set;
         let depth_compare = depth.compare();
         let module = |name| shaders.module(device, name);
@@ -896,6 +900,7 @@ impl ScenePipelines {
                 skinned.is_some(),
                 vat.is_some(),
                 deferred.then_some(color_format),
+                world_sky,
             )?)
         } else {
             let id_format = outline_ids.then_some(crate::frame_graph::OUTLINE_ID_FORMAT);
@@ -1105,6 +1110,7 @@ impl ScenePipelines {
     /// emissive, or the clear colour kept where the sky is (ADR-0023 amendment 2).
     #[allow(clippy::too_many_arguments)] // One set of pipelines.
     #[allow(clippy::too_many_lines)] // One pipeline per drawable kind, in draw order.
+    #[allow(clippy::fn_params_excessive_bools)] // The variant's switches, each one pipeline axis.
     fn build_motion_prepass(
         device: &DeviceContext,
         shaders: &ShaderSource,
@@ -1118,6 +1124,7 @@ impl ScenePipelines {
         skinned: bool,
         vat: bool,
         hdr: Option<vk::Format>,
+        sky_radiance: bool,
     ) -> RenderResult<PrepassPipelines> {
         let module = |name| shaders.module(device, name);
         let depth_compare = depth.compare();
@@ -1159,37 +1166,44 @@ impl ScenePipelines {
         let id = |write_mask| target(crate::frame_graph::OUTLINE_ID_FORMAT, write_mask);
         let [g0, g1, g2] = gbuffer(rgba);
         let count = 4 + usize::from(ids) + usize::from(hdr.is_some());
-        // N2b: `hdr` follows the IDs (or takes their place). Every pipeline writes it; the
-        // sky's blend keeps the clear colour (`TargetBlend::Keep`), which the deferred frame's
-        // sky pass then draws over.
-        let hdr_target = |blend| ColorTarget {
+        // N2b: `hdr` follows the IDs (or takes their place). Only the units (their emissive)
+        // and the sky (its radiance) write it; the terrain and the foliage have an empty mask,
+        // since the deferred lighting replaces their pixels without reading them (amendment 2
+        // item 6). Lavapipe ignores the empty mask (amendment 1 item 16) and stores the
+        // shader's zero there, which nothing reads either. Without the world's sky, the sky
+        // keeps the clear colour (`TargetBlend::Keep`).
+        let hdr_target = |write_mask, blend| ColorTarget {
             format: hdr.unwrap_or(vk::Format::UNDEFINED),
-            write_mask: rgba,
+            write_mask,
             blend,
         };
-        let with_hdr = |targets: [ColorTarget; 5], blend| {
+        let with_hdr = |targets: [ColorTarget; 5], hdr_target: ColorTarget| {
             let mut all = [targets[0]; 6];
             all[..4].copy_from_slice(&targets[..4]);
             if ids {
                 all[4] = targets[4];
-                all[5] = hdr_target(blend);
+                all[5] = hdr_target;
             } else {
-                all[4] = hdr_target(blend);
+                all[4] = hdr_target;
             }
             all
+        };
+        let emits = hdr_target(rgba, TargetBlend::None);
+        let no_hdr = hdr_target(none, TargetBlend::None);
+        let sky_hdr = if sky_radiance {
+            emits
+        } else {
+            hdr_target(rgba, TargetBlend::Keep)
         };
         // Every pipeline writes motion and the G-buffer. The units write their slot, and the
         // terrain and the sky write 0 (their `*_ids` fragments), all with masks covering what
         // the shader writes. The foliage alone keeps an empty mask over an output it never
         // writes, so a unit under the brush keeps its slot: defined on a conformant device,
         // but not honoured on lavapipe, where that slot is undefined (amendment 1 item 16).
-        let sky_targets = with_hdr([motion, g0, g1, g2, id(rgba)], TargetBlend::Keep);
-        let written = with_hdr([motion, g0, g1, g2, id(rgba)], TargetBlend::None);
-        let units = with_hdr(
-            [motion, g0, g1, g2, id(vk::ColorComponentFlags::R)],
-            TargetBlend::None,
-        );
-        let foliage_targets = with_hdr([motion, g0, g1, g2, id(none)], TargetBlend::None);
+        let sky_targets = with_hdr([motion, g0, g1, g2, id(rgba)], sky_hdr);
+        let written = with_hdr([motion, g0, g1, g2, id(rgba)], no_hdr);
+        let units = with_hdr([motion, g0, g1, g2, id(vk::ColorComponentFlags::R)], emits);
+        let foliage_targets = with_hdr([motion, g0, g1, g2, id(none)], no_hdr);
         let suffixed = |base: &'static str| -> &'static str {
             match (base, hdr.is_some()) {
                 (_, false) => base,
@@ -1508,6 +1522,8 @@ pub(crate) struct MainViewSpec {
     pub(crate) depth: DepthConvention,
     /// The deferred lighting (N2b): the G-buffer pass also writes `hdr`. With `temporal`.
     pub(crate) deferred: bool,
+    /// The world draws the sky ([`SceneSetSpec::sky`]).
+    pub(crate) sky: bool,
 }
 
 impl MainViewSpec {
@@ -1523,6 +1539,7 @@ impl MainViewSpec {
             overlay: self.overlay && !msaa,
             depth: self.depth,
             deferred: self.deferred && self.temporal && !msaa,
+            sky: self.sky,
         };
         let main = msaa.then_some(SceneSetSpec {
             samples: self.samples,
@@ -1534,6 +1551,7 @@ impl MainViewSpec {
             overlay: false,
             depth: self.depth,
             deferred: false,
+            sky: self.sky,
         });
         (base, main)
     }
@@ -2558,19 +2576,21 @@ impl ScenePass {
         device.cmd_end_rendering(command_buffer);
     }
 
-    /// Records the deferred frame's `sky` pass (N2b, ADR-0023 §2a, §11): after the deferred
-    /// lighting, the sky where nothing was drawn (the far plane, tested only), then the simple
-    /// water over the carved bed when the full water is not built, as the forward `scene`
-    /// ended. The depth is read-only: neither writes it.
-    pub(crate) fn record_sky_pass(
+    /// Records the deferred frame's `simple_water` pass (N2b, ADR-0023 §11, amendment 2
+    /// item 7): after the deferred lighting, the simple water over the carved bed when the
+    /// full water is not built, as the forward `scene` ended. The G-buffer pass already drew
+    /// the sky. The depth is read-only.
+    pub(crate) fn record_simple_water_pass(
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
         frame: usize,
-        targets: &SkyTargets,
+        targets: &SimpleWaterTargets,
     ) {
+        if self.pipelines.water_full.is_some() || !self.environment.has_water() {
+            return;
+        }
         let pipelines = self.view_pipelines(0);
-        let water = self.pipelines.water_full.is_none();
         let color = vk::RenderingAttachmentInfo::default()
             .image_view(targets.hdr)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -2596,36 +2616,16 @@ impl ScenePass {
             super::flipped_viewport(targets.extent),
             targets.extent,
         );
-        // Set 0 (the camera) serves the sky and the water; set 3 the sky.
+        // Set 0 (the camera) serves the water; it binds set 3 itself.
         self.bind_view_sets(device, command_buffer, &self.views[0], frame);
-        if targets.sky {
-            // SAFETY: as in `record`: the lighting set matches the layout's set 3 and lives as
-            // long as the renderer.
-            unsafe {
-                device.device.cmd_bind_descriptor_sets(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline_layout.handle(),
-                    3,
-                    &[targets.lighting],
-                    &[],
-                );
-            }
-            bind_pipeline(device, command_buffer, &pipelines.sky);
-            // SAFETY: the sky reads no vertex buffers; three vertices form the covering
-            // triangle, and its sets (camera, lighting) are bound with the shared layout.
-            unsafe { device.device.cmd_draw(command_buffer, 3, 1, 0, 0) };
-        }
-        if water {
-            self.environment.record_water(
-                device,
-                command_buffer,
-                frame,
-                pipelines.water.handle(),
-                targets.lighting,
-                false,
-            );
-        }
+        self.environment.record_water(
+            device,
+            command_buffer,
+            frame,
+            pipelines.water.handle(),
+            targets.lighting,
+            false,
+        );
         device.cmd_end_rendering(command_buffer);
     }
 
@@ -2858,10 +2858,11 @@ impl ScenePass {
             .into_iter()
             .flatten()
             .map(|view| cleared(view).store_op(gbuffer_store));
-        let hdr_attachment = target.hdr.map(|(view, clear)| {
-            cleared(view).clear_value(vk::ClearValue {
+        let hdr_attachment = target.hdr.map(|(view, clear)| match clear {
+            Some(clear) => cleared(view).clear_value(vk::ClearValue {
                 color: vk::ClearColorValue { float32: clear },
-            })
+            }),
+            None => cleared(view).load_op(vk::AttachmentLoadOp::DONT_CARE),
         });
         let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 6];
         let mut color_count = 0;
@@ -2962,9 +2963,25 @@ impl ScenePass {
             );
         }
         if let Some(sky) = &prepass.sky {
+            if target.hdr.is_some() {
+                // N2b: the sky's radiance samples the environment (set 3), which the foliage's
+                // own layout may have disturbed.
+                // SAFETY: as in `record`: the lighting set matches the layout's set 3 and lives
+                // as long as the renderer.
+                unsafe {
+                    device.device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipeline_layout.handle(),
+                        3,
+                        &[target.lighting],
+                        &[],
+                    );
+                }
+            }
             bind_pipeline(device, command_buffer, sky);
-            // SAFETY: no vertex input; three vertices form the covering triangle, and its set
-            // (the camera) is bound with the shared layout.
+            // SAFETY: no vertex input; three vertices form the covering triangle, and its sets
+            // (the camera, and with `hdr` the lighting) are bound with the shared layout.
             unsafe { device.device.cmd_draw(command_buffer, 3, 1, 0, 0) };
         }
         device.cmd_end_rendering(command_buffer);

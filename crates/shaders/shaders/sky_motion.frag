@@ -10,6 +10,9 @@
 // over an unwritten output (amendment 1 item 16). Both equal the attachments' clears.
 
 #include "camera.glsl"
+#ifdef GBUFFER_HDR
+#include "sky_radiance.glsl"
+#endif
 #define MOTION_VECTORS_FRAGMENT
 #include "motion.glsl"
 
@@ -23,9 +26,10 @@ layout(location = 3) out vec4 out_gb2;
 layout(location = 4) out uint out_id;
 #endif
 #ifdef GBUFFER_HDR
-// N2b (ADR-0023 §1a, §2): the light-accumulation target, after the outline IDs when they are
-// attached. The sky pipeline blends it
-// (ZERO, ONE), so the target keeps its clear colour where the sky pass draws nothing.
+// N2b (ADR-0023 §1a, §2, amendment 2 item 7): the light-accumulation target, after the outline
+// IDs when they are attached: the sky's radiance, which the deferred lighting never
+// overwrites (it skips the far plane). Without the world's sky the pipeline blends it
+// (ZERO, ONE), so the target keeps its clear colour.
 #ifdef PREPASS_IDS
 layout(location = 5) out vec4 out_hdr;
 #else
@@ -48,6 +52,6 @@ void main() {
     out_id = 0u;
 #endif
 #ifdef GBUFFER_HDR
-    out_hdr = vec4(0.0);
+    out_hdr = vec4(sky_radiance(in_ray), 1.0);
 #endif
 }

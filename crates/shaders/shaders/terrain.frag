@@ -51,7 +51,9 @@ layout(location = 4) out uint out_id;
 #endif
 #ifdef GBUFFER_HDR
 // N2b (ADR-0023 §1a, §2): the light-accumulation target, after the outline IDs when they are
-// attached. The deferred lighting adds the lit surface to it.
+// attached. Its write mask is empty (ADR-0023 amendment 2 item 6): the deferred lighting
+// replaces this pixel without reading it. Lavapipe, which ignores the empty mask, stores this
+// zero.
 #ifdef PREPASS_IDS
 layout(location = 5) out vec4 out_hdr;
 #else

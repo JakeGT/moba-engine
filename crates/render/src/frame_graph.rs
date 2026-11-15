@@ -188,8 +188,9 @@ pub(crate) enum PassKind {
     LightClassify,
     /// The deferred lighting, one indirect dispatch per tile class (ADR-0023 §2).
     DeferredLight,
-    /// The sky (and the simple water) after the deferred lighting (ADR-0023 §2a, §11).
-    Sky,
+    /// The simple (non-refracting) water after the deferred lighting, where there is no full
+    /// water pass (ADR-0023 §11, amendment 2 item 7).
+    SimpleWater,
 }
 
 /// Resource ids of one offscreen image: colour (sampled by the UI), depth and its bones.
@@ -401,7 +402,8 @@ pub(crate) struct FrameSpec {
     /// [`Self::temporal`] only (its prepass writes the G-buffer).
     pub(crate) gbuffer_debug: bool,
     /// The deferred lighting (ADR-0023 §2, §11; N2b): the G-buffer pass also writes `hdr`
-    /// (emissive), `light_classify`, `deferred_light` and `sky` replace the `scene` pass.
+    /// (the units' emissive and the sky), and `light_classify`, `deferred_light` and, with
+    /// the simple water, `simple_water` replace the `scene` pass.
     /// With [`Self::temporal`] only (its prepass is the G-buffer pass), never with MSAA; see
     /// [`Self::has_deferred`]. `MOBA_DEFERRED=off` turns it off.
     pub(crate) deferred: bool,
@@ -919,8 +921,8 @@ pub(crate) fn build_variant(
             ),
             None => pass,
         };
-        // N2b (ADR-0023 §1a): the deferred frame's G-buffer pass also clears `hdr` and writes
-        // the emissive into it.
+        // N2b (ADR-0023 §1a): the deferred frame's G-buffer pass also writes the units'
+        // emissive and the sky into `hdr`.
         let _ = if deferred {
             pass.access(hdr, Access::ColorWrite)
         } else {
@@ -956,8 +958,9 @@ pub(crate) fn build_variant(
             .access(ao.blurred, Access::ColorWrite);
     }
     if let (Some(temporal), Some(tiles)) = (temporal, tiles) {
-        // ADR-0023 §2a, §11: classify the tiles, light them, then draw the sky (and the
-        // simple water) where nothing was drawn. These replace the forward `scene`.
+        // ADR-0023 §2a, §11: classify the tiles and light them (the G-buffer pass drew the
+        // sky), then the simple water when there is no full water. These replace the forward
+        // `scene`.
         let _ = graph
             .pass("light_classify", PassKind::LightClassify)
             .access(depth, Access::SampledCompute)
@@ -984,23 +987,28 @@ pub(crate) fn build_variant(
             light = light.access(contact, Access::SampledCompute);
         }
         let _ = light;
-        // The simple water (no full water) samples the lighting set like the scene did.
-        let mut sky = graph
-            .pass("sky", PassKind::Sky)
-            .access(hdr, Access::ColorReadWrite)
-            .access(depth, Access::DepthReadSampled);
+        // The simple water (no full water) samples the lighting set like the scene did; with
+        // the full water there is nothing to draw here.
         if refraction.is_none() {
+            let mut water = graph
+                .pass("simple_water", PassKind::SimpleWater)
+                .access(hdr, Access::ColorReadWrite)
+                .access(depth, Access::DepthReadSampled);
             if let Some(shadow_map) = shadow_map {
-                sky = sky.access(shadow_map, Access::SampledFragment);
+                water = water.access(shadow_map, Access::SampledFragment);
             }
             if let Some(fog) = fog_resources {
-                sky = sky.access(fog.current, Access::SampledFragment);
+                water = water.access(fog.current, Access::SampledFragment);
             }
             if let Some(ao) = ao {
-                sky = sky.access(ao.blurred, Access::SampledFragment);
+                water = water.access(ao.blurred, Access::SampledFragment);
             }
+            // `shade()` reads the contact shadows (set 3 binding 14) in the water's fragments.
+            if let Some(contact) = contact {
+                water = water.access(contact, Access::SampledFragment);
+            }
+            let _ = water;
         }
-        let _ = sky;
     } else {
         let mut scene = graph
             .pass("scene", PassKind::Scene)
@@ -1069,6 +1077,11 @@ pub(crate) fn build_variant(
         }
         if let Some(ao) = ao {
             water = water.access(ao.blurred, Access::SampledFragment);
+        }
+        // The water's `shade()` reads the contact shadows too (set 3 binding 14): declared so
+        // the barrier reaches the fragment stage and the image lives until here.
+        if let Some(contact) = contact {
+            water = water.access(contact, Access::SampledFragment);
         }
         let _ = water;
     }
@@ -2425,12 +2438,13 @@ mod tests {
     }
 
     /// N2b (ADR-0023 §2a, §11): the deferred frame clears the tile arguments in `mask_clear`,
-    /// writes `hdr` in the G-buffer pass, then classifies, lights and draws the sky in place of
-    /// the forward `scene`, before the water and everything after it. Every variant compiles
-    /// on the same transients with nothing culled, within the graph's pass limit.
+    /// writes `hdr` (with the sky) in the G-buffer pass, then classifies and lights in place
+    /// of the forward `scene`, then draws the simple water where there is no full water,
+    /// before everything after it. Every variant compiles on the same transients with nothing
+    /// culled, within the graph's pass limit.
     #[test]
     #[allow(clippy::too_many_lines)] // One walk over every deferred variant's topology.
-    fn the_deferred_frame_classifies_lights_then_draws_the_sky() {
+    fn the_deferred_frame_classifies_then_lights() {
         let mut largest = 0;
         for spec in tiered_specs() {
             for gbuffer_debug in [false, true] {
@@ -2459,12 +2473,20 @@ mod tests {
                 let prepass = at(PassKind::Prepass).expect("prepass");
                 let classify = at(PassKind::LightClassify).expect("light_classify");
                 let light = at(PassKind::DeferredLight).expect("deferred_light");
-                let sky = at(PassKind::Sky).expect("sky");
+                let simple = at(PassKind::SimpleWater);
+                let full = at(PassKind::Water);
                 assert!(clear < classify && prepass < classify, "{spec:?}");
-                assert_eq!((light, sky), (classify + 1, classify + 2), "{spec:?}");
+                assert_eq!(light, classify + 1, "{spec:?}");
+                // Exactly one water pass: the simple one right after the lighting, or the
+                // full one (after its copy).
+                assert_ne!(simple.is_some(), full.is_some(), "{spec:?}");
+                if let Some(simple) = simple {
+                    assert_eq!(simple, light + 1, "{spec:?}");
+                }
+                let water = simple.or(full).expect("a water pass");
                 for later in [PassKind::WaterCopy, PassKind::VfxDraw, PassKind::Temporal] {
                     if let Some(index) = at(later) {
-                        assert!(index > sky, "{later:?} after the sky: {spec:?}");
+                        assert!(index > light, "{later:?} after the lighting: {spec:?}");
                     }
                 }
                 let graph = base.graph.passes();
@@ -2498,11 +2520,39 @@ mod tests {
                     L::SHADER_READ_ONLY_OPTIMAL
                 );
                 assert_eq!(layout(light, base.resources.hdr), L::GENERAL);
-                assert_eq!(layout(sky, base.resources.hdr), L::COLOR_ATTACHMENT_OPTIMAL);
                 assert_eq!(
-                    layout(sky, base.resources.depth),
+                    layout(water, base.resources.hdr),
+                    L::COLOR_ATTACHMENT_OPTIMAL
+                );
+                assert_eq!(
+                    layout(water, base.resources.depth),
                     L::DEPTH_STENCIL_READ_ONLY_OPTIMAL
                 );
+                // The water's `shade()` samples the contact shadows: the latest barrier on
+                // them by the water pass makes them visible to the fragment stage (not only
+                // to the lighting's compute), and the graph keeps them alive until then.
+                if let Some(contact) = base.resources.contact {
+                    let visible = graph[..=water]
+                        .iter()
+                        .rev()
+                        .find_map(|pass| {
+                            pass.barriers
+                                .iter()
+                                .find(|barrier| barrier.resource == contact)
+                        })
+                        .expect("a barrier on the contact shadows");
+                    assert!(
+                        visible
+                            .dst_stage
+                            .contains(vk::PipelineStageFlags2::FRAGMENT_SHADER),
+                        "{spec:?}"
+                    );
+                    assert_eq!(visible.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+                    assert!(
+                        graph[water].uses(contact),
+                        "the water declares the contact shadows: {spec:?}"
+                    );
+                }
                 // The tile buffer: cleared by transfer, written by the classification, then
                 // read as dispatch arguments and storage by the lighting.
                 let reset = barrier(&graph[clear], tiles);
@@ -2548,9 +2598,9 @@ mod tests {
             }
         }
         assert!(largest <= crate::graph::MAX_PASSES, "{largest} passes");
-        // The largest deferred frame: a G-buffer debug view with everything on, two passes
-        // more than the forward one.
-        assert_eq!(largest, 40);
+        // The largest deferred frame: a G-buffer debug view with everything on (the full
+        // water, so no `simple_water`), one pass more than the forward one.
+        assert_eq!(largest, 39);
     }
 
     /// A G-buffer debug view (ADR-0023 §1f) runs after `temporal` and before the post chain,

@@ -3,14 +3,19 @@
 //! then `deferred_light` lights each class with one indirect dispatch of its permutation
 //! (`deferred_light.comp`, built from the forward path's `lighting.glsl`, so a deferred pixel
 //! evaluates the same lights, shadows, ambient, AO and fog as a forward one at the same
-//! point). The G-buffer pass wrote the emissive into `hdr`; the lighting replaces it with the
-//! lit, fogged surface. The sky tiles are not dispatched: the `sky` pass draws them.
+//! point). The G-buffer pass wrote the units' emissive and the sky's radiance into `hdr`;
+//! the lighting replaces every lit pixel with the lit, fogged surface (reading the emissive
+//! only for unit pixels) and leaves the sky, whose tiles are not even listed.
 //!
-//! The tile buffer ([`TileLayout`]) holds the three classes' `VkDispatchIndirectCommand`s,
-//! their tile counts, their tile lists and a per-tile info triple for the debug views.
-//! `mask_clear` resets the header each frame ([`TileLayout::RESET`]). The arguments are rows
-//! of `tiles_x` groups, so no dimension exceeds `maxComputeWorkGroupCount`'s guaranteed
-//! 65,535 however many tiles a class holds.
+//! The tile buffer ([`TileLayout`]) holds the classes' `VkDispatchIndirectCommand`s, their
+//! tile counts and the standard and extended tile lists. `mask_clear` resets the header each
+//! frame ([`TileLayout::RESET`]). The arguments are rows of `tiles_x` groups, so no dimension
+//! exceeds `maxComputeWorkGroupCount`'s guaranteed 65,535 however many tiles a class holds.
+//!
+//! The descriptor sets are written once per transient binding ([`DeferredPass::bind_targets`],
+//! at creation and after a resize), not per frame. The debug views are a specialisation
+//! constant of the lighting pipelines (`DEBUG_VIEW`), fixed at creation, so the shipped
+//! pipelines carry no debug branches.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable, bytes_of};
@@ -23,8 +28,6 @@ use crate::resources::{
 };
 use crate::shaders::ShaderSource;
 
-/// Descriptor sets: one per frame-in-flight slot.
-const SET_RING: usize = crate::renderer::FRAMES_IN_FLIGHT;
 /// The tile edge, in pixels (`numthreads` of both shaders).
 pub(crate) const TILE: u32 = 16;
 
@@ -32,8 +35,8 @@ pub(crate) const TILE: u32 = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub(crate) enum TileClass {
-    /// Every pixel at the far plane: not lit (the `sky` pass draws it), so only the shaders
-    /// and the tests name it.
+    /// Every pixel at the far plane: not lit and not listed (the G-buffer pass drew the sky),
+    /// so only the shaders and the tests name it.
     #[cfg_attr(not(test), allow(dead_code))]
     Sky = 0,
     /// Only `STANDARD` and `UNLIT` pixels: the fast permutation.
@@ -43,9 +46,9 @@ pub(crate) enum TileClass {
 }
 
 /// The tile buffer's layout (`light_classify.slang`, `deferred_light.comp`), in 32-bit words:
-/// the three classes' dispatch arguments (`x, y, z` each) and their tile counts, then the three lists
-/// of `capacity` packed tiles (`x | y << 16`), then `capacity` info triples (model mask, the
-/// far and the near depth as float bits).
+/// the three classes' dispatch arguments (`x, y, z` each) and their tile counts (the sky's
+/// stay at their reset values), then the standard and the extended lists of `capacity` packed
+/// tiles (`x | y << 16`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TileLayout {
     /// Tiles per row of the largest rendered sub-rectangle.
@@ -76,7 +79,7 @@ impl TileLayout {
 
     /// The buffer's size in bytes.
     pub(crate) fn bytes(self) -> u64 {
-        4 * (u64::from(Self::HEADER_WORDS) + 6 * u64::from(self.capacity))
+        4 * (u64::from(Self::HEADER_WORDS) + 2 * u64::from(self.capacity))
     }
 
     /// The byte offset of `class`'s `VkDispatchIndirectCommand`.
@@ -84,15 +87,9 @@ impl TileLayout {
         12 * class as u64
     }
 
-    /// The word offset of `class`'s tile list.
+    /// The word offset of `class`'s tile list (standard or extended: the sky has none).
     pub(crate) const fn list_offset(self, class: TileClass) -> u32 {
-        Self::HEADER_WORDS + class as u32 * self.capacity
-    }
-
-    /// The word offset of the per-tile info (`light_classify` writes it for a debug reader).
-    #[cfg(test)]
-    pub(crate) const fn info_offset(self) -> u32 {
-        Self::HEADER_WORDS + 3 * self.capacity
+        Self::HEADER_WORDS + (class as u32 - 1) * self.capacity
     }
 }
 
@@ -105,27 +102,30 @@ struct ClassifyPush {
     capacity: u32,
 }
 
-/// `DeferredPush` in `deferred_light.comp` (32 bytes).
+/// `DeferredPush` in `deferred_light.comp` (24 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct DeferredPush {
     render_size: [u32; 2],
     list_offset: u32,
-    debug: u32,
-    inv_exposure: f32,
     tile_class: u32,
     row_width: u32,
     capacity: u32,
 }
 
-/// The views and sets one frame's passes read and write.
-pub(crate) struct DeferredTargets {
+/// The transient views the passes read and write, bound once per transient binding.
+pub(crate) struct DeferredViews {
     /// `gb0`–`gb2`, in `SHADER_READ_ONLY_OPTIMAL`.
     pub(crate) gbuffer: [vk::ImageView; 3],
     /// The scene depth, in `SHADER_READ_ONLY_OPTIMAL`.
     pub(crate) depth: vk::ImageView,
-    /// `hdr`, in `GENERAL` (the lighting reads the emissive and writes the lit surface).
+    /// `hdr`, in `GENERAL` (the lighting reads the units' emissive and writes the lit
+    /// surface).
     pub(crate) hdr: vk::ImageView,
+}
+
+/// What one frame's passes bind besides their own sets.
+pub(crate) struct DeferredTargets {
     /// The main view's camera set (set 0) and lighting set (set 3), as the scene binds them.
     pub(crate) camera: vk::DescriptorSet,
     pub(crate) lighting: vk::DescriptorSet,
@@ -144,12 +144,60 @@ pub(crate) struct DeferredPass {
     _light_set_layout: DescriptorSetLayout,
     _empty_set_layout: DescriptorSetLayout,
     _pool: DescriptorPool,
-    classify_sets: [vk::DescriptorSet; SET_RING],
-    light_sets: [vk::DescriptorSet; SET_RING],
+    /// Written by [`Self::bind_targets`] while the device is idle; read by every frame.
+    classify_set: vk::DescriptorSet,
+    light_set: vk::DescriptorSet,
     tiles: GpuBuffer,
     layout: TileLayout,
-    /// `push.debug` (0 off; [`crate::post::TemporalDebugView::deferred_view`]).
+    /// The lighting pipelines' `DEBUG_VIEW` specialisation constant (0 off;
+    /// [`crate::post::TemporalDebugView::deferred_view`]).
     debug: u32,
+}
+
+/// Why the deferred lighting cannot run on a device admitted to Tiered: the frame then
+/// lights forward (ADR-0023 amendment 2 items 13 and 17).
+pub(crate) fn unsupported(device: &DeviceContext) -> Option<String> {
+    let (camera_bindings, _) = super::scene::buffer_set_layout_bindings();
+    // The lighting layout's compute stage reads sets 0, 1 and 3.
+    if let Err(error) = crate::descriptor_budget::check(
+        "deferred_light",
+        &[
+            &camera_bindings,
+            &light_set_bindings(),
+            &crate::lighting::set_layout_bindings(),
+        ],
+        crate::descriptor_budget::StageTotals {
+            samplers: device.max_per_stage_samplers,
+            sampled_images: device.max_per_stage_sampled_images,
+            storage_buffers: device.max_per_stage_storage_buffers,
+        },
+    ) {
+        return Some(error.to_string());
+    }
+    // The G-buffer pass writes six colour outputs with the outline IDs (motion, gb0-gb2, the
+    // unit mask and `hdr`); admission guarantees five.
+    if device.max_fragment_output_attachments < 6 || device.max_fragment_combined_outputs < 6 {
+        return Some(format!(
+            "the G-buffer pass writes 6 fragment outputs; maxFragmentOutputAttachments is {} \
+             and maxFragmentCombinedOutputResources {}",
+            device.max_fragment_output_attachments, device.max_fragment_combined_outputs
+        ));
+    }
+    // 16 x 16 workgroups (the core minimum is 128 invocations).
+    if device.max_compute_work_group_invocations < TILE * TILE {
+        return Some(format!(
+            "the tiles are {} invocations; maxComputeWorkGroupInvocations is {}",
+            TILE * TILE,
+            device.max_compute_work_group_invocations
+        ));
+    }
+    // `light_classify` ORs the tile's models across each subgroup.
+    if !device.subgroup_arithmetic_compute {
+        return Some(String::from(
+            "light_classify needs subgroup arithmetic in compute shaders",
+        ));
+    }
+    None
 }
 
 /// The bindings of `deferred_light.comp`'s set 1: the G-buffer and the depth (sampled),
@@ -203,52 +251,32 @@ impl DeferredPass {
         debug: u32,
     ) -> RenderResult<Self> {
         let compute = vk::ShaderStageFlags::COMPUTE;
-        let (camera_bindings, _) = super::scene::buffer_set_layout_bindings();
-        let light_bindings = light_set_bindings();
-        // The lighting layout's compute stage reads sets 0, 1 and 3.
-        crate::descriptor_budget::check(
-            "deferred_light",
-            &[
-                &camera_bindings,
-                &light_bindings,
-                &crate::lighting::set_layout_bindings(),
-            ],
-            crate::descriptor_budget::StageTotals {
-                samplers: device.max_per_stage_samplers,
-                sampled_images: device.max_per_stage_sampled_images,
-                storage_buffers: device.max_per_stage_storage_buffers,
-            },
-        )?;
-        let light_set_layout = DescriptorSetLayout::new(device.device.clone(), &light_bindings)?;
+        // The renderer checked [`unsupported`] before choosing the deferred frame.
+        let light_set_layout =
+            DescriptorSetLayout::new(device.device.clone(), &light_set_bindings())?;
         let classify_set_layout =
             DescriptorSetLayout::new(device.device.clone(), &classify_set_bindings())?;
         let empty_set_layout = DescriptorSetLayout::new(device.device.clone(), &[])?;
-        let ring = u32::try_from(SET_RING).expect("small");
         let pool = DescriptorPool::new(
             device.device.clone(),
             &[
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(6 * ring),
+                    .descriptor_count(6),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::STORAGE_IMAGE)
-                    .descriptor_count(ring),
+                    .descriptor_count(1),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(2 * ring),
+                    .descriptor_count(2),
             ],
-            2 * ring,
+            2,
         )?;
         let allocated = pool.allocate(
             &device.device,
-            &[
-                [classify_set_layout.handle(); SET_RING],
-                [light_set_layout.handle(); SET_RING],
-            ]
-            .concat(),
+            &[classify_set_layout.handle(), light_set_layout.handle()],
         )?;
-        let classify_sets = core::array::from_fn(|index| allocated[index]);
-        let light_sets = core::array::from_fn(|index| allocated[SET_RING + index]);
+        let (classify_set, light_set) = (allocated[0], allocated[1]);
         let push = |size: usize| {
             [vk::PushConstantRange::default()
                 .stage_flags(compute)
@@ -275,6 +303,7 @@ impl DeferredPass {
             shaders,
             classify_layout.handle(),
             light_layout.handle(),
+            debug,
         )?;
         let layout = TileLayout::for_extent(extent);
         let tiles = Self::tile_buffer(device, layout)?;
@@ -289,8 +318,8 @@ impl DeferredPass {
             _light_set_layout: light_set_layout,
             _empty_set_layout: empty_set_layout,
             _pool: pool,
-            classify_sets,
-            light_sets,
+            classify_set,
+            light_set,
             tiles,
             layout,
             debug,
@@ -315,13 +344,25 @@ impl DeferredPass {
         shaders: &ShaderSource,
         classify_layout: vk::PipelineLayout,
         light_layout: vk::PipelineLayout,
+        debug: u32,
     ) -> RenderResult<[GraphicsPipeline; 3]> {
+        // `deferred_light.comp`'s `DEBUG_VIEW` (constant_id 0); `light_classify` has none, and
+        // an unused entry is ignored.
+        let entries = [vk::SpecializationMapEntry::default()
+            .constant_id(0)
+            .offset(0)
+            .size(core::mem::size_of::<u32>())];
+        let data = debug.to_ne_bytes();
+        let specialization = vk::SpecializationInfo::default()
+            .map_entries(&entries)
+            .data(&data);
         let pipeline = |name, layout| -> RenderResult<GraphicsPipeline> {
             let module = shaders.module(device, name)?;
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(module.handle())
-                .name(c"main");
+                .name(c"main")
+                .specialization_info(&specialization);
             let handle = device.create_compute_pipeline(
                 &vk::ComputePipelineCreateInfo::default()
                     .stage(stage)
@@ -348,6 +389,7 @@ impl DeferredPass {
             shaders,
             self.classify_layout.handle(),
             self.light_layout.handle(),
+            self.debug,
         )
     }
 
@@ -362,7 +404,7 @@ impl DeferredPass {
     }
 
     /// Re-sizes the tile buffer for rendered sub-rectangles up to `extent` (the device is
-    /// idle: swapchain recreation).
+    /// idle: swapchain recreation; [`Self::bind_targets`] follows).
     pub(crate) fn resize(
         &mut self,
         device: &DeviceContext,
@@ -381,8 +423,8 @@ impl DeferredPass {
         self.tiles.handle()
     }
 
-    /// Records `mask_clear`'s part: the dispatch arguments back to `(0, 1, 1)`. The graph
-    /// moved the buffer to a transfer write.
+    /// Records `mask_clear`'s part: every class's dispatch arguments back to `(0, 0, 1)` and
+    /// its count to 0 ([`TileLayout::RESET`]). The graph moved the buffer to a transfer write.
     pub(crate) fn record_reset(&self, cmd: vk::CommandBuffer) {
         // SAFETY: the buffer is live and at least the header long; the graph ordered the
         // previous frame's reads before this transfer write.
@@ -396,52 +438,58 @@ impl DeferredPass {
         }
     }
 
-    /// Records `light_classify` for frame-in-flight slot `frame_slot` (its fence was waited
-    /// on, so its sets are free).
-    pub(crate) fn record_classify(
-        &self,
-        cmd: vk::CommandBuffer,
-        frame_slot: usize,
-        targets: &DeferredTargets,
-    ) {
-        let set = self.classify_sets[frame_slot % SET_RING];
+    /// Points both passes' sets at the current transients and the tile buffer. Called at
+    /// creation and after every resize, while the device is idle (no recorded frame reads
+    /// the sets), so the frames never write descriptors.
+    pub(crate) fn bind_targets(&self, views: &DeferredViews) {
         let read = |view| {
             [vk::DescriptorImageInfo::default()
                 .image_view(view)
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
         };
-        let depth = read(targets.depth);
-        let gb2 = read(targets.gbuffer[2]);
+        let [gb0, gb1, gb2] = views.gbuffer;
+        let inputs = [read(gb0), read(gb1), read(gb2), read(views.depth)];
+        let hdr = [vk::DescriptorImageInfo::default()
+            .image_view(views.hdr)
+            .image_layout(vk::ImageLayout::GENERAL)];
         let tiles = [vk::DescriptorBufferInfo::default()
             .buffer(self.tiles.handle())
             .offset(0)
             .range(vk::WHOLE_SIZE)];
+        let write = |set, binding: u32, ty| {
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(binding)
+                .descriptor_type(ty)
+        };
+        let sampled = vk::DescriptorType::SAMPLED_IMAGE;
+        let storage = vk::DescriptorType::STORAGE_BUFFER;
         let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&depth),
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&gb2),
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&tiles),
+            // light_classify: the depth, gb2 and the tiles.
+            write(self.classify_set, 0, sampled).image_info(&inputs[3]),
+            write(self.classify_set, 1, sampled).image_info(&inputs[2]),
+            write(self.classify_set, 2, storage).buffer_info(&tiles),
+            // deferred_light: the G-buffer, the depth, `hdr` and the tiles.
+            write(self.light_set, 0, sampled).image_info(&inputs[0]),
+            write(self.light_set, 1, sampled).image_info(&inputs[1]),
+            write(self.light_set, 2, sampled).image_info(&inputs[2]),
+            write(self.light_set, 3, sampled).image_info(&inputs[3]),
+            write(self.light_set, 4, vk::DescriptorType::STORAGE_IMAGE).image_info(&hdr),
+            write(self.light_set, 5, storage).buffer_info(&tiles),
         ];
+        // SAFETY: the device is idle (creation, or swapchain recreation after its wait), so
+        // no submitted frame reads either set; every view and the buffer are live.
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+    }
+
+    /// Records `light_classify` over this frame's rendered sub-rectangle.
+    pub(crate) fn record_classify(&self, cmd: vk::CommandBuffer, targets: &DeferredTargets) {
         let size = targets.render_size;
         let push = ClassifyPush {
             render_size: [size.width, size.height],
             tiles_x: self.layout.tiles_x,
             capacity: self.layout.capacity,
         };
-        // SAFETY: no submitted frame reads this slot's set (its fence was waited on), and every
-        // view and the buffer are live.
-        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         // SAFETY: the pipeline is live; `cmd` is recording outside a render pass.
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -450,14 +498,14 @@ impl DeferredPass {
                 self.classify.handle(),
             );
         }
-        // SAFETY: the layout and set are live and the set was written above.
+        // SAFETY: the layout and set are live, and the set was written by `bind_targets`.
         unsafe {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.classify_layout.handle(),
                 0,
-                &[set],
+                &[self.classify_set],
                 &[],
             );
         }
@@ -487,62 +535,24 @@ impl DeferredPass {
 
     /// Records `deferred_light`: the standard tiles, then the extended ones, each one indirect
     /// dispatch over its list.
-    pub(crate) fn record_light(
-        &self,
-        cmd: vk::CommandBuffer,
-        frame_slot: usize,
-        targets: &DeferredTargets,
-    ) {
-        let set = self.light_sets[frame_slot % SET_RING];
-        let read = |view| {
-            [vk::DescriptorImageInfo::default()
-                .image_view(view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
-        };
-        let [gb0, gb1, gb2] = targets.gbuffer;
-        let inputs = [read(gb0), read(gb1), read(gb2), read(targets.depth)];
-        let hdr = [vk::DescriptorImageInfo::default()
-            .image_view(targets.hdr)
-            .image_layout(vk::ImageLayout::GENERAL)];
-        let tiles = [vk::DescriptorBufferInfo::default()
-            .buffer(self.tiles.handle())
-            .offset(0)
-            .range(vk::WHOLE_SIZE)];
-        let sampled = |binding: u32, info| {
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(binding)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(info)
-        };
-        let writes = [
-            sampled(0, &inputs[0]),
-            sampled(1, &inputs[1]),
-            sampled(2, &inputs[2]),
-            sampled(3, &inputs[3]),
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(4)
-                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                .image_info(&hdr),
-            vk::WriteDescriptorSet::default()
-                .dst_set(set)
-                .dst_binding(5)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&tiles),
-        ];
-        // SAFETY: no submitted frame reads this slot's set (its fence was waited on), and every
-        // view and the buffer are live.
-        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
-        // SAFETY: the layout and sets are live: set 0 is the scene's camera set for this slot
-        // (written before the frame was recorded) and set 1 was written above.
+    ///
+    /// The two dispatches read and write `hdr` with no barrier between them. That is race
+    /// free because their pixels are disjoint: `light_classify` puts each tile in exactly one
+    /// list (by the models it holds), each group shades only the 16 x 16 pixels of its own
+    /// tile, and the lists hold no tile twice (one append per tile). So no pixel is loaded or
+    /// stored by both dispatches, and the graph's barrier after `deferred_light` orders both
+    /// against what follows.
+    pub(crate) fn record_light(&self, cmd: vk::CommandBuffer, targets: &DeferredTargets) {
+        // SAFETY: the layout and sets are live: set 0 is the scene's camera set for this
+        // frame's slot (written before the frame was recorded) and set 1 was written by
+        // `bind_targets`.
         unsafe {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.light_layout.handle(),
                 0,
-                &[targets.camera, set],
+                &[targets.camera, self.light_set],
                 &[],
             );
         }
@@ -566,8 +576,6 @@ impl DeferredPass {
             let push = DeferredPush {
                 render_size: [size.width, size.height],
                 list_offset: self.layout.list_offset(class),
-                debug: self.debug,
-                inv_exposure: 1.0,
                 tile_class: class as u32,
                 row_width: self.layout.tiles_x,
                 capacity: self.layout.capacity,
@@ -664,8 +672,6 @@ mod tests {
         let expected: Vec<u32> = [
             core::mem::offset_of!(DeferredPush, render_size),
             core::mem::offset_of!(DeferredPush, list_offset),
-            core::mem::offset_of!(DeferredPush, debug),
-            core::mem::offset_of!(DeferredPush, inv_exposure),
             core::mem::offset_of!(DeferredPush, tile_class),
             core::mem::offset_of!(DeferredPush, row_width),
             core::mem::offset_of!(DeferredPush, capacity),
@@ -678,7 +684,40 @@ mod tests {
         ] {
             assert_eq!(push_constant_offsets(spirv), expected);
         }
-        assert_eq!(core::mem::size_of::<DeferredPush>(), 32);
+        assert_eq!(core::mem::size_of::<DeferredPush>(), 24);
+    }
+
+    /// The debug views are `deferred_light.comp`'s specialisation constant 0 (the pipelines
+    /// are built with `constant_id` 0 = the view), not a push-constant branch.
+    #[test]
+    fn debug_views_are_a_specialisation_constant() {
+        // OpDecorate <id> SpecId 0 in both permutations.
+        const OP_DECORATE: u32 = 71;
+        const SPEC_ID: u32 = 1;
+        let light = include_str!("../../../shaders/shaders/deferred_light.comp");
+        assert!(light.contains("layout(constant_id = 0) const uint DEBUG_VIEW = 0u;"));
+        assert!(!light.contains("push.debug"));
+        for spirv in [
+            moba_shaders::DEFERRED_LIGHT_COMP,
+            moba_shaders::DEFERRED_LIGHT_EXTENDED_COMP,
+        ] {
+            let (chunks, _) = spirv.as_chunks::<4>();
+            let words: Vec<u32> = chunks.iter().map(|&w| u32::from_le_bytes(w)).collect();
+            let mut index = 5;
+            let mut found = false;
+            while index < words.len() {
+                let count = (words[index] >> 16) as usize;
+                if words[index] & 0xFFFF == OP_DECORATE
+                    && count >= 4
+                    && words[index + 2] == SPEC_ID
+                    && words[index + 3] == 0
+                {
+                    found = true;
+                }
+                index += count.max(1);
+            }
+            assert!(found, "SpecId 0 decorated");
+        }
     }
 
     /// `ClassifyPush` matches the Slang `ClassifyPush` the reflection reports (ADR-0020 §4c).
@@ -947,7 +986,8 @@ mod tests {
     }
 
     /// The tile layout's constants are the shaders' (`TILE_HEADER_WORDS`, the class order,
-    /// the 16-pixel tile) and the buffer holds every tile of the extent in each list.
+    /// the 16-pixel tile) and the buffer holds every tile of the extent in each of the two
+    /// lists (the sky's tiles are not listed).
     #[test]
     fn tile_layout_matches_the_shaders() {
         let classify = include_str!("../../../shaders/shaders/slang/light_classify.slang");
@@ -961,6 +1001,11 @@ mod tests {
         let light = include_str!("../../../shaders/shaders/deferred_light.comp");
         assert!(light.contains("local_size_x = 16, local_size_y = 16"));
         assert!(light.contains("const uint TILE_COUNT_WORD = 9u;"));
+        // The sky is not appended, and the list offset is the class's minus one.
+        assert!(classify.contains("if (tile_class == CLASS_SKY)"));
+        assert!(
+            classify.contains("tiles[TILE_HEADER_WORDS + (tile_class - 1) * push.capacity + slot]")
+        );
         assert_eq!(TileLayout::COUNT_WORD, 9);
         assert_eq!(TileLayout::HEADER_WORDS as usize, TileLayout::RESET.len());
         assert_eq!(TileClass::Sky as u32, 0);
@@ -969,9 +1014,9 @@ mod tests {
             height: 1080,
         });
         assert_eq!((layout.tiles_x, layout.capacity), (120, 120 * 68));
-        assert_eq!(layout.list_offset(TileClass::Standard), 12 + 8160);
-        assert_eq!(layout.info_offset(), 12 + 3 * 8160);
-        assert_eq!(layout.bytes(), 4 * (12 + 6 * 8160));
+        assert_eq!(layout.list_offset(TileClass::Standard), 12);
+        assert_eq!(layout.list_offset(TileClass::Extended), 12 + 8160);
+        assert_eq!(layout.bytes(), 4 * (12 + 2 * 8160));
         assert_eq!(TileLayout::args_offset(TileClass::Extended), 24);
         // Each reset dispatch is (0, 0, 1), and every count 0.
         for class in 0..3 {

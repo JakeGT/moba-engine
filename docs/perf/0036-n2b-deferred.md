@@ -9,7 +9,7 @@ Captured 2026-11-15 for ADR-0023 (N2b) and its
   and `MOBA_VULKAN_VALIDATION=required` (validation and synchronisation validation).
 - **CPU:** AMD Ryzen 7 9800X3D. **OS:** Linux 7.3.4-1-cachyos, Wayland.
 - **Toolchain:** rustc stable, the pinned `slangc`.
-- **Branch:** `feat/n2b-deferred-lighting`, on origin/main `790d9be` (N2a merged).
+- **Branch:** `feat/n2b-deferred-lighting`, on origin/main `fdc0a5d` (N2a and #377 merged).
 - **Baselines:** detached release builds in their own temporary worktrees, deleted afterwards:
   `ab42718` (the N1 tiered forward frame, before N2a; the baseline ADR-0023 §9b's gate is
   against) and `790d9be` (N2a). Every release build uses the default `fsr3` feature.
@@ -21,9 +21,9 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | Gate | Result |
 |---|---|
 | 1. Encoding and interfaces | **Met.** `gbuffer-smoke` adds the GLSL decode; push blocks pinned by SPIR-V and reflection tests |
-| 2. Deferred–forward parity | **Not met on the river** (locally max 15/255 at 7 of 921,600 pixels, 99.966 % within 2/255; on CI max 9 at 11 pixels) **nor, on CI's lavapipe, the teamfight** (1 pixel at 7/255). Default scene met on both. Every outlier is on the river's bank (the foam line, or terrain cracks meeting it). See [below](#gate-2-deferredforward-parity) |
+| 2. Deferred–forward parity | **Met** locally and on CI after a TAAU fix (ADR-0021 amendment 7): worst pixel 2, 3 and 5/255 locally on the default scene, the river and the teamfight (CI: pending). See [below](#gate-2-deferredforward-parity) |
 | 3. Light-set consistency | **Met** under all five caps |
-| 7. Performance (≤ 1.10× N1) | **Met**: 1.061–1.087× against `ab42718`, 0.990–1.001× against `790d9be` |
+| 7. Performance (≤ 1.10× N1) | **Met**: GPU total 1.014–1.065× against `ab42718` (GPU span 1.031–1.078×), 0.959–0.981× against `790d9be`; Tiered Overdrive included |
 
 ## Gate 1: encoding and interfaces
 
@@ -32,11 +32,13 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
   same 4,096 surfaces, after the Slang decode, and compares both with the Rust twin in one
   loop. On lavapipe: **PASS, 16,384 values checked, 0 mismatches**; the largest absolute
   difference of either decode against Rust is 3.05e-5; 0 validation messages.
-- **Push blocks.** `DeferredPush` (32 bytes) is checked against the compiled
+- **Push blocks.** `DeferredPush` (24 bytes) is checked against the compiled
   `deferred_light.comp` by parsing its SPIR-V for the push-constant block's member offsets
   (the names are stripped, so the block is found by its storage class); `ClassifyPush`
-  (16 bytes) against `light_classify.slang`'s reflection. `TileLayout` (the header, the
-  three lists and the info triples) is tied to both shaders' constants by a source test.
+  (16 bytes) against `light_classify.slang`'s reflection. `TileLayout` (the header and the
+  standard and extended lists) is tied to both shaders' constants by a source test. The
+  debug view is the pipelines' specialisation constant, checked by
+  `debug_views_are_a_specialisation_constant`.
 - **The light loop's twin.** `visited()` in `crates/render/src/passes/deferred.rs` mirrors
   `dynamic_lights` in `include/lighting.glsl` (the column, the count clamp, the radius test);
   a source test pins the shader lines it mirrors.
@@ -47,81 +49,58 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 `MOBA_DEFERRED=off` (N1's tiered forward frame) and on, `MOBA_STYLISATION=off` on both,
 `MOBA_FOLIAGE=off` (`STANDARD` only), rims off (there are none before N2e), High (the default
 tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness 0.25),
-1280×720. `image-check --parity` takes the largest channel difference per pixel.
-Locally (Mesa 26.2.5), re-run on the final code with identical results and 0 validation
-messages:
+1280×720. `image-check --parity` takes the largest channel difference per pixel. The gate:
+within 2/255 on at least 99.5 % of pixels, and within 6/255 everywhere.
 
-| Scene | Within 2/255 | Max | Pixels past 6/255 | Result |
+**Met**, with TAAU's history fix (ADR-0021 amendment 7), locally (Mesa 26.2.5, 0 validation
+messages) and on CI's lavapipe (Mesa 26.0.8, LLVM 21.1.8; pending):
+
+| Scene | Local: within 2/255 | Local: max | CI: within 2/255 | CI: max |
 |---|---|---|---|---|
-| Default (frame 90) | 99.999 % | 3 | 0 | met |
-| R3b river (frame 90) | 99.966 % | **15** | 7 (7, 7, 9, 9, 10, 13, 15) | **not met** |
-| R3b teamfight (tick 360) | 99.989 % | 6 | 0 | met, at the bound |
+| Default (frame 90) | 100.000 % | 2 | pending | pending |
+| R3b river (frame 90) | 100.000 % | 3 (3 pixels) | pending | pending |
+| R3b teamfight (tick 360) | 99.999 % | 5 (1 pixel) | pending | pending |
 
-With the foliage (`PARITY_FOLIAGE=1`, the extended tiles; outside the gate): default 99.999 %
-max 5, river 99.964 % max 15, teamfight 99.989 % max 6.
+**The first build failed the river**, and on CI the teamfight, before the fix:
 
-**On CI's lavapipe** (`tiered-temporal` on the PR, run 43693581282: Mesa 26.0.8, LLVM 21.1.8,
-an AMD EPYC runner), same script and settings:
+| Scene | Local: within 2/255 | Local: max | CI: max (run 43693581282) |
+|---|---|---|---|
+| Default | 99.999 % | 3 | 6 |
+| R3b river | 99.966 % | **15** (7 pixels past 6) | **9** (11 pixels) |
+| R3b teamfight | 99.989 % | 6 | **7** (1 pixel) |
 
-| Scene | Within 2/255 | Max | Pixels past 6/255 | Result |
-|---|---|---|---|---|
-| Default | 99.998 % | 6 | 0 | met, at the bound |
-| R3b river | 99.959 % | **9** | 11 | **not met** |
-| R3b teamfight | 99.991 % | **7** | 1 | **not met** |
+Every outlier was on the river's bank: the shoreline foam line and terrain cracks meeting
+it, seen through the refracting water.
 
-The CI outliers are on the river's bank too, but not all on the foam line itself (each
-cluster cropped from the run's artefact and inspected):
-
-- on the shoreline foam line: river (173, 388–389), (955, 407) and (461, 710), and the
-  teamfight's one at (402, 282), where the replay's camera sees the river's edge;
-- on a terrain crack where it meets the foam's end: river (612–616, 601–602), shifted by 6–8
-  in all three channels rather than mostly blue;
-- on a crack under the shallow water: river (410, 676);
-- on the same crack in the dry bank, 1–5 rows from the frame's bottom edge: river
-  (524–532, 715–719).
-
-The pixels differ from the local ones, as the two lavapipes round differently. The controls
-below (the G-buffer round trip and the perturbed forward frame) were run on the local Mesa
-only; that CI's outliers have the same cause, high-contrast edges amplified by TAAU's upscale
-and sharpening, is inferred from where they are, not measured.
-
-**Where the river's outliers are.** All seven sit on the shoreline foam line, where the
-river bed is seen through the refracting water, in single pixels that appear in either
-frame. The water's transmission tint (up to twice the shallow colour) amplifies the blue
-channel, which is where the large differences are.
-
-**What causes them.** Each row is one change against the default comparison, on the early
-river frame (frame 2, whose outliers are the same pixels as frame 90's) unless marked:
+**The cause was TAAU's history clip, not the deferred frame.** Each row is one change
+against the gate's comparison, locally:
 
 | Comparison | Within 2/255 | Max |
 |---|---|---|
-| Deferred against forward (the gate) | 99.965 % | 15 |
-| Deferred against a forward build that round-trips its terrain surface through `encode_gbuffer`/`decode_gbuffer` before `shade()` | 100.000 % | **2** |
-| ... round-tripping only the albedo | 99.996 % | 4 |
-| Forward against forward with only the normal round-tripped (0.24° at most) | 99.994 % | 14 |
-| **Forward against forward with the terrain albedo scaled by 1.001** (a tenth of an 8-bit step) | 99.996 % | **14** |
-| Deferred against forward at native scale (`MOBA_UPSCALE_MODE=native`, sharpness 0) | 99.987 % | 6 |
+| The gate's comparison, the first build (river, frame 90) | 99.966 % | 15 |
+| Both frames through a TAAU patched to output its nearest raw sample (no history, native scale, sharpness 0) | 100.000 % | **2** |
+| Forward against forward with the terrain albedo scaled by 1.001 (a tenth of an 8-bit step), through TAAU | 99.996 % | **14** |
+| ... the same, through the raw passthrough | 100.000 % | 2 |
+| Deferred against forward at native scale (`MOBA_UPSCALE_MODE=native`, sharpness 0) | 99.987 % | 6–7 |
 | ... TAAU Quality with sharpness 0 | 99.980 % | 12 |
-| ... with `MOBA_WATER=simple` (frame 90) | 99.980 % | 6 |
 | ... with `MOBA_WATER=off` (frame 90) | 99.976 % | 8 |
-| `tc` and `reactive` mask views, deferred against forward | 100.000 % | 0 |
+| Deferred against a forward build that round-trips its terrain surface through `encode_gbuffer`/`decode_gbuffer` (river, frame 2) | 100.000 % | 2 |
+| The fixed TAAU (amendment 7), the gate's comparison (river, frame 90) | 100.000 % | **3** (3 pixels) |
 
-- **The lighting is exact.** With the G-buffer's quantisation applied to the forward
-  surface, the two paths agree within 2/255 everywhere: the deferred lighting computes what
-  the forward lighting computes, which is gate 2's second sentence.
-- **The frame is unstable at those pixels.** Changing the forward frame's terrain albedo by
-  0.1 %, far below one G-buffer step, moves the same shoreline pixel (126, 399) by 14/255.
-  So no G-buffer precision can meet "6/255 everywhere" on this capture, and the encoding is
-  left as amendment 1 built it. TAAU's upscale and sharpening at the foam edge do the
-  amplifying: at native scale without sharpening the worst pixel is 6.
-- **Ruled out:** the depth (the forward `scene` without depth writes gives a byte-identical
-  frame) and the TAAU masks (identical). The shadows-off and
-  contact-shadows-off runs were byte-identical to the default ones (this view has no casters
-  near the bed), so they rule nothing out.
-
-The gate is kept as written, and CI reports the failing scenes (the river, and on CI the
-teamfight; run 43699326756). ADR-0023 amendment 2 item 16
-lists the options for the maintainer.
+- **Before the upscaler the frames agree within 2/255 everywhere**, and every earlier
+  outlier is within 2 over its 7 × 7 neighbourhood: the deferred lighting computes what the
+  forward lighting computes, up to the G-buffer's quantisation (gate 2's second sentence).
+- **TAAU's clip amplified sub-step differences.** It scaled the history's whole offset by
+  the most-violated axis of a box whose extent was floored at 1e-5; on flat chroma a change
+  far below one 8-bit step rescaled the luma too. That is also why a 0.1 % albedo change
+  moved the forward frame by 14/255. Sharpening and the water were not the cause.
+- **The fix and its alternatives** are measured in ADR-0021 amendment 7: a per-channel
+  clamp alone met this gate (2, 2, 4) but failed ghost energy; a floor on the clip's extent
+  passes at 0.004 (2, 3, 5) and ghosts the hero at 0.01. The shipped blend keeps the clip on
+  every box at least 0.004 wide and clamps the narrower; it measures as the 0.004 floor
+  does here, and fails safe if its constant is widened.
+- **The teamfight's worst pixel** (5/255, one pixel at (516, 475)) is on a unit's
+  silhouette edge, just inside its outline; its cause was not isolated.
 
 ## Gate 3: light-set consistency
 
@@ -146,91 +125,114 @@ lists the options for the maintainer.
 
 ## Goldens and probes
 
-- **Compat is byte-identical** to origin/main (`790d9be`) on lavapipe: the Compat scenes of
-  `render-golden.yml` (default, Ultra, Low at 0.75, VAT, horizon, river, river Low, river
-  Ultra and the teamfight decals) compared with `cmp`, re-run on the final code (after the
-  AO rebind fix in the shared `lighting.rs`).
-- **SPIR-V:** every one of the 120 modules that exists on both sides is byte-identical,
-  forward, Compat and tiered alike (`MOBA_PIXEL_CENTER` expands to `gl_FragCoord.xy` in the
-  fragment stages). The 15 new modules are `deferred_light`, `deferred_light_extended`,
-  `light_classify`, `gbuffer_smoke_decode` and the ten `_hdr` G-buffer permutations.
-- **Tiered goldens move**, deliberately: the tiered frame is now deferred. Their fingerprints
-  and hashes follow ADR-0021 amendment 6. The 64×36 fingerprints pass unchanged on CI's
-  lavapipe and locally (max_diff ≤ 5), so they are not rewritten. All 16 exact hashes (8
-  captures × the AMD and Intel sections) moved and were taken from CI only: the
-  `cpu_sample=true` dispatch run 43697497468 at `e4d139b` (three AMD and three Intel CPU
-  models; the legs agreed per class), cross-checked by the PR's own `renderer-gate` and
-  `tiered-temporal` (run 43693581282, AMD), which printed the same AMD hashes. Locally all
-  eight cases are two-run byte-identical with 0 validation messages, and both mid-stream
-  resets are clean.
+- **Compat is byte-identical** to `790d9be` on lavapipe (#377, merged since, changes no
+  render code): the Compat scenes of `render-golden.yml` (default, Ultra, Low at 0.75, VAT,
+  horizon, river, river Low, river Ultra and the teamfight decals) compared with `cmp`,
+  re-run on the review's code.
+- **SPIR-V:** 103 of the 105 modules that exist on both sides are byte-identical. The two
+  that differ are `sky.frag`, whose body moved into `include/sky_radiance.glsl` so the
+  G-buffer pass's sky can share it (a function call in the module; every Compat capture is
+  byte-identical), and `temporal_taau.slang` (ADR-0021 amendment 7; Tiered only). The 14
+  new modules are `deferred_light`, `deferred_light_extended`, `light_classify`,
+  `gbuffer_smoke_decode` and the ten `_hdr` G-buffer permutations.
+- **ADR-0021's TAAU probes** pass on the final code; before and after amendment 7 they are
+  in that amendment. FSR 3.1's ghost probe is unchanged (it does not run TAAU's shader).
+- **Tiered goldens move**, deliberately: the tiered frame is deferred, and amendment 7 moves
+  every TAAU frame. Their fingerprints and hashes follow ADR-0021 amendment 6: the 64×36 fingerprints pass
+  unchanged locally (max_diff ≤ 5); the exact hashes are retaken from CI (pending).
+  Locally all eight cases are two-run byte-identical with 0 validation messages, and both
+  mid-stream resets are clean.
 
 ## Gate 7: performance
 
-- **Builds:** `ab42718`, `790d9be` and the branch, release, detached worktrees for the first two.
+- **Builds:** `ab42718`, `790d9be` and the branch's final code (merged with `fdc0a5d`, the
+  review's fixes and ADR-0021 amendment 7), release, detached worktrees for the first two.
 - **Machine:** the RTX 5070 Ti (driver 620.70.06, Linux 7.3.4).
 - **Replay:** the teamfight replay (`MOBA_WARMUP_TICKS=330`) at 1920×1080, vsync off, the
   240 fps limit, validation off, the pipeline cache off, 3,000 frames per run.
+- **Configurations:** Tiered Low, High and Ultra with TAAU, **Tiered Overdrive** (the Ultra
+  configuration, TAAU Performance mode: render scale 0.5 on every frame of every build),
+  Tiered Low and High with FSR 3.1, and Compat Ultra.
 - **Rounds:** three, interleaved: each held `flock handoff/gpu.lock` and ran every
   configuration on `ab42718`, `790d9be` and the branch in turn, with no other `moba-client`
   running (checked before each run).
-- **Results:** medians of the three rounds, in ms, from the final code (the rows-of-tiles
-  dispatch and the AO rebind fix included). Within each configuration and build the three GPU
-  totals agree within 0.005 ms. The raw logs are kept locally in
-  `~/Projects/MOBA/handoff/evidence/n2b-ab2/` (not committed). An earlier A/B on the branch
-  before those two changes measured 0.001–0.004 ms less on the branch and the same baselines.
+- **Results:** medians of the three rounds, in ms. Within each configuration and build the
+  three GPU totals agree within 0.002 ms. `gpu_total` is the sum of the pass timestamps;
+  `gpu_span` is the frame's first to last timestamp, so it also counts the gaps between
+  passes. The raw logs are kept locally in `~/Projects/MOBA/handoff/evidence/n2b-ab3/`
+  (not committed).
 
-| Configuration | Build | GPU total p50 | p95 | `prepass` | `scene` | `light_classify` | `deferred_light` | `sky` | `temporal` |
+| Configuration | Build | GPU total p50 | p95 | GPU span p50 | `prepass` | `scene` | `light_classify` | `deferred_light` | `temporal` |
 |---|---|---|---|---|---|---|---|---|---|
-| Tiered Low (TAAU) | `ab42718` | 0.506 | 0.516 | 0.020 | 0.079 | — | — | — | 0.125 |
-| | `790d9be` | 0.550 | 0.560 | 0.063 | 0.077 | — | — | — | 0.125 |
-| | branch | 0.550 | 0.561 | 0.072 | — | 0.009 | 0.055 | 0.005 | 0.126 |
-| Tiered High (TAAU) | `ab42718` | 0.557 | 0.566 | 0.024 | 0.090 | — | — | — | 0.125 |
-| | `790d9be` | 0.604 | 0.615 | 0.069 | 0.089 | — | — | — | 0.125 |
-| | branch | 0.599 | 0.609 | 0.080 | — | 0.009 | 0.059 | 0.005 | 0.125 |
-| Tiered Ultra (TAAU) | `ab42718` | 0.557 | 0.567 | 0.024 | 0.090 | — | — | — | 0.125 |
-| | `790d9be` | 0.604 | 0.614 | 0.069 | 0.089 | — | — | — | 0.125 |
-| | branch | 0.598 | 0.608 | 0.080 | — | 0.009 | 0.059 | 0.005 | 0.125 |
-| Tiered Low (FSR 3.1) | `ab42718` | 0.654 | 0.666 | 0.020 | 0.079 | — | — | — | 0.276 |
-| | `790d9be` | 0.698 | 0.712 | 0.063 | 0.077 | — | — | — | 0.277 |
-| | branch | 0.699 | 0.711 | 0.072 | — | 0.009 | 0.055 | 0.005 | 0.278 |
-| Tiered High (FSR 3.1) | `ab42718` | 0.705 | 0.717 | 0.024 | 0.091 | — | — | — | 0.276 |
-| | `790d9be` | 0.754 | 0.766 | 0.069 | 0.089 | — | — | — | 0.278 |
-| | branch | 0.748 | 0.760 | 0.080 | — | 0.009 | 0.059 | 0.005 | 0.278 |
-| Compat Ultra | `ab42718` | 0.672 | 0.683 | 0.058 | 0.246 | — | — | — | — |
-| | `790d9be` | 0.672 | 0.683 | 0.058 | 0.246 | — | — | — | — |
-| | branch | 0.672 | 0.683 | 0.058 | 0.245 | — | — | — | — |
+| Tiered Low (TAAU) | `ab42718` | 0.505 | 0.515 | 0.512 | 0.020 | 0.079 | — | — | 0.125 |
+| | `790d9be` | 0.550 | 0.560 | 0.556 | 0.063 | 0.077 | — | — | 0.125 |
+| | branch | 0.538 | 0.549 | 0.552 | 0.063 | — | 0.009 | 0.053 | 0.127 |
+| Tiered High (TAAU) | `ab42718` | 0.558 | 0.570 | 0.564 | 0.024 | 0.090 | — | — | 0.125 |
+| | `790d9be` | 0.604 | 0.616 | 0.612 | 0.069 | 0.089 | — | — | 0.125 |
+| | branch | 0.583 | 0.595 | 0.598 | 0.069 | — | 0.010 | 0.056 | 0.127 |
+| Tiered Ultra (TAAU) | `ab42718` | 0.559 | 0.571 | 0.566 | 0.024 | 0.091 | — | — | 0.125 |
+| | `790d9be` | 0.606 | 0.618 | 0.613 | 0.069 | 0.089 | — | — | 0.125 |
+| | branch | 0.585 | 0.597 | 0.600 | 0.069 | — | 0.010 | 0.056 | 0.127 |
+| Tiered Overdrive (TAAU, 0.5) | `ab42718` | 0.503 | 0.514 | 0.509 | 0.027 | 0.068 | — | — | 0.125 |
+| | `790d9be` | 0.532 | 0.543 | 0.539 | 0.055 | 0.067 | — | — | 0.124 |
+| | branch | 0.510 | 0.523 | 0.525 | 0.055 | — | 0.006 | 0.036 | 0.127 |
+| Tiered Low (FSR 3.1) | `ab42718` | 0.657 | 0.671 | 0.664 | 0.020 | 0.079 | — | — | 0.278 |
+| | `790d9be` | 0.701 | 0.714 | 0.708 | 0.063 | 0.077 | — | — | 0.279 |
+| | branch | 0.688 | 0.702 | 0.703 | 0.064 | — | 0.010 | 0.053 | 0.279 |
+| Tiered High (FSR 3.1) | `ab42718` | 0.707 | 0.720 | 0.714 | 0.024 | 0.090 | — | — | 0.277 |
+| | `790d9be` | 0.754 | 0.767 | 0.761 | 0.069 | 0.090 | — | — | 0.278 |
+| | branch | 0.730 | 0.743 | 0.745 | 0.069 | — | 0.010 | 0.056 | 0.278 |
+| Compat Ultra | `ab42718` | 0.675 | 0.687 | 0.679 | 0.058 | 0.247 | — | — | — |
+| | `790d9be` | 0.675 | 0.687 | 0.679 | 0.058 | 0.247 | — | — | — |
+| | branch | 0.675 | 0.687 | 0.679 | 0.058 | 0.247 | — | — | — |
 
-**Against ADR-0023 §9b's 1.10× gate** (GPU total, branch ÷ baseline):
+**Against ADR-0023 §9b's 1.10× gate** (branch ÷ baseline, p50):
 
-| Preset | p50 vs `ab42718` (gate) | p95 vs `ab42718` | p50 vs `790d9be` (N2a) | Headroom to 1.10× at p50 |
-|---|---|---|---|---|
-| Tiered Low (TAAU) | **1.087** | 1.087 | 1.000 | 0.007 ms (1.3 % of N1) |
-| Tiered High (TAAU) | **1.075** | 1.076 | 0.992 | 0.014 ms (2.5 %) |
-| Tiered Ultra (TAAU) | **1.074** | 1.072 | 0.990 | 0.015 ms (2.6 %) |
-| Tiered Low (FSR 3.1) | **1.069** | 1.068 | 1.001 | 0.020 ms (3.1 %) |
-| Tiered High (FSR 3.1) | **1.061** | 1.060 | 0.992 | 0.028 ms (3.9 %) |
-| Compat Ultra | 1.000 | 1.000 | 1.000 | not gated |
+| Preset | GPU total vs `ab42718` (gate) | GPU span vs `ab42718` | GPU total vs `790d9be` (N2a) | GPU span vs `790d9be` | `790d9be` ÷ `ab42718` (total) |
+|---|---|---|---|---|---|
+| Tiered Low (TAAU) | **1.065** | 1.078 | 0.978 | 0.993 | 1.089 |
+| Tiered High (TAAU) | **1.045** | 1.060 | 0.965 | 0.977 | 1.082 |
+| Tiered Ultra (TAAU) | **1.047** | 1.060 | 0.965 | 0.979 | 1.084 |
+| Tiered Overdrive (TAAU) | **1.014** | 1.031 | 0.959 | 0.974 | 1.058 |
+| Tiered Low (FSR 3.1) | **1.047** | 1.059 | 0.981 | 0.993 | 1.067 |
+| Tiered High (FSR 3.1) | **1.033** | 1.043 | 0.968 | 0.979 | 1.066 |
+| Compat Ultra | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
-- **The deferred lighting replaces the forward `scene` and costs a little less.** The three
-  new lanes add 0.069 ms at Low (classify 0.009, lighting 0.055, sky 0.005) and 0.073 ms at
-  High and Ultra, against the 0.077–0.089 ms `scene` they remove. The G-buffer pass's `hdr`
-  attachment (emissive) adds 0.009–0.011 ms to `prepass`. Net against N2a: 0.000 to
-  +0.001 ms at Low, −0.005 to −0.006 ms at High and Ultra.
-- **Low has the least headroom** (1.087×, 0.007 ms), as with N2a: its `scene` was the
-  cheapest to remove. N2c–N2f find their cost in that headroom and in what the Slang port of
-  the lighting saves (the scalarised loop, amendment 2 item 5).
-- **`temporal`, `water` and the post chain are unchanged.** So is Compat, to the microsecond.
-- **Frame time** is the 240 fps limit's: `p95_ms` 4.233–4.237 on every tiered run of every
+- **Nothing exceeds 1.10×**, on either metric. The least headroom is Tiered Low's span
+  (1.078×). `gpu_span` runs 1–1.5 points above `gpu_total` against `ab42718`: the deferred
+  frame has three more passes, and so more gaps between them.
+- **N2a's own cost** (`790d9be` ÷ `ab42718`) measured 1.066–1.089× on `gpu_total` (1.058× at
+  Overdrive), consistent with #369's projection of at most 1.092×.
+- **The deferred lighting is now cheaper than the forward `scene` it replaces.** The two
+  new lanes add 0.062 ms at Low and 0.066 ms at High and Ultra, against the 0.077–0.090 ms
+  `scene` they remove; `prepass` costs the same as N2a's, since the terrain and the foliage
+  no longer write `hdr` and the sky's radiance is drawn there instead of in a second sky
+  pass. The first build measured 0.990–1.001× N2a; the review's changes (amendment 2 items
+  3, 6 and 7) bring it to 0.959–0.981×.
+- **`temporal` costs 0.002 ms more** with TAAU (0.125 → 0.127 ms): ADR-0021 amendment 7's
+  clip and clamp blend. FSR 3.1's is unchanged.
+- **Compat is unchanged**, to the microsecond.
+- **Frame time** is the 240 fps limit's: `p95_ms` 4.236–4.240 on every tiered run of every
   build.
-- **perf-gate** passes every log of every build (no regression flagged); `frames_dropped=0`,
-  `locked_uploads=0` and `locked_pipelines=0` in every run.
+- **perf-gate** passes all 63 logs; `frames_dropped=0`, `locked_uploads=0` and
+  `locked_pipelines=0` in every run.
 - **Pipelines** on the replay: tiered TAAU 46 (`ab42718`) → 48 (`790d9be`) → **51**; FSR 3.1
-  54 → 56 → **59**; Compat 42 throughout. The three new ones are `light_classify` and the two
-  `deferred_light` permutations; the ten `_hdr` G-buffer permutations replace the N2a ones in
-  the deferred frame. The forward `scene` pipelines are still built (amendment 2 item 15).
-- **VRAM:** `vram_peak_mb` +0.1–0.2 MB against N2a (the tile buffer: 4 × (12 + 6 × 8,160)
-  bytes at 1920×1080), and +11.3–11.5 MB against `ab42718` (N2a's G-buffer). `hdr` was
-  already `RGBA16F` in these runs (amendment 2 item 8).
+  54 → 56 → **59**; Compat 42 throughout. The three new ones are `light_classify` and the
+  two `deferred_light` permutations; the ten `_hdr` G-buffer permutations replace the N2a
+  ones in the deferred frame. The forward `scene` pipelines are still built (amendment 2
+  item 15).
+- **VRAM:** `vram_peak_mb` equal to N2a's to 0.1 MB (the tile buffer, now 4 × (12 + 2 ×
+  8,160) bytes at 1920×1080), and +7.1–11.3 MB against `ab42718` (N2a's G-buffer).
+- **What this replay does not measure:**
+  - **`deferred_light` under many lights.** The teamfight peaks at 10 lights in view
+    (`lights_max=10`), so a pixel whose column holds many lights is not timed; the cost
+    grows with the column's count, which the light-count debug view shows.
+  - **`simple_water`**: this replay runs full water on every tiered configuration, so the
+    lane does not appear.
+  - **`hdr` as a storage image on AMD and Intel.** `deferred_light` writes `hdr` in the
+    `GENERAL` layout, which on some AMD and Intel drivers disables colour compression for
+    the image and can slow the passes that read it (the transparents, `temporal`). The RTX
+    shows no cost; it is to be re-checked with #9/#127's devices.
 
 ## Debug views
 

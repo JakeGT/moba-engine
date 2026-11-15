@@ -6,7 +6,9 @@
 ([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)), and FSR 3.1
 runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)); the
 tiered goldens' exact hashes are per CPU class
-([Amendment 6](#amendment-6-2026-11-14-the-tiered-exact-hashes-per-cpu-class)).
+([Amendment 6](#amendment-6-2026-11-14-the-tiered-exact-hashes-per-cpu-class)); TAAU's
+history clip becomes a per-channel clamp where its box is degenerate
+([Amendment 7](#amendment-7-2026-11-15-n2b-the-history-clip-on-a-degenerate-box)).
 Proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
@@ -320,7 +322,8 @@ device until the reference fixtures (ADR-0020 §2b) record it. A device without 
      a Blackman-Harris kernel of their *jittered* distance. The total weight is also the
      pixel's confidence.
   4. **Neighbourhood clip.** A variance clip in YCoCg (γ 1.0, or 1.25 on static pixels),
-     clipping toward the mean.
+     clipping toward the mean. *(Amendment 7: blended into a per-channel clamp where the box
+     is degenerate.)*
   5. **Blend.** Luminance-weighted (`1/(1+L)`) to stop flicker from fireflies.
 - **History.**
   - `RGBA16F` at output resolution, a persistent ping-pong pair indexed by frame parity, plus
@@ -1647,6 +1650,81 @@ the required `renderer-gate` on some attempts and passed it on others.
       runner's section.
 6. **Unchanged:** the 64×36 fingerprints, the two-run byte-identity, the Compat goldens (byte
    for byte), and the simulation, wire, replays and state hash.
+
+### Amendment 7 (2026-11-15, N2b): the history clip on a degenerate box
+
+Recorded with N2b ([ADR-0023 amendment 2](0023-frame-architecture-materials.md#amendment-2-2026-11-15-n2b-deferred-lighting-for-standard-as-built)
+item 16). §3 step 4's variance clip is kept, and blended into a per-channel clamp where the
+box is degenerate.
+
+1. **What was wrong.** The clip pulls the history toward the box's centre along its whole
+   offset, scaled by the most-violated axis: `h = centre + offset / max(|offset| / extent)`,
+   with the box's half-extent floored at 1e-5. Where the neighbourhood is flat in chroma
+   (most of the terrain) the chroma half-extents are a few 1e-5, so a chroma change far
+   below one 8-bit step decided the scale applied to the luma offset as well, and one pixel
+   moved by up to 15/255. N2b's deferred–forward parity (ADR-0023 gate 2) found it: on the
+   R3b river the two frames agree within 2/255 everywhere before TAAU and differed by 15/255
+   after it, and scaling the forward terrain's albedo by 1.001 moved a pixel by 13–14/255
+   through TAAU and by 2 without it.
+2. **The change.** `temporal_taau.slang` computes both the clip and a per-channel clamp
+   into the same box (`mean ± γσ`, the same γ), and blends them by the box's narrowest
+   half-extent: `lerp(clamp, clip, saturate(narrowest / CLAMP_EXTENT))`, `CLAMP_EXTENT`
+   0.004 (tonemapped YCoCg). A box at least 0.004 wide on every axis is clipped exactly as
+   before; a degenerate one is clamped, so a tiny change on its narrow axis moves only that
+   axis, by as much. The blend is continuous in the box, so it adds no new threshold to
+   amplify.
+3. **The variants measured** (local lavapipe, Mesa 26.2.5; gate 2's worst pixel per scene,
+   and ghost energy's three measures at Performance, 640×360 → 1280×720, the mode with
+   the least margin; bounds 3 %, 1.75 % and 7.5 %):
+
+   | Variant | Default | River | Teamfight | Wake | Hero | Particle |
+   |---|---|---|---|---|---|---|
+   | The clip (before) | 3 | **15** | 6 | 1.925 % | 1.40 % | 5.96 % |
+   | Per-channel clamp only | 2 | 2 | 4 | 2.296 % | 1.39 % | **8.20 %** |
+   | Clip, half-extent floored at 0.004 | 2 | 3 | 5 | 2.132 % | 1.44 % | 5.96 % |
+   | Clip, half-extent floored at 0.01 | 2 | 2 | 4 | **32.5 %** | **13.1 %** | 5.96 % |
+   | Clip, chroma half-extents floored at 0.004 | 2 | 3 | 5 | 2.045 % | 1.33 % | 5.96 % |
+   | **Clip blended into a clamp below 0.004 (shipped)** | 2 | 3 | 5 | 2.204 % | 1.31 % | 5.96 % |
+
+   - **The clamp alone fails ghost energy** at Performance (particle smear 8.20 %), and is
+     worse at Quality (3.74 → 5.78 %) and native (1.40 → 2.62 %): it leaves the particle's
+     bright history at a corner of the box, where the clip pulled it into the interior.
+   - **A floor is a scale the scene must not cross.** 0.004 passes; 0.01 brings the
+     teamfight to 4/255 but is already wider than the probe's flat tiles, and the hero
+     ghosts (32.5 % wake).
+   - **The blend** measures as the 0.004 floor does on gate 2 (the remaining 3s and the 5
+     are on boxes wider than 0.004, where both are the plain clip), with the hero's smear
+     lower. It was chosen over the floor because its constant fails safe: widened, the blend
+     tends to the clamp (bounded ghosting, the particle's 8.20 % at worst), where a widened
+     floor ghosts without bound. A single unit-edge pixel at 5/255 against gate 2's 6 is the
+     smallest margin; CI's lavapipe has measured up to 3/255 more and 6/255 less than the
+     local one on the first build.
+4. **The ADR's probes, before (the clip) and after,** on the local lavapipe, validation and
+   synchronisation validation required, 0 messages:
+
+   | Probe | Before | After | Bound |
+   |---|---|---|---|
+   | Ghost energy, Quality (853×480): wake / hero / particle | 1.101 / 0.71 / 3.74 % | 1.276 / 0.73 / 3.94 % | 3 / 1.75 / 7.5 % |
+   | Ghost energy, Performance (640×360) | 1.925 / 1.40 / 5.96 % | 2.204 / 1.31 / 5.96 % | same |
+   | Ghost energy, native | 0.558 / 0.00 / 1.40 % | 0.616 / 0.00 / 1.02 % | same |
+   | Overlay invariance (TAAU, FXAA, off, FSR 3.1; 8 comparisons) | all identical | all identical | identical |
+   | Outlines on Tiered (`outline-probe.sh`, 6 checks) | all ok | all ok | — |
+   | Motion vectors (`motion-probe.sh`, every class) | max 0.00799 px | byte-identical output | 1/64 px |
+   | Frame-to-frame change, frames 89→90, High (default scene): mean / pixels past 4/255 | 0.0524 / 0.091 % | 0.0514 / 0.091 % | not a gate |
+   | The same, R3b river | 0.5318 / 2.094 % | 0.5297 / 2.133 % | not a gate |
+
+   The wake grows by up to 0.28 points (Performance: 1.925 → 2.204 %, bound 3 %), most
+   likely on the flat tiles behind the hero, where the box is degenerate and the clamp
+   keeps more of the hero's colour than the clip did (inferred, not isolated). The hero and particle smears are unchanged or lower.
+   ADR-0021 has no flicker probe; the last two rows (the mean absolute change and the share
+   of pixels changing by more than 4/255 between two consecutive frames of a still camera)
+   are an ad hoc stability check, and show no new flicker.
+
+5. **What moves.** Every TAAU frame with a degenerate box somewhere, so every tiered golden
+   with TAAU (the exact hashes retaken from CI as amendment 6 prescribes; the 64×36
+   fingerprints pass unchanged locally, max_diff ≤ 5). FSR 3.1, FXAA and Compat do not run this shader and are
+   unchanged (Compat byte for byte). The simulation, wire format, replays and state hash are
+   untouched.
 
 ## Sources
 

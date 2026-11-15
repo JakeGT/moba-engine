@@ -1543,7 +1543,7 @@ pub(crate) const GPU_LANES: [&str; 36] = [
     // ADR-0023 §2 (N2b): the deferred lighting's passes, on the tiered deferred frame only.
     "light_classify",
     "deferred_light",
-    "sky",
+    "simple_water",
 ];
 /// First lane of a pass that only some configurations have (R6 post, ADR-0015; R2b's contact
 /// shadows and outlines, ADR-0016).
@@ -1604,7 +1604,7 @@ pub(crate) fn gpu_sample(
         pass("overlay"),
         pass("light_classify"),
         pass("deferred_light"),
-        pass("sky"),
+        pass("simple_water"),
     ]
 }
 
@@ -2374,7 +2374,9 @@ mod tests {
         );
         assert!(report.contains("gpu_light_classify_runs=100 gpu_light_classify_p50_ms=0.004 "));
         assert!(report.contains("gpu_deferred_light_runs=100 gpu_deferred_light_p50_ms=0.060 "));
-        assert!(report.ends_with("gpu_sky_runs=100 gpu_sky_p50_ms=0.007 gpu_sky_p95_ms=0.007 "));
+        assert!(report.ends_with(
+            "gpu_simple_water_runs=100 gpu_simple_water_p50_ms=0.007 gpu_simple_water_p95_ms=0.007 "
+        ));
         assert!(report.starts_with("gpu_shadow_p50_ms=0.250 gpu_shadow_p95_ms=0.475 "));
         assert!(report.contains("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
         assert!(report.contains("gpu_composite_p95_ms=1.900 "));
