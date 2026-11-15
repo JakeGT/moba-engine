@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **1039 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **1062 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -74,7 +74,8 @@ crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wir
                   minion VATs), link-proxy (RTT/jitter/loss UDP proxy), grade-bake (LUTs),
                   mesh-bake (R8 meshoptimizer LODs; `--features mesh-bake`),
                   perf-gate (R8 frame-log budget gate), bindless-smoke and
-                  rt-smoke (N0.5 tiered-path smokes)
+                  rt-smoke (N0.5 tiered-path smokes), review-sheet (A1 review-render
+                  contact sheets and readability checks)
                   (font-bake/: standalone MSDF font baker, own lockfile)
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
@@ -159,6 +160,9 @@ Tools (release recommended for soak/fuzz):
 cargo run -p moba-tools --bin content-check -- content/example-pack.toml
 cargo run -p moba-tools --bin content-check -- --json content/example-pack.toml
 cargo run -p moba-tools --bin content-check -- --provenance   # asset licence gate; writes THIRD_PARTY.md section, CREDITS, AI disclosure (A0)
+cargo run -p moba-tools --bin content-check -- --source art/x.source.toml   # source maps vs the bible's material rules, texel density (A1)
+cargo run --release -p moba-tools --bin review-sheet -- review/x/render_meta.json   # contact sheets + CON/VAL/EMIT/SIL checks (A1)
+blender --background x.blend --python scripts/blender/export_glb.py -- --out dir   # Blender export convention (A1)
 cargo run -p moba-tools --bin content-sign -- content/1v1-mid.toml   # MOBA_SIGNING_SEED
 cargo run -p moba-tools --bin replay -- --items content/example-pack.toml match.mbr
 cargo run --release -p moba-tools --bin match-soak -- --matches 10 --ticks 12000

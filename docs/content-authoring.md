@@ -794,6 +794,7 @@ data cannot be mixed up:
 | `normal` | `--kind normal` | `bc5` (`rg8`) | linear tangent-space X/Y, +Y up |
 | `metallic_roughness` | `--kind data` | `bc5` (`rg8`) | linear, R metallic, G roughness |
 | `mask` | `--kind mask` | `bc4` (`r8`) | linear, R |
+| terrain `splat`, `splat2` | `--kind weights` | `bc7` (`rgba8`) | linear RGBA, one layer weight per channel |
 
 Bake them from PNG with mips:
 
@@ -833,6 +834,136 @@ that model on the vertex-colour look: a missing, oversized or invalid descriptor
 malformed texture, a texture in the wrong slot, a model without UVs, or a renderer limit. A
 match never fails because of a material. On GPUs without BC support (or with
 `MOBA_COMPRESSED_TEXTURES=0`) BC textures are decoded on the CPU at load and look the same.
+
+### Blender export (A1)
+
+`scripts/blender/export_glb.py` exports a model from Blender to the runtime `.glb`, headless,
+and refuses a scene that breaks the convention (ADR-0022 amendment 2):
+
+```bash
+blender --background art/kiln-warden.blend --python scripts/blender/export_glb.py -- \
+  --out export/kiln-warden [--asset kiln-warden] [--collection LOW] [--hover 0.2] [--notes "…"]
+```
+
+| Rule | Convention |
+|---|---|
+| Units | Metres, unit scale 1.0, object scale applied (1, 1, 1) |
+| Axes | Blender Z up, the model facing −Y; the file is +Y up, facing +Z (the engine's forward) |
+| Ground | The lowest vertex at z = 0 (feet on the ground), or `--hover` metres for floating units |
+| Mesh | Triangulated; one UV map (`TEXCOORD_0`; others are ignored); no vertex colours; at most 65 536 vertices and 393 216 indices (ADR-0007) |
+| Tangents | MikkTSpace `TANGENT` baked into the file (ADR-0022 amendment 1) |
+| Materials | Slots named `<asset>` or `<asset>-<suffix>` (one per shading model, not per texture set). No images go in the file: textures are baked separately to KTX2 |
+| Names | The asset 1..=16 of `[A-Za-z0-9_-]`; joints 1..=32 of the same; at most 32 joints per skin (the Low tier's cap) |
+| Clips | Actions named by engine state (`idle`, `run`, `walk`, `attack`, `cast1`–`cast3`, `death`, `recall`, `hit`), sampled every frame at 30 fps |
+| Excluded | Collections whose name starts with `HIGH` (bake sources), cameras, lights, Draco and meshopt compression |
+
+Without `--collection` it exports every visible mesh and armature outside a `HIGH*`
+collection. After export it re-reads the file's glTF JSON (`TANGENT`, `NORMAL` and
+`TEXCOORD_0` on every primitive, no images or sparse accessors, the loader's size limits) and
+deletes the file if any check fails. Next to the `.glb` it writes
+`<asset>.provenance-stub.toml`, a draft `[[asset]]` entry with the Blender version and the
+`.blend` name. Finish its `notes` and move it into the content directory's `provenance.toml`;
+the gate never reads the stub. Then bake the LODs (`mesh-bake lod`) and check the source maps.
+
+### Source checks (A1)
+
+`content-check --source <asset>.source.toml [--json]` checks one asset's **source** maps
+(PNGs, before KTX2) and its exported `.glb` files against the art bible's material rules
+(material-vocabulary §1.1, §2 and §6) and roadmap §9.1's texel densities. It runs on the art
+repository's files, never on a pack, and is separate from `--provenance`. It exits 0 when
+every rule passes and 1 otherwise. The manifest is never shipped:
+
+```toml
+asset = "kiln-warden"          # 1..=16 of [A-Za-z0-9_-]
+class = "hero"                 # hero | minion | neutral | structure | prop | terrain
+shipped_size = 2048            # optional: the side the KTX2 ships at (default: the maps')
+class_step = 32                # class id = round(class map value / class_step) (default 1)
+dust_class = 2                 # optional: the class id of dust (PBR-WEAR-1)
+# tile_m = 4.0                 # terrain layers: the tile size in metres
+
+[[models]]                     # the exported meshes this texture set is for
+path = "../export/kiln-warden/content/models/kiln-warden.glb"
+# hover_m = 0.2                # floating units: the lowest vertex's height
+
+[maps]                         # paths relative to this file
+base = "kiln-warden-base.png"            # sRGB albedo
+metallic_roughness = "kiln-warden-mr.png" # R metallic, G roughness; or metallic + roughness
+normal = "kiln-warden-normal.png"        # tangent space, +Y
+emissive = "kiln-warden-emit.png"        # optional mask
+ao = "kiln-warden-ao.png"                # optional (PBR-DELIGHT-1)
+class = "kiln-warden-class.png"          # material-class ids
+# team_mask = "…"                         # TINT-1 only checks that one exists
+
+[classes]                      # class id → material-vocabulary §2 row
+1 = "METAL"
+2 = "SOIL"
+5 = "CERAM"
+
+[emissive]
+colour = "#FFE6BE"
+strength = 0.294               # times the mask, as authored
+use = "accent"                 # accent (≤ +1 EV) | gameplay (≤ +2 EV)
+```
+
+It reports, in order:
+
+- **Export checks** (GLB-*): the loader, baked `TANGENT`, feet and the MikkTSpace agreement.
+- **Texel density.** TD-1, px/m, passes or fails for structures, props and terrain; it is
+  reported for units. TD-2 is the authored size.
+- **Class coverage** (PBR-CLASS-1) and **albedo**: PBR-ALB-1, dielectric luma 30–240 at p1
+  and p99; PBR-ALB-2, metal luma ≥ 180.
+- **Metal and roughness.** PBR-MET-1 is metalness binarity. PBR-RGH-2 is the roughness floor.
+  Each class's albedo, roughness and metalness ranges are read on interior texels, and
+  PBR-RGH-1 is roughness variance.
+- **Normals and lighting.** PBR-NRM-1 and PBR-NRM-2 check normal length.
+  PBR-DELIGHT-1 checks for baked lighting.
+- **Palette and value:** PAL-1, PAL-2, PAL-4, PAL-5 and VAL-1 (terrain).
+- **Emission, wear and tint.** PBR-EMIT-1 and PBR-EMIT-2 are emissive brightness against
+  `L_ref` and emissive area. PBR-WEAR-1 is dust. TINT-1 is the team mask.
+- **Not built.** The vocabulary-level rules are listed as `not built`.
+
+### Review renders (A1)
+
+Contact sheets for the human readability sign-off (roadmap §9.4). The script renders them in
+Blender, and `review-sheet` checks them:
+
+```bash
+flock /path/to/gpu.lock blender --background --factory-startup \
+  --python scripts/blender/review_render.py -- checks/slice.review.toml   # raw frames + render_meta.json
+cargo run --release -p moba-tools --bin review-sheet -- review/a1-slice/render_meta.json
+```
+
+The review file names one to six models, each with:
+
+- its `.glb` and source PNGs (`base`, `normal`, `mr` or `metallic` + `roughness`, and an
+  optional `emissive` with a colour and strength);
+- a role (`hero`, `minion`, `neutral`, `structure`, `prop`) and a faction;
+- optionally a size class from silhouettes-and-scale.md, an idle pose, `tell` joints (the
+  faction tell, SIL-5) and `weapon` joints with `weapon_kind = "melee" | "ranged"` (SIL-7).
+
+The script's docstring has the full format. Every frame is lit by the bible's Golden Crossing
+light and seen from the engine's default camera (yaw −0.7, pitch 0.95, 46 m, 60°). The
+models stand on a flat ash ground with a 1.8 m post, and the exposure is set so the bare
+ground reads OKLab L 0.50.
+
+`review-sheet` refuses frames made with any other camera or light. It checks:
+
+- CON-1 and CON-4;
+- VAL-2 to VAL-4;
+- the rendered PBR-EMIT-1 to PBR-EMIT-3;
+- SIL-1 to SIL-3 and SIL-5 to SIL-8.
+
+SIL-4, SIL-9 and the unbuilt rules are listed for a person. It writes:
+
+- `sheet_46m.png` (the 1440p frame 1:1, with 1440p and 4K crops);
+- `sheet_8m.png`, `sheet_turntable.png` and `sheet_lineup.png`;
+- `sheet_silhouettes.png` (8 yaws at 1080p, 1440p and 1080p at 4×4 samples);
+- `metrics.json`.
+
+Each sheet prints the camera and the sun, and the 12.4° gap between them: the default camera
+looks almost into the sun, so assets face it from their shade side. It exits 0 when every
+check passes, 1 when one fails, and 2 on unusable input. ADR-0022 amendment 2 lists how each
+open rule is read. Sheets and frames belong in the art repository, not here.
 
 ### Lighting
 
@@ -1246,7 +1377,7 @@ texture arrays. A layer without a normal map is drawn flat.
 **Splat.** Without `splat`, the client generates the weights at map bind (`moba_assets::
 generate_terrain`, 512² by default, about 35 ms with a 384-cell heightfield in a release build) from
 the simulation's map alone: lanes, structures, spawns and walls. A baked `splat` is a linear
-RGBA texture (`texture-bake --kind data`; `rgba8` or `bc7`) whose channels are the weights of
+RGBA texture (`texture-bake --kind weights`; `bc7` or `--format rgba8`) whose channels are the weights of
 layers 1-4 over the terrain square (the board plus its margin, texel (0, 0) at the corner
 before `[0, 0]`, rows along +y); `splat2` holds layers 5-8 and must match `splat`'s size and
 mip count. With `splat` but no `splat2`, layers 5-8 get no weight.

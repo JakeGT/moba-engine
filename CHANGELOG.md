@@ -140,6 +140,26 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **A1 ingest tools (next-gen roadmap §9.4,
+  [ADR-0022 amendment 2](docs/adr/0022-provenance-gate-mikktspace.md#amendment-2-2026-11-15-a1-ingest-tools)):**
+  - `content-check --source <asset>.source.toml` checks an asset's source maps and exported
+    `.glb` against the art bible's material rules. That covers material classes, albedo
+    30–240 sRGB, metals ≥ 180, roughness ranges and variance, normal length, delighting,
+    palette chroma, emissive EV and area, dust and the team mask (material-vocabulary §1.1,
+    §2 and §6). It also checks roadmap §9.1's texel density and the export (loader limits,
+    baked `TANGENT`, feet at y = 0). The mode is separate from the pack check and `--provenance`.
+  - `scripts/blender/review_render.py` renders review frames in Golden Crossing light from the
+    engine's default camera (46 m at 1440p and 4K, 8 m zoom, turntable, lineup, flat
+    silhouettes at 8 yaws). The new `review-sheet` refuses frames made with any other camera
+    or sun. It then checks CON-1, CON-4, VAL-2 to VAL-4, the rendered PBR-EMIT-1 to -3 and
+    SIL-1 to SIL-8, and writes five contact sheets and `metrics.json`. Every sheet prints the
+    camera, the sun and their 12.4° gap: assets face the default camera from their shade side.
+  - `scripts/blender/export_glb.py` is the headless Blender → `.glb` export convention
+    (metres, axes, feet, names, material slots, baked MikkTSpace `TANGENT`). It refuses a
+    scene that breaks the convention and writes a provenance stub.
+  - `texture-bake --kind weights` bakes four linear channels for the terrain splat (`--kind
+    data` has two). `moba-tools` gains `serde` and `toml`, both already in the workspace, and
+    `glam` as a dev-dependency.
 - **Asset licence and provenance gate, and MikkTSpace tangents (next-gen roadmap A0,
   [ADR-0022](docs/adr/0022-provenance-gate-mikktspace.md)):**
   - Every file in `content/`'s asset directories now has a provenance entry in its

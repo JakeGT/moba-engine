@@ -5,7 +5,10 @@
 "A0"). Written before the code. Amends [ADR-0011](0011-art-style-lighting.md) §8 (the tangent
 generator). ADR-0020 and ADR-0021 are reserved for N0 and N1. Amended 2026-11-14 after review
 ([Amendment 1](#amendment-1-2026-11-14-a0-review-bounded-tangents-and-a-harder-gate)): runtime tangents are hard-bounded, shipped meshes carry baked
-tangents, and the gate hashes third-party files and refuses special files.
+tangents, and the gate hashes third-party files and refuses special files. Amended
+2026-11-15 for A1 ([Amendment 2](#amendment-2-2026-11-15-a1-ingest-tools)): the ingest tools
+(source checks, review renders and sheets, the Blender export convention) and their readings
+of the bible's rules.
 
 ## Context
 The next-gen roadmap brings in third-party CC0 and CC-BY art (§9.2) and AI-generated assets
@@ -387,3 +390,116 @@ names and unhashed bytes.
   `moba-assets` gains `libc` on unix (already in the graph) for the open flags.
   No wire, replay, simulation-logic, state-hash or content-hash change; the committed meshes
   are byte-identical, so captures are too (compared against `main`'s CI artefacts in the PR).
+
+### Amendment 2 (2026-11-15, A1): ingest tools
+
+Recorded in the A1 PR (`feat/a1-ingest-tools`). A1 is roadmap §12's "A1 ingest tools"; this
+amendment records which accepted text each tool implements and every place where a tool reads a
+rule the bible leaves open. The tools never touch the simulation, the wire, replays, the state
+hash or the content hash: they read source files and write reports, sheets and KTX2s.
+
+**What each tool implements, and its coverage.**
+
+| Tool | Implements | Coverage |
+|---|---|---|
+| `content-check --source <asset>.source.toml` | Material validation and texel density on an asset's source maps and exported `.glb` | Roadmap §9.4's pipeline ("material validation (delight, albedo 30–240 sRGB, metals ≥ 180, roughness variance, normal length)", "content-check (… PBR, texel density …)"), §9.1's texel targets, and the approved bible: material-vocabulary §1.1, §2 and §6, palette-and-value (PAL, VAL-1), checks.md |
+| `scripts/blender/review_render.py` + `review-sheet` | Review-render contact sheets with numeric checks | Roadmap §9.4 "New tools" (46 m at 1440p and 4K, 8 m zoom, turntable, lineup, numeric readability checks); checks.md; silhouettes-and-scale (SIL-*); palette-and-value (CON-1, CON-4, VAL-*); material-vocabulary §8 (PBR-EMIT-*); lighting-mood (Golden Crossing) |
+| `scripts/blender/export_glb.py` | The Blender → `.glb` export convention, checked before and after export, and a provenance stub | ADR-0007 (the `.glb` format and loader limits) and Amendment 1 (shipped meshes carry baked MikkTSpace `TANGENT`). No ADR or roadmap item names an exporter; §9.4's UV, bake and rig stages imply one. **Open question for the maintainer:** does the convention need its own ADR? |
+| `texture-bake --kind weights` | Four linear channels (BC7 or `rgba8`) | The terrain splat (`docs/content-authoring.md`, Terrain) is linear RGBA, which `--kind data` (two channels) could not write. A documentation gap, not a format change |
+
+Not in this PR: roadmap §9.4's `normal-bake` and the `clusterlod` mode of `mesh-bake` (A1
+covers ingest checks, not new bakers), and every vocabulary-level rule (below). No new crate
+or tool is installed: `serde`, `toml` and `glam` were already workspace dependencies, the
+sheets' font is a copy of the renderer's Adafruit-GFX 5×7 table (BSD, `THIRD_PARTY.md`), and
+the KTX2 output is the engine's own `texture-bake`.
+
+**`content-check --source`.** A separate mode: it is never part of the pack check or of
+`--provenance --check`, and nothing in CI runs it on content (the source maps live in the art
+repository). The rule thresholds are §1.1, §2 and §6 read literally; the A3 prototypes' widened
+ranges and tolerances are not carried over.
+
+- **Classes** come from a class-id map (`maps.class`, `class_step` per id) and the
+  manifest's `[classes]` table naming material-vocabulary §2 rows. Per-class albedo,
+  roughness and metalness are read on *interior* texels (all eight neighbours covered and the
+  same class), so bleed and seams do not count against a class.
+- **Texel density** (TD-1) is the area-weighted p5/p50/p95 of px/m over the model's
+  triangles at the shipped size. It passes or fails only where §9.1 gives a px/m target
+  (structures, props, terrain layers); heroes, minions and neutrals are reported, because §9.1
+  gives them texture sizes (TD-2), not densities.
+- **Normal length** (PBR-NRM-1) is 1 ± 0.02 per texel and PBR-NRM-2 checks X² + Y² ≤ 1 within
+  one code of rounding. **Delighting** (PBR-DELIGHT-1) is the correlation of albedo luma with
+  AO over 8×8 blocks, r < 0.3.
+- **Export checks** load each model with the engine's bounded loader (`FileOnly`): the name
+  rule, the loader limits, baked `TANGENT` (Amendment 1), feet at y = 0 (or `hover_m`), and,
+  as information, the agreement of the file's tangents with the engine's own MikkTSpace on the
+  same mesh.
+- **Not built** (each needs §3's vocabulary as data, an accent mask, or the §6.6 material
+  model): PBR-VOCAB-1, PBR-FORGE-1, PBR-VOID-1, PBR-VOID-2, LANE-1, PBR-HEAT-1, EMB-1,
+  PBR-GLASS-1, PBR-SKIN-1 and PAL-3. They are listed as `not built` in every report.
+
+**Review renders: departures from §9.4's wording.**
+
+1. **Cycles, not the engine.** The frames are Cycles renders (Blender 5.2) with AgX: no grading
+   LUT, fog, rims, TAA or shadow cascades. Engine captures of the same rules are N1's
+   readability captures (roadmap §4.4). The "lineup under each map's grading" is one ungraded
+   lineup: Ember Crossing has one mood (Golden Crossing) and no LUT is applied.
+2. **Exposure** is set so the bare ash ground (`#6B6560`) reads mean OKLab L 0.50, the
+   gameplay value measured in lighting-mood.md. VAL-2's mean is therefore fixed by
+   construction; its spread is the test.
+3. **Camera and sun.** The engine default camera (`Camera::orbit(target, 46, -0.7, 0.95)`, 60°
+   vertical FOV, zoom 8 m) and Golden Crossing (`sun_dir` (-0.885, 0.532, 0.465), colour
+   (1.0, 0.80, 0.62), ×1.5, IBL 0.35) are fixed. `review-sheet` refuses a `render_meta.json`
+   with any other camera, sun, sky, `L_ref`, ground or post, and a unit test pins its constants
+   to `moba_render::Camera::orbit`. Every sheet prints both.
+4. **Finding (reported, not fixed):** the camera looks towards azimuth 229.9° and the sun is at
+   242.3°, **12.4° apart**. The default camera looks almost into the sun, so every asset faces
+   the camera from its shade side and casts its shadow towards the viewer.
+5. **1080p silhouettes** are added. checks.md lists 1080p, and SIL-3 and SIL-8 are defined
+   there. The 4K frame is beauty only.
+
+**Review renders: readings of open rules** (agent-derived, for the maintainer to confirm).
+
+- **Yaws.** "Tested … at eight yaw angles" is read literally: SIL-5, SIL-6, melee SIL-7 and
+  SIL-8 must hold at every yaw. Only ranged SIL-7 has its own quorum (≥ 6 of 8). **Question:**
+  should SIL-5, SIL-6 and melee SIL-7 have a quorum too? A melee weapon behind the body fails
+  from two yaws (both slice minions fail SIL-7 at 6 of 8).
+- **SIL-1 and SIL-2** measure the `.glb`'s bind-pose bounds, halos and raised weapons
+  included. A model without a declared size class is reported only.
+- **SIL-3** compares hero silhouettes at the same yaw, aligned at the bottom-centre of their
+  bounding boxes and searched ±3 px. It needs two or more heroes in one review.
+- **SIL-5** is the declared tell joints' share of the 1440p silhouette. A Forge unit with no
+  declared `tell` is left to a person.
+- **SIL-6** counts enclosed holes and floating parts with at least one 2×2 block.
+- **Melee SIL-7** is the larger of the width and height growth of the silhouette's bounding
+  box with the weapon's pixels against without them.
+- **SIL-8** renders the 1080p silhouette at 4×4 samples per pixel. A part is a connected run
+  of samples that no 4×4 square fits in (under 1 px at 1080p) and that is at least 8 samples
+  (2 px) long; shorter runs are tapering tips.
+- **SIL-4 and SIL-9** stay human checks: one pose is rendered per review.
+- **CON-1 and CON-4** compare the mean OKLab L of the model's pixels with the ground pixels in
+  a ring 3× its bounding box (the box itself excluded), at 46 m and 1440p.
+- **VAL-2 to VAL-4** are capture rules in checks.md, read here on the review frame. VAL-2 uses
+  the bare ground. VAL-3 (p1) and VAL-4 (p99, emissive pixels excluded) use each model and its
+  3× ring, shadows included.
+- **Rendered PBR-EMIT.** EMIT-1r is the p99 EV over `L_ref` of the model's emissive pixels.
+  EMIT-2r is the share of its pixels above 0.25 `L_ref`, against §8's caps. EMIT-3 is the
+  emissive share of the lineup frame, not of a map capture.
+
+**Blender export convention** (`docs/content-authoring.md`, Blender export):
+
+- metres, unit scale 1;
+- Blender Z up, with the model facing −Y, which becomes the file's +Y up and +Z forward;
+- feet at z = 0, or `--hover`;
+- triangulated meshes, applied scale and one UV map;
+- material slots named `<asset>` or `<asset>-<suffix>`;
+- joints in `[A-Za-z0-9_-]{1,32}`, at most 32 per skin, clips sampled at 30 fps;
+- MikkTSpace `TANGENT` exported, and no images, vertex colours, Draco or meshopt compression.
+
+The script refuses a scene that breaks the convention before writing anything. It re-reads
+the written file's glTF JSON, and it writes a `provenance-stub.toml` draft entry that the gate
+never reads. Exporting the A3 Ember Scarab with it gives a file whose tangents agree with the
+engine's MikkTSpace on 100 % of corners (GLB-MIKK 1.0000).
+
+**API additions** (tools only): `content-check --source` and `--json` with it; the
+`review-sheet` binary; `texture-bake --kind weights`. No wire, replay, simulation-logic,
+state-hash or content-hash change; no shipped content changes.
