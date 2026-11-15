@@ -21,7 +21,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | Gate | Result |
 |---|---|
 | 1. Encoding and interfaces | **Met.** `gbuffer-smoke` adds the GLSL decode; push blocks pinned by SPIR-V and reflection tests |
-| 2. Deferred–forward parity | **Met** locally and on CI after a TAAU fix (ADR-0021 amendment 7): worst pixel 2, 3 and 5/255 locally on the default scene, the river and the teamfight; on CI (AMD) 4, 3 and 5. No Intel runner ran the parity step. See [below](#gate-2-deferredforward-parity) |
+| 2. Deferred–forward parity | **Met** locally and on CI after a TAAU fix (ADR-0021 amendment 7): worst pixel 2, 3 and 5/255 locally on the default scene, the river and the teamfight; on CI 4, 3 and 5, on an AMD and on an Intel runner. See [below](#gate-2-deferredforward-parity) |
 | 3. Light-set consistency | **Met** under all five caps |
 | 7. Performance (≤ 1.10× N1) | **Met**: GPU total 1.014–1.065× against `ab42718` (GPU span 1.031–1.078×), 0.959–0.981× against `790d9be`; Tiered Overdrive included |
 
@@ -53,7 +53,8 @@ tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness 0.2
 within 2/255 on at least 99.5 % of pixels, and within 6/255 everywhere.
 
 **Met**, with TAAU's history fix (ADR-0021 amendment 7), locally (Mesa 26.2.5, 0 validation
-messages) and on CI's lavapipe (Mesa 26.0.8, LLVM 21.1.8; `tiered-temporal` in run 43720150585, an AMD EPYC 9V74 runner):
+messages) and on CI's lavapipe (Mesa 26.0.8, LLVM 21.1.8; `tiered-temporal` in run 43720150585 on an AMD EPYC 9V74 and in
+run 43724741928 on an Intel Xeon 6975P-C, byte for byte the same numbers):
 
 | Scene | Local: within 2/255 | Local: max | CI: within 2/255 | CI: max |
 |---|---|---|---|---|

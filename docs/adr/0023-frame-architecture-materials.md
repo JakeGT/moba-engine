@@ -1280,7 +1280,7 @@ clarifications:
     0.25), 1280×720, stylisation and foliage off; within 2/255 on at least 99.5 % of pixels
     and 6/255 everywhere.
 
-    | Scene | Local (Mesa 26.2.5) | CI (Mesa 26.0.8, LLVM 21.1.8; run 43720150585, AMD EPYC 9V74) |
+    | Scene | Local (Mesa 26.2.5) | CI (Mesa 26.0.8, LLVM 21.1.8; AMD EPYC 9V74 and Intel Xeon 6975P-C alike) |
     |---|---|---|
     | Default | 100 % within 2, max 2 | 100.000 % within 2, max 4 (2 pixels past 2) |
     | R3b river | 100.000 % within 2, max 3 (3 pixels) | 100.000 % within 2, max 3 (2 pixels) |
