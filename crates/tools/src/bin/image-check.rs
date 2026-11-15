@@ -22,7 +22,9 @@ const PARITY_MAX: u8 = 6;
 /// Per-pixel largest channel difference, as a histogram over 0..=255.
 fn difference_histogram(actual: &[u8], other: &[u8]) -> [usize; 256] {
     let mut histogram = [0usize; 256];
-    for (a, b) in actual.chunks_exact(3).zip(other.chunks_exact(3)) {
+    let (actual, _) = actual.as_chunks::<3>();
+    let (other, _) = other.as_chunks::<3>();
+    for (a, b) in actual.iter().zip(other) {
         let delta = (0..3).map(|channel| a[channel].abs_diff(b[channel])).max();
         histogram[usize::from(delta.unwrap_or(0))] += 1;
     }

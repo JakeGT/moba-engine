@@ -2445,8 +2445,8 @@ impl Renderer {
         let ao = view(resources.ao.map(|ao| ao.blurred));
         self.post.bind(&self.device, views);
         let contact = view(resources.contact);
-        self.lighting.bind_transients(&self.device, shadow, contact);
-        self.lighting.bind_ao(&self.device, ao);
+        self.lighting
+            .bind_transients(&self.device, shadow, contact, ao);
         if let (Some(pass), Some(depth)) = (&self.contact, view(Some(resources.depth))) {
             pass.bind_depth(&self.device, depth);
         }

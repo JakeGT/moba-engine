@@ -7,8 +7,10 @@
 //! lit, fogged surface. The sky tiles are not dispatched: the `sky` pass draws them.
 //!
 //! The tile buffer ([`TileLayout`]) holds the three classes' `VkDispatchIndirectCommand`s,
-//! their tile lists and a per-tile info triple for the debug views. `mask_clear` resets the
-//! arguments each frame ([`TileLayout::RESET`]).
+//! their tile counts, their tile lists and a per-tile info triple for the debug views.
+//! `mask_clear` resets the header each frame ([`TileLayout::RESET`]). The arguments are rows
+//! of `tiles_x` groups, so no dimension exceeds `maxComputeWorkGroupCount`'s guaranteed
+//! 65,535 however many tiles a class holds.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable, bytes_of};
@@ -41,7 +43,7 @@ pub(crate) enum TileClass {
 }
 
 /// The tile buffer's layout (`light_classify.slang`, `deferred_light.comp`), in 32-bit words:
-/// the three classes' dispatch arguments (`x, y, z` each) and padding, then the three lists
+/// the three classes' dispatch arguments (`x, y, z` each) and their tile counts, then the three lists
 /// of `capacity` packed tiles (`x | y << 16`), then `capacity` info triples (model mask, the
 /// far and the near depth as float bits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,9 +57,12 @@ pub(crate) struct TileLayout {
 impl TileLayout {
     /// Words before the lists (`TILE_HEADER_WORDS` in `light_classify.slang`).
     pub(crate) const HEADER_WORDS: u32 = 12;
+    /// The word of the sky class's tile count (`TILE_COUNT_WORD`); the others follow.
+    #[cfg(test)]
+    pub(crate) const COUNT_WORD: u32 = 9;
     /// What `mask_clear` writes over the header each frame: every class's dispatch is
-    /// `(0, 1, 1)`, so `light_classify`'s counts start at 0.
-    pub(crate) const RESET: [u32; 12] = [0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0];
+    /// `(0, 0, 1)` and its count 0; `light_classify` raises `x` and `y` with atomic maxima.
+    pub(crate) const RESET: [u32; 12] = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0];
 
     /// The layout for rendered sub-rectangles up to `extent` (the swapchain's).
     pub(crate) fn for_extent(extent: vk::Extent2D) -> Self {
@@ -109,8 +114,8 @@ struct DeferredPush {
     debug: u32,
     inv_exposure: f32,
     tile_class: u32,
-    reserved0: u32,
-    reserved1: u32,
+    row_width: u32,
+    capacity: u32,
 }
 
 /// The views and sets one frame's passes read and write.
@@ -437,15 +442,16 @@ impl DeferredPass {
         // SAFETY: no submitted frame reads this slot's set (its fence was waited on), and every
         // view and the buffer are live.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
-        // SAFETY: the pipeline, layout and set are live and the set was written above; the
-        // push range lies in the layout's compute range; the rendered sub-rectangle is within
-        // the extent the buffer was sized for, so the tiles fit its lists.
+        // SAFETY: the pipeline is live; `cmd` is recording outside a render pass.
         unsafe {
             self.device.cmd_bind_pipeline(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.classify.handle(),
             );
+        }
+        // SAFETY: the layout and set are live and the set was written above.
+        unsafe {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -454,6 +460,9 @@ impl DeferredPass {
                 &[set],
                 &[],
             );
+        }
+        // SAFETY: the push range lies in the layout's compute range.
+        unsafe {
             self.device.cmd_push_constants(
                 cmd,
                 self.classify_layout.handle(),
@@ -461,6 +470,12 @@ impl DeferredPass {
                 0,
                 bytes_of(&push),
             );
+        }
+        // SAFETY: the pipeline, set and push constants are bound above; the rendered
+        // sub-rectangle is within the extent the buffer was sized for, so the tiles fit its
+        // lists, and the group counts are tiles per row and column of an image the device
+        // created.
+        unsafe {
             self.device.cmd_dispatch(
                 cmd,
                 size.width.div_ceil(TILE),
@@ -484,12 +499,8 @@ impl DeferredPass {
                 .image_view(view)
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
         };
-        let inputs = [
-            read(targets.gbuffer[0]),
-            read(targets.gbuffer[1]),
-            read(targets.gbuffer[2]),
-            read(targets.depth),
-        ];
+        let [gb0, gb1, gb2] = targets.gbuffer;
+        let inputs = [read(gb0), read(gb1), read(gb2), read(targets.depth)];
         let hdr = [vk::DescriptorImageInfo::default()
             .image_view(targets.hdr)
             .image_layout(vk::ImageLayout::GENERAL)];
@@ -523,9 +534,8 @@ impl DeferredPass {
         // SAFETY: no submitted frame reads this slot's set (its fence was waited on), and every
         // view and the buffer are live.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
-        // SAFETY: the layout and sets are live: set 0 and 3 are the scene's camera and
-        // lighting sets for this slot (written before the frame was recorded), set 1 was
-        // written above; set 2 is empty.
+        // SAFETY: the layout and sets are live: set 0 is the scene's camera set for this slot
+        // (written before the frame was recorded) and set 1 was written above.
         unsafe {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
@@ -535,6 +545,10 @@ impl DeferredPass {
                 &[targets.camera, set],
                 &[],
             );
+        }
+        // SAFETY: set 3 is the scene's lighting set for this slot, live and written before the
+        // frame was recorded; set 2 is empty and never read.
+        unsafe {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -555,19 +569,19 @@ impl DeferredPass {
                 debug: self.debug,
                 inv_exposure: 1.0,
                 tile_class: class as u32,
-                reserved0: 0,
-                reserved1: 0,
+                row_width: self.layout.tiles_x,
+                capacity: self.layout.capacity,
             };
-            // SAFETY: the pipeline is live and uses the bound layout; the push range lies in
-            // its compute range; the arguments were written by `light_classify` (at most
-            // `capacity` groups, each reading its own list entry) and the graph made them
-            // visible to the indirect read.
+            // SAFETY: the pipeline is live and uses the bound layout.
             unsafe {
                 self.device.cmd_bind_pipeline(
                     cmd,
                     vk::PipelineBindPoint::COMPUTE,
                     pipeline.handle(),
                 );
+            }
+            // SAFETY: the push range lies in the layout's compute range.
+            unsafe {
                 self.device.cmd_push_constants(
                     cmd,
                     self.light_layout.handle(),
@@ -575,6 +589,14 @@ impl DeferredPass {
                     0,
                     bytes_of(&push),
                 );
+            }
+            // SAFETY: the pipeline, sets and push constants are bound above. The arguments
+            // were written by `light_classify` as rows of `tiles_x` groups (`x` ≤ `tiles_x`,
+            // `y` ≤ the layout's rows, both far below `maxComputeWorkGroupCount`'s minimum of
+            // 65,535 for any image the device can create) and the graph made them visible to
+            // the indirect read; each group reads only its own list entry, below both the
+            // class's count and `capacity`.
+            unsafe {
                 self.device.cmd_dispatch_indirect(
                     cmd,
                     self.tiles.handle(),
@@ -598,9 +620,11 @@ mod tests {
         const OP_MEMBER_DECORATE: u32 = 72;
         const PUSH_CONSTANT: u32 = 9;
         const OFFSET: u32 = 35;
-        let words: Vec<u32> = spirv
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("word")))
+        let (chunks, rest) = spirv.as_chunks::<4>();
+        assert!(rest.is_empty(), "SPIR-V is whole words");
+        let words: Vec<u32> = chunks
+            .iter()
+            .map(|&word| u32::from_le_bytes(word))
             .collect();
         let mut pointers = Vec::new();
         let mut variable_type = None;
@@ -643,8 +667,8 @@ mod tests {
             core::mem::offset_of!(DeferredPush, debug),
             core::mem::offset_of!(DeferredPush, inv_exposure),
             core::mem::offset_of!(DeferredPush, tile_class),
-            core::mem::offset_of!(DeferredPush, reserved0),
-            core::mem::offset_of!(DeferredPush, reserved1),
+            core::mem::offset_of!(DeferredPush, row_width),
+            core::mem::offset_of!(DeferredPush, capacity),
         ]
         .map(|offset| u32::try_from(offset).expect("small"))
         .to_vec();
@@ -760,6 +784,7 @@ mod tests {
     /// not compared (there either loop may take the neighbour, and a light at its radius
     /// adds zero); they must stay rare.
     #[test]
+    #[allow(clippy::too_many_lines)] // The scene, the reconstruction and the comparison.
     fn forward_and_deferred_visit_the_same_lights() {
         use crate::depth::DepthConvention;
         use crate::lights::{CELL_WORDS, GRID, LIGHT_VEC4S, MAX_LIGHTS, PointLight};
@@ -894,12 +919,40 @@ mod tests {
         assert!(worst > 0.0, "the reconstruction is exercised");
     }
 
+    /// `light_classify`'s two-dimensional arguments: the atomic maxima of
+    /// `min(slot + 1, tiles_x)` and `slot / tiles_x + 1` over the appended slots give
+    /// `min(n, tiles_x)` by `ceil(n / tiles_x)` groups, which cover all `n` tiles with less
+    /// than a row to spare, and neither dimension exceeds 65,535 for the largest image a
+    /// device may create (32,768 × 32,768), where a one-dimensional count of 4,194,304 would.
+    #[test]
+    fn indirect_arguments_are_rows_of_tiles() {
+        for (width, height) in [(1920, 1080), (6016, 3384), (7680, 4320), (32_768, 32_768)] {
+            let layout = TileLayout::for_extent(ash::vk::Extent2D { width, height });
+            let row = layout.tiles_x;
+            for n in [1, 2, row - 1, row, row + 1, 3 * row + 7, layout.capacity] {
+                let (mut x, mut y) = (0, 0);
+                for slot in 0..n {
+                    x = x.max((slot + 1).min(row));
+                    y = y.max(slot / row + 1);
+                }
+                assert_eq!(
+                    (x, y),
+                    (n.min(row), n.div_ceil(row)),
+                    "{width}x{height} n={n}"
+                );
+                assert!(x * y >= n && x * y - n < row, "{width}x{height} n={n}");
+                assert!(x <= 65_535 && y <= 65_535, "{width}x{height} n={n}");
+            }
+        }
+    }
+
     /// The tile layout's constants are the shaders' (`TILE_HEADER_WORDS`, the class order,
     /// the 16-pixel tile) and the buffer holds every tile of the extent in each list.
     #[test]
     fn tile_layout_matches_the_shaders() {
         let classify = include_str!("../../../shaders/shaders/slang/light_classify.slang");
         assert!(classify.contains("static const uint TILE_HEADER_WORDS = 12;"));
+        assert!(classify.contains("static const uint TILE_COUNT_WORD = 9;"));
         assert!(classify.contains("static const uint TILE = 16;"));
         assert!(classify.contains("static const uint CLASS_SKY = 0;"));
         assert!(classify.contains("static const uint CLASS_STANDARD = 1;"));
@@ -907,6 +960,8 @@ mod tests {
         assert!(classify.contains("[numthreads(16, 16, 1)]"));
         let light = include_str!("../../../shaders/shaders/deferred_light.comp");
         assert!(light.contains("local_size_x = 16, local_size_y = 16"));
+        assert!(light.contains("const uint TILE_COUNT_WORD = 9u;"));
+        assert_eq!(TileLayout::COUNT_WORD, 9);
         assert_eq!(TileLayout::HEADER_WORDS as usize, TileLayout::RESET.len());
         assert_eq!(TileClass::Sky as u32, 0);
         let layout = TileLayout::for_extent(ash::vk::Extent2D {
@@ -918,9 +973,13 @@ mod tests {
         assert_eq!(layout.info_offset(), 12 + 3 * 8160);
         assert_eq!(layout.bytes(), 4 * (12 + 6 * 8160));
         assert_eq!(TileLayout::args_offset(TileClass::Extended), 24);
-        // Each reset dispatch is (0, 1, 1).
+        // Each reset dispatch is (0, 0, 1), and every count 0.
         for class in 0..3 {
-            assert_eq!(&TileLayout::RESET[3 * class..3 * class + 3], &[0, 1, 1]);
+            assert_eq!(&TileLayout::RESET[3 * class..3 * class + 3], &[0, 0, 1]);
+            assert_eq!(
+                TileLayout::RESET[TileLayout::COUNT_WORD as usize + class],
+                0
+            );
         }
     }
 }

@@ -640,7 +640,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         image_write(decode_set, 2, &image_infos[2]),
         buffer_write(decode_set, 3, &glsl_decoded_info),
     ];
-    // SAFETY: both sets are live and unused; every write names a live buffer or view.
+    // SAFETY: all three sets are live and unused; every write names a live buffer or view.
     unsafe { d.update_descriptor_sets(&writes, &[]) };
 
     // Pipelines.
@@ -837,14 +837,16 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         // SAFETY: the dispatch covers the 64×64 surfaces in 8×8 groups.
         unsafe { d.cmd_dispatch(command, SIZE / 8, SIZE / 8, 1) };
         // The GLSL decode reads the same sampled targets and writes its own buffer.
-        // SAFETY: as above, with `decode_pipeline`, `decode_set` (set 0 of its layout, written)
-        // and the 8-byte push range of its layout; 8×8 groups cover the surfaces.
+        // SAFETY: `decode_pipeline` is live; `command` is recording outside a render pass.
         unsafe {
             d.cmd_bind_pipeline(
                 command,
                 vk::PipelineBindPoint::COMPUTE,
                 decode_pipeline.handle(),
             );
+        }
+        // SAFETY: `decode_set` is live and written, set 0 of `decode_pipeline_layout`.
+        unsafe {
             d.cmd_bind_descriptor_sets(
                 command,
                 vk::PipelineBindPoint::COMPUTE,
@@ -853,6 +855,9 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
                 &[decode_set],
                 &[],
             );
+        }
+        // SAFETY: the 8-byte push lies in the layout's compute push range.
+        unsafe {
             d.cmd_push_constants(
                 command,
                 decode_pipeline_layout.handle(),
@@ -860,8 +865,9 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
                 0,
                 bytemuck::bytes_of(&push),
             );
-            d.cmd_dispatch(command, SIZE / 8, SIZE / 8, 1);
         }
+        // SAFETY: the pipeline, set and push are bound above; 8×8 groups cover the surfaces.
+        unsafe { d.cmd_dispatch(command, SIZE / 8, SIZE / 8, 1) };
         let to_copy = targets.each_ref().map(|image| {
             color_barrier(
                 image.image(),

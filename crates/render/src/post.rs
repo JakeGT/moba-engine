@@ -246,7 +246,7 @@ pub enum TemporalDebugView {
     /// The G-buffer's flags: red `UNIT`, green `NO_FOG_OF_WAR`, blue reserved.
     Flags,
     /// The deferred lighting's tile classes over the lit frame: standard green, extended
-    /// orange, sky untinted (ADR-0023 amendment 1 item 12; N2b).
+    /// orange, sky untinted (ADR-0023 amendment 2 item 14; N2b).
     Tiles,
     /// The light-grid column's point-light count per pixel, cold to hot over 0–16 (N2b).
     LightCount,

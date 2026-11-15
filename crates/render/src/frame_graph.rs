@@ -2429,6 +2429,7 @@ mod tests {
     /// the forward `scene`, before the water and everything after it. Every variant compiles
     /// on the same transients with nothing culled, within the graph's pass limit.
     #[test]
+    #[allow(clippy::too_many_lines)] // One walk over every deferred variant's topology.
     fn the_deferred_frame_classifies_lights_then_draws_the_sky() {
         let mut largest = 0;
         for spec in tiered_specs() {

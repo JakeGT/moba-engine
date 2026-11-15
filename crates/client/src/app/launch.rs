@@ -1504,7 +1504,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 /// GPU lanes of the frame log, in sample order (see [`gpu_sample`]).
-pub(crate) const GPU_LANES: [&str; 33] = [
+pub(crate) const GPU_LANES: [&str; 36] = [
     "shadow",
     "scene",
     "composite",
@@ -1540,6 +1540,10 @@ pub(crate) const GPU_LANES: [&str; 33] = [
     "tc_mask",
     "overlay_prepass",
     "overlay",
+    // ADR-0023 §2 (N2b): the deferred lighting's passes, on the tiered deferred frame only.
+    "light_classify",
+    "deferred_light",
+    "sky",
 ];
 /// First lane of a pass that only some configurations have (R6 post, ADR-0015; R2b's contact
 /// shadows and outlines, ADR-0016).
@@ -1598,6 +1602,9 @@ pub(crate) fn gpu_sample(
         pass("tc_mask"),
         pass("overlay_prepass"),
         pass("overlay"),
+        pass("light_classify"),
+        pass("deferred_light"),
+        pass("sky"),
     ]
 }
 
@@ -2345,6 +2352,10 @@ mod tests {
                     0.02,
                     0.05,
                     0.04,
+                    // N2b: the deferred lighting ran in every frame but the first.
+                    if index == 0 { 0.0 } else { 0.004 },
+                    if index == 0 { 0.0 } else { 0.06 },
+                    if index == 0 { 0.0 } else { 0.007 },
                 ]
             })
             .collect();
@@ -2357,10 +2368,13 @@ mod tests {
         assert!(report.contains("gpu_tc_mask_runs=101 gpu_tc_mask_p50_ms=0.020 "));
         assert!(report.contains("gpu_overlay_prepass_runs=101 gpu_overlay_prepass_p50_ms=0.050 "));
         assert!(
-            report.ends_with(
+            report.contains(
                 "gpu_overlay_runs=101 gpu_overlay_p50_ms=0.040 gpu_overlay_p95_ms=0.040 "
             )
         );
+        assert!(report.contains("gpu_light_classify_runs=100 gpu_light_classify_p50_ms=0.004 "));
+        assert!(report.contains("gpu_deferred_light_runs=100 gpu_deferred_light_p50_ms=0.060 "));
+        assert!(report.ends_with("gpu_sky_runs=100 gpu_sky_p50_ms=0.007 gpu_sky_p95_ms=0.007 "));
         assert!(report.starts_with("gpu_shadow_p50_ms=0.250 gpu_shadow_p95_ms=0.475 "));
         assert!(report.contains("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
         assert!(report.contains("gpu_composite_p95_ms=1.900 "));

@@ -140,6 +140,35 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
+  [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
+  Compat is byte-identical, SPIR-V included:**
+  - **New passes:** `light_classify` (Slang compute) sorts 16 × 16 tiles into sky, standard
+    and extended lists with `VkDispatchIndirectCommand`s; `deferred_light` (GLSL compute,
+    sharing the forward `shade()` through `include/lighting.glsl`) decodes the G-buffer,
+    reconstructs each pixel from reversed-Z depth and applies sun, shadows, contact shadows,
+    the column-grid point lights, ambient, AO, the map rim on units, fog of war and height
+    fog; `sky` draws the far plane (and the simple water on Low/Medium). The G-buffer pass
+    writes emissive into `hdr`, which is `RGBA16F` whenever the frame is deferred.
+  - **Off switch:** `MOBA_DEFERRED=off` (`RenderConfig::with_deferred`) runs N1's forward
+    frame; the tiered start-up log prints `[render] lighting: deferred|forward`.
+    `MOBA_STYLISATION=off` turns the map's wrap, rim, ramp and painted specular off on both.
+  - **`MOBA_DEBUG_VIEW`** gains `tiles`, `light-count` and `lit-only`.
+  - **Gates:** `scripts/deferred-parity.sh` (CI `tiered-temporal`) compares the two frames
+    (`image-check --parity`); the default scene and the teamfight pass, and the river does
+    not (max 15/255 at 7 shoreline pixels, from the frame's own instability: amendment 2
+    item 16). `gbuffer-smoke` also checks the GLSL decode. A CPU test holds that the forward
+    and deferred light loops visit the same lights under every cap. On the RTX 5070 Ti the
+    frame is 1.057–1.085× N1's forward frame (gate ≤ 1.10×) and 0.987–0.999× N2a's.
+  - **Frame log:** `gpu_light_classify`, `gpu_deferred_light` and `gpu_sky` lanes.
+    `MAX_PASSES` is 48 (the largest deferred topology has 40).
+  - **Fix: a resize wrote a destroyed AO view.** The main view's lighting sets were
+    rewritten with the new shadow and contact views before the AO view was updated, so the
+    first write named the old, destroyed AO transient (a validation error on any resize with
+    GTAO on, Compat included). The three are now set before one write
+    (`Lighting::bind_transients`).
+  - **Tiered admission** now requires `maxFragmentOutputAttachments` and
+    `maxFragmentCombinedOutputResources` ≥ 6 (the G-buffer pass's `hdr` output).
 - **Reversed-Z and the thin G-buffer on Tiered (ADR-0023 N2a and amendment 1;
   [perf/0035](docs/perf/0035-n2a-gbuffer.md)). Compat is byte-identical, SPIR-V included:**
   - **Reversed-Z:** depth is cleared to 0 and tested `GREATER_OR_EQUAL`, with a finite far

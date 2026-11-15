@@ -38,8 +38,9 @@ layout(set = 1, binding = 1) uniform texture2D gbuffer1;
 layout(set = 1, binding = 2) uniform texture2D gbuffer2;
 layout(set = 1, binding = 3) uniform texture2D scene_depth;
 layout(set = 1, binding = 4, rgba16f) uniform image2D hdr;
-// `light_classify`'s output (`TileBuffer` in crates/render/src/passes/deferred.rs): the
-// indirect arguments, then the tile lists of packed `x | y << 16` tile coordinates.
+// `light_classify`'s output (`TileLayout` in crates/render/src/passes/deferred.rs): the
+// indirect arguments (rows of `row_width` groups), the classes' tile counts (words 9-11),
+// then the tile lists of packed `x | y << 16` tile coordinates.
 layout(std430, set = 1, binding = 5) readonly buffer Tiles {
     uint words[];
 } tiles;
@@ -49,10 +50,12 @@ layout(push_constant) uniform DeferredPush {
     uint list_offset;   // word offset of this dispatch's tile list in `tiles`
     uint debug;         // 0 off, 1 lit-only, 2 light-count, 3 tiles (MOBA_DEBUG_VIEW)
     float inv_exposure; // 1 / the composite's exposure, for the debug views' colours
-    uint tile_class;    // 1 standard, 2 extended (the tiles view's colour)
-    uint reserved0;
-    uint reserved1;
+    uint tile_class;    // 1 standard, 2 extended (its count's word, the tiles view's colour)
+    uint row_width;     // groups per row of the indirect dispatch (the layout's `tiles_x`)
+    uint capacity;      // tiles each list holds
 } push;
+
+const uint TILE_COUNT_WORD = 9u;
 
 const uint DEBUG_LIT_ONLY = 1u;
 const uint DEBUG_LIGHT_COUNT = 2u;
@@ -80,7 +83,13 @@ vec3 heat(uint count) {
 }
 
 void main() {
-    uint packed_tile = tiles.words[push.list_offset + gl_WorkGroupID.x];
+    // The dispatch is rows of `row_width` groups; the last row's groups past the class's
+    // count, and anything past the list's capacity, have no tile.
+    uint index = gl_WorkGroupID.y * push.row_width + gl_WorkGroupID.x;
+    if (index >= min(tiles.words[TILE_COUNT_WORD + push.tile_class], push.capacity)) {
+        return;
+    }
+    uint packed_tile = tiles.words[push.list_offset + index];
     uvec2 tile = uvec2(packed_tile & 0xFFFFu, packed_tile >> 16);
     ivec2 pixel = ivec2(tile * 16u + gl_LocalInvocationID.xy);
     if (any(greaterThanEqual(uvec2(pixel), push.render_size))) {

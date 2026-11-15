@@ -5,13 +5,22 @@
 // - **sky**: every pixel at the far plane (`deferred_light` skips it; the sky pass draws it);
 // - **standard**: only `STANDARD` and `UNLIT` pixels (the fast permutation);
 // - **extended**: any other model (the full permutation).
-// Each tile also records its model mask and depth range for the debug views. The arguments
-// are reset by the `mask_clear` pass before this one (x = 0, y = z = 1).
+// Each tile also records its model mask and depth range for the debug views. The header is
+// reset by the `mask_clear` pass before this one (`TileLayout::RESET`: counts 0, arguments
+// (0, 0, 1)).
 //
-// `TileBuffer` in crates/render/src/passes/deferred.rs mirrors the buffer's layout:
-// words 0-8 the sky, standard and extended dispatch arguments, 9-11 padding, then, from
-// `TILE_HEADER_WORDS`, the three lists of `capacity` packed tiles (`x | y << 16`) and the
-// per-tile info (`capacity` triples: model mask, the far and the near depth as float bits).
+// The arguments are two-dimensional, rows of `tiles_x` groups: a class can hold more tiles
+// than `maxComputeWorkGroupCount[0]` guarantees (65,535: 79,712 at 6016 x 3384), while
+// `tiles_x` and the row count stay within it. Each appended tile raises its class's `x` to
+// min(slot + 1, tiles_x) and `y` to slot / tiles_x + 1 with atomic maxima, so after the pass
+// they are min(n, tiles_x) and ceil(n / tiles_x) for n tiles; `deferred_light` skips the
+// groups of the last row past n.
+//
+// `TileLayout` in crates/render/src/passes/deferred.rs mirrors the buffer's layout:
+// words 0-8 the sky, standard and extended dispatch arguments, 9-11 the three classes' tile
+// counts, then, from `TILE_HEADER_WORDS`, the three lists of `capacity` packed tiles
+// (`x | y << 16`) and the per-tile info (`capacity` triples: model mask, the far and the near
+// depth as float bits).
 
 import gbuffer;
 
@@ -32,6 +41,7 @@ ConstantBuffer<ClassifyPush> push;
 
 static const uint TILE = 16;
 static const uint TILE_HEADER_WORDS = 12;
+static const uint TILE_COUNT_WORD = 9;
 static const uint CLASS_SKY = 0;
 static const uint CLASS_STANDARD = 1;
 static const uint CLASS_EXTENDED = 2;
@@ -77,10 +87,13 @@ void main(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint index :
     uint tile_class = mask == 0 ? CLASS_SKY
                     : (mask & ~STANDARD_MODELS) == 0 ? CLASS_STANDARD : CLASS_EXTENDED;
     uint slot;
-    InterlockedAdd(tiles[tile_class * 3], 1, slot);
+    InterlockedAdd(tiles[TILE_COUNT_WORD + tile_class], 1, slot);
     if (slot < push.capacity)
     {
         tiles[TILE_HEADER_WORDS + tile_class * push.capacity + slot] = group.x | (group.y << 16);
+        uint row = max(push.tiles_x, 1u);
+        InterlockedMax(tiles[tile_class * 3], min(slot + 1, row));
+        InterlockedMax(tiles[tile_class * 3 + 1], slot / row + 1);
     }
     uint tile_index = group.y * push.tiles_x + group.x;
     if (tile_index < push.capacity)
