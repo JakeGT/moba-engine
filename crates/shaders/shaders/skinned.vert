@@ -22,7 +22,7 @@ invariant gl_Position;
 #include "outline.glsl"
 #endif
 #ifdef MOTION_VECTORS
-// ADR-0021 §2b: the temporal prepass's motion (with DEPTH_PREPASS).
+// ADR-0021 §2b: the G-buffer prepass's motion (with GBUFFER, ADR-0023 §1e).
 #define MOTION_VECTORS_VERTEX
 #define MOTION_PREV_INSTANCES
 #include "motion.glsl"
@@ -136,17 +136,6 @@ void main() {
 #elif defined(DEPTH_PREPASS)
     gl_Position = camera.view_proj * world;
     out_outline = instance.params.x;
-#ifdef MOTION_VECTORS
-    // `reserved0`: the previous palette's first bone, copied after this frame's (ADR-0021
-    // §2c); `reserved1` 1 when it is there (otherwise this frame's palette).
-    uint index = uint(gl_InstanceIndex);
-    vec3 previous = world.xyz;
-    if (prev_valid(index)) {
-        mat4 prev_skinning = skin.reserved1 != 0u ? skin_matrix(skin.reserved0) : skinning;
-        previous = (prev_model(index) * prev_skinning * vec4(in_position, 1.0)).xyz;
-    }
-    write_motion(world.xyz, previous);
-#endif
 #elif defined(OUTLINE_HULL)
     vec3 normal = transpose(inverse(mat3(model))) * in_normal;
     gl_Position = outline_hull_position(world.xyz, normal, instance.params.x);
@@ -160,6 +149,8 @@ void main() {
 #ifdef GBUFFER
     out_outline_slot = instance.params.x;
 #ifdef MOTION_VECTORS
+    // `reserved0`: the previous palette's first bone, copied after this frame's (ADR-0021
+    // §2c); `reserved1` 1 when it is there (otherwise this frame's palette).
     uint index = uint(gl_InstanceIndex);
     vec3 previous = world.xyz;
     if (prev_valid(index)) {

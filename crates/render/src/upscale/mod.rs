@@ -117,6 +117,12 @@ pub(crate) trait TemporalUpscaler {
     fn jitter_phases(&self, render: Extent, output: Extent) -> u32;
     /// Whether the back end sharpens itself (otherwise the renderer's `sharpen` pass runs).
     fn has_sharpening(&self) -> bool;
+    /// The depth convention the back end's shaders or vendor context are built for (ADR-0023
+    /// §1c, amendment 1 items 4 and 15). Required, with no default, so a new back end cannot
+    /// compile without deciding it: a vendor back end returns the convention its inverted-depth
+    /// flag was created with. [`Self::record`] refuses inputs of another convention through
+    /// [`expect_depth_convention`].
+    fn depth_convention(&self) -> DepthConvention;
     /// Records the back end's work for this frame into `cmd`.
     ///
     /// # Safety

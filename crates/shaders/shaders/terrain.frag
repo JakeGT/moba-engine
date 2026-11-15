@@ -44,6 +44,11 @@ layout(location = 0) out vec4 out_motion;
 layout(location = 1) out vec4 out_gb0;
 layout(location = 2) out vec4 out_gb1;
 layout(location = 3) out vec4 out_gb2;
+#ifdef PREPASS_IDS
+// No unit here, written explicitly: the ID attachment keeps an RGBA mask, since an empty mask
+// over an unwritten output is not honoured on lavapipe (ADR-0023 amendment 1 item 16).
+layout(location = 4) out uint out_id;
+#endif
 // The surface `flat_terrain` or `splat_terrain` built, instead of its shading.
 Surface gbuffer_surface;
 #define TERRAIN_SHADE(s) (gbuffer_surface = (s), vec3(0.0))
@@ -196,6 +201,9 @@ void main() {
     params.flags = 0u; // The fog of war darkens the ground.
     params.rim_slot = 0u;
     encode_gbuffer(params, out_gb0, out_gb1, out_gb2);
+#ifdef PREPASS_IDS
+    out_id = 0u;
+#endif
 #else
 
     lit = apply_fog_of_war(lit, in_world_pos);

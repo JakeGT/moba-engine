@@ -1077,8 +1077,9 @@ impl ScenePipelines {
     /// opaque main-view draw writes depth, its motion (attachment 0, `R16G16_SFLOAT`) and its
     /// surface into `gb0`–`gb2` (attachments 1–3, [`crate::gbuffer`]), the units also their
     /// slot into the unit mask (attachment 4) when `ids` (the heat haze keeps it). The terrain
-    /// and the foliage leave the mask alone, and the background's camera motion also the
-    /// G-buffer (an empty write mask; `independentBlend`), which stays at its clear (`UNLIT`).
+    /// writes 0 (no unit) to the mask and the background zero (`UNLIT`) to the G-buffer and 0
+    /// to the mask, explicitly; the foliage leaves the mask alone (an empty write mask,
+    /// `independentBlend`), so a unit under the brush keeps its slot (amendment 1 item 16).
     /// The fragment stages are the forward shaders' `GBUFFER` permutations, so the surface is
     /// the one the forward `scene` shades (ADR-0023 amendment 1).
     #[allow(clippy::too_many_arguments)] // One set of pipelines.
@@ -1130,12 +1131,18 @@ impl ScenePipelines {
         };
         let id = |write_mask| target(crate::frame_graph::OUTLINE_ID_FORMAT, write_mask);
         let [g0, g1, g2] = gbuffer(rgba);
-        let [n0, n1, n2] = gbuffer(none);
         let count = 4 + usize::from(ids);
-        // Terrain and foliage: motion and G-buffer; units also the mask; the sky motion only.
-        let surfaces = [motion, g0, g1, g2, id(none)];
+        // Every pipeline writes motion and the G-buffer. The units write their slot, and the
+        // terrain and the sky write 0 (their `*_ids` fragments), all with masks covering what
+        // the shader writes. The foliage alone keeps an empty mask over an output it never
+        // writes, so a unit under the brush keeps its slot: defined on a conformant device,
+        // but not honoured on lavapipe, where that slot is undefined (amendment 1 item 16).
+        let written = [motion, g0, g1, g2, id(rgba)];
         let units = [motion, g0, g1, g2, id(vk::ColorComponentFlags::R)];
-        let background = [motion, n0, n1, n2, id(none)];
+        let foliage_targets = [motion, g0, g1, g2, id(none)];
+        let with_ids = |plain: &'static str, ids_name: &'static str| {
+            module(if ids { ids_name } else { plain })
+        };
         let build = |layout,
                      vertex_layout,
                      vertex: vk::ShaderModule,
@@ -1162,8 +1169,8 @@ impl ScenePipelines {
             layout,
             Some(VertexLayout::Terrain),
             module("terrain_motion.vert")?.handle(),
-            module("terrain_gbuffer.frag")?.handle(),
-            &surfaces[..count],
+            with_ids("terrain_gbuffer.frag", "terrain_gbuffer_ids.frag")?.handle(),
+            &written[..count],
             true,
         )?;
         let unit = build(
@@ -1233,7 +1240,7 @@ impl ScenePipelines {
             None,
             module("foliage_motion.vert")?.handle(),
             module("foliage_gbuffer.frag")?.handle(),
-            &surfaces[..count],
+            &foliage_targets[..count],
             true,
         )?;
         // On the far plane, tested only: where nothing was drawn.
@@ -1241,8 +1248,8 @@ impl ScenePipelines {
             layout,
             None,
             module(depth.sky_vertex())?.handle(),
-            module("sky_motion.frag")?.handle(),
-            &background[..count],
+            with_ids("sky_motion.frag", "sky_motion_ids.frag")?.handle(),
+            &written[..count],
             false,
         )?;
         Ok(PrepassPipelines {

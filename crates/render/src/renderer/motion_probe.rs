@@ -288,6 +288,9 @@ struct GBufferExpect {
     flags: u32,
     /// F0 0.04 in the model data (`STANDARD`).
     f0: bool,
+    /// The linear base colour `gb0` holds, when the probe knows it (the units' instance
+    /// colour; untextured, so the albedo is that colour). Every class has metallic 0.
+    base_color: Option<[f32; 3]>,
 }
 
 const fn expect(name: &'static str, model: ShadingModel, flags: u32, f0: bool) -> GBufferExpect {
@@ -296,14 +299,25 @@ const fn expect(name: &'static str, model: ShadingModel, flags: u32, f0: bool) -
         model,
         flags,
         f0,
+        base_color: None,
     }
 }
 
+const fn unit_expect(name: &'static str) -> GBufferExpect {
+    GBufferExpect {
+        base_color: Some(UNIT_COLOUR),
+        ..expect(name, ShadingModel::Standard, UNIT_FLAGS, true)
+    }
+}
+
+/// Every probe unit's instance colour. Its blue lands in `gb0`'s blue channel, which the
+/// lavapipe write-mask fault dropped (ADR-0023 amendment 1 item 16).
+const UNIT_COLOUR: [f32; 3] = [0.75, 0.35, 0.2];
 const UNIT_FLAGS: u32 = FLAG_UNIT | FLAG_NO_FOG_OF_WAR;
 const GBUFFER_CLASSES: [GBufferExpect; 6] = [
-    expect("unit", ShadingModel::Standard, UNIT_FLAGS, true),
-    expect("skinned", ShadingModel::Standard, UNIT_FLAGS, true),
-    expect("vat", ShadingModel::Standard, UNIT_FLAGS, true),
+    unit_expect("unit"),
+    unit_expect("skinned"),
+    unit_expect("vat"),
     expect("terrain", ShadingModel::Standard, 0, true),
     expect("foliage", ShadingModel::Foliage, 0, false),
     expect("sky", ShadingModel::Unlit, 0, false),
@@ -327,15 +341,29 @@ fn gbuffer_class(class: usize) -> Option<usize> {
     }
 }
 
-/// Whether `texels` (`gb0` is not read back) hold what `expect` writes.
+/// Whether `texels` hold what `expect` writes: model, flags, rim slot and F0 (`gb1`,
+/// `gb2`), metallic 0 and any known base colour (`gb0`, each channel within one step, the
+/// UNORM rounding the spec allows), and all zero for the sky.
 fn gbuffer_matches(expect: &GBufferExpect, texels: GBufferTexels) -> bool {
     let Some(surface) = crate::gbuffer::decode(texels) else {
         return false;
     };
-    let clear = texels.gb1 == 0 && texels.gb2 == [0; 4];
+    let clear = texels == GBufferTexels::default();
+    let base_color = expect.base_color.is_none_or(|base_color| {
+        let want = crate::gbuffer::encode(&crate::gbuffer::SurfaceParams {
+            base_color,
+            ..surface
+        });
+        want.gb0[..3]
+            .iter()
+            .zip(&texels.gb0[..3])
+            .all(|(&want, &got)| want.abs_diff(got) <= 1)
+    });
     surface.model == expect.model
         && surface.flags == expect.flags
         && surface.rim_slot == 0
+        && texels.gb0[3] == 0
+        && base_color
         && (!expect.f0 || (surface.model_data[0] - 0.04).abs() <= F0_TOLERANCE)
         && (expect.model != ShadingModel::Unlit || clear)
 }
@@ -362,7 +390,7 @@ struct Readback {
     /// Render pixels.
     motion: Vec<[f32; 2]>,
     depth: Vec<f32>,
-    /// `gb1` and `gb2` (`gb0` left at 0).
+    /// `gb0`, `gb1` and `gb2`.
     gbuffer: Vec<GBufferTexels>,
 }
 
@@ -602,7 +630,7 @@ impl Renderer {
             )
         };
         let (camera_a, camera_b) = (camera(Vec3::ZERO), camera(CAMERA_PAN));
-        let colour = Vec4::new(0.75, 0.35, 0.2, 1.0);
+        let colour = Vec3::from_array(UNIT_COLOUR).extend(1.0);
         let at = |centre: Vec3| UnitInstance::new(Mat4::from_translation(centre), colour);
         let static_a = Vec3::new(2.5, 0.5, 0.0);
         let skinned_at = Vec3::new(0.0, 0.5, -2.5);
@@ -872,7 +900,10 @@ impl Renderer {
                 pixels: tally.pixels,
                 mismatches: tally.mismatches,
                 first_mismatch: tally.first.map(|(x, y, texels)| {
-                    format!("({x}, {y}) gb1={:#010x} gb2={:?}", texels.gb1, texels.gb2)
+                    format!(
+                        "({x}, {y}) gb0={:?} gb1={:#010x} gb2={:?}",
+                        texels.gb0, texels.gb1, texels.gb2
+                    )
                 }),
             })
             .collect();
@@ -886,9 +917,9 @@ impl Renderer {
         })
     }
 
-    /// Frame B's motion (render pixels), depth and G-buffer (`gb1`, `gb2`), row-major at the
-    /// render resolution.
-    #[allow(clippy::too_many_lines)] // Transitions, four copies, transitions back.
+    /// Frame B's motion (render pixels), depth and G-buffer, row-major at the render
+    /// resolution.
+    #[allow(clippy::too_many_lines)] // Transitions, five copies, transitions back.
     fn read_targets(&self) -> RenderResult<Readback> {
         let plan = &self.plans[0];
         let temporal = plan
@@ -903,6 +934,7 @@ impl Renderer {
         // target is 4 bytes a texel (`R16G16_SFLOAT`, `A2B10G10R10`, `R8G8B8A8`).
         let targets = [
             (temporal.motion, "motion", color, color, 4),
+            (temporal.gbuffer[0], "gb0", color, color, 4),
             (temporal.gbuffer[1], "gb1", color, color, 4),
             (temporal.gbuffer[2], "gb2", color, color, 4),
             (
@@ -1019,8 +1051,15 @@ impl Renderer {
         // SAFETY: waits for the submission above; the pool and buffers outlive it.
         unsafe { device.queue_wait_idle(self.device.graphics_queue) }?;
         let count = usize::try_from(texels).expect("render extent fits usize");
-        let [motion_buffer, gb1_buffer, gb2_buffer, depth_buffer] = &mut buffers[..] else {
-            unreachable!("four targets");
+        let [
+            motion_buffer,
+            gb0_buffer,
+            gb1_buffer,
+            gb2_buffer,
+            depth_buffer,
+        ] = &mut buffers[..]
+        else {
+            unreachable!("five targets");
         };
         let host = || probe_error("readback buffer is not host visible");
         let motion = motion_buffer
@@ -1029,18 +1068,18 @@ impl Renderer {
             .iter()
             .map(|texel| [f32_from_f16(texel[0]), f32_from_f16(texel[1])])
             .collect();
+        let gb0 = gb0_buffer
+            .mapped_slice_mut::<[u8; 4]>(count)
+            .ok_or_else(host)?;
         let gb1 = gb1_buffer.mapped_slice_mut::<u32>(count).ok_or_else(host)?;
         let gb2 = gb2_buffer
             .mapped_slice_mut::<[u8; 4]>(count)
             .ok_or_else(host)?;
-        let gbuffer = gb1
+        let gbuffer = gb0
             .iter()
+            .zip(gb1.iter())
             .zip(gb2.iter())
-            .map(|(&gb1, &gb2)| GBufferTexels {
-                gb0: [0; 4],
-                gb1,
-                gb2,
-            })
+            .map(|((&gb0, &gb1), &gb2)| GBufferTexels { gb0, gb1, gb2 })
             .collect();
         let width = usize::try_from(depth_bytes).expect("small");
         let depth = depth_buffer
@@ -1095,12 +1134,13 @@ mod tests {
     }
 
     /// The probe's expectations are what the twin encodes for each class (ADR-0023
-    /// amendment 1 item 9), and a wrong flag, model, rim slot or F0 fails.
+    /// amendment 1 item 9), and a wrong flag, model, rim slot, F0, metallic or base colour
+    /// fails, as does the lavapipe fault's lost blue and alpha (item 16).
     #[test]
     fn gbuffer_expectations_match_the_twin() {
         use crate::gbuffer::{SurfaceParams, encode};
         let surface = |model, flags, f0: f32| SurfaceParams {
-            base_color: [0.5; 3],
+            base_color: UNIT_COLOUR,
             metallic: 0.0,
             normal: [0.0, 1.0, 0.0],
             roughness: 0.6,
@@ -1119,8 +1159,23 @@ mod tests {
             let mut rim = good;
             rim.gb2[3] |= 1;
             assert!(!gbuffer_matches(expect, rim), "{}", expect.name);
+            let mut metallic = good;
+            metallic.gb0[3] = 1;
+            assert!(!gbuffer_matches(expect, metallic), "{}", expect.name);
+            // The fault: every attachment's blue and alpha dropped.
+            let mut dropped = good;
+            dropped.gb0[2] = 0;
+            dropped.gb2[2] = 0;
+            dropped.gb2[3] = 0;
+            assert!(!gbuffer_matches(expect, dropped), "{}", expect.name);
         }
         let unit = &GBUFFER_CLASSES[0];
+        let mut rounded = encode(&surface(unit.model, UNIT_FLAGS, 0.04));
+        rounded.gb0[0] += 1;
+        assert!(gbuffer_matches(unit, rounded), "one step of rounding");
+        let mut blue = encode(&surface(unit.model, UNIT_FLAGS, 0.04));
+        blue.gb0[2] = 0;
+        assert!(!gbuffer_matches(unit, blue), "gb0's blue alone");
         assert!(!gbuffer_matches(
             unit,
             encode(&surface(unit.model, UNIT_FLAGS, 0.05))
@@ -1136,6 +1191,11 @@ mod tests {
             ..GBufferTexels::default()
         };
         assert!(!gbuffer_matches(sky, normal));
+        let coloured = GBufferTexels {
+            gb0: [0, 0, 1, 0],
+            ..GBufferTexels::default()
+        };
+        assert!(!gbuffer_matches(sky, coloured));
         for class in [CAMERA, 1, 2, 3, FOLIAGE, 5, 6, 7, PUSHED] {
             assert!(gbuffer_class(class).is_some(), "{class}");
         }

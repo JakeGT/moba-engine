@@ -28,7 +28,7 @@ invariant gl_Position;
 #include "outline.glsl"
 #endif
 #ifdef MOTION_VECTORS
-// ADR-0021 §2b: the temporal prepass's motion (with DEPTH_PREPASS).
+// ADR-0021 §2b: the G-buffer prepass's motion (with GBUFFER, ADR-0023 §1e).
 #define MOTION_VECTORS_VERTEX
 #define MOTION_PREV_INSTANCES
 #include "motion.glsl"
@@ -138,26 +138,6 @@ void main() {
 #elif defined(DEPTH_PREPASS)
     gl_Position = camera.view_proj * world;
     out_outline = instance.params.x;
-#ifdef MOTION_VECTORS
-    // ADR-0021 §2b: the previous pose is sampled a second time here (the scene's VAT shader
-    // does not).
-    uint index = uint(gl_InstanceIndex);
-    vec3 previous = world.xyz;
-    if (prev_valid(index)) {
-        vec3 prev_position = in_position;
-        if (vat.vertex_count > 0u && vat.frame_count > 0u) {
-            uvec4 pose = prev_instance_data.prev_instances[index].pose;
-            vec2 t = unpackUnorm2x16(pose.z);
-            float blend = unpackUnorm2x16(pose.w & 0xFFFFu).x;
-            vec4 from_sample = vec4(float(pose.x & 0xFFFFu), float(pose.x >> 16u), t.x, blend);
-            vec4 to_sample = vec4(float(pose.y & 0xFFFFu), float(pose.y >> 16u), t.y, 0.0);
-            uint vertex = min(uint(gl_VertexIndex), vat.vertex_count - 1u);
-            prev_position = pose_position(from_sample, to_sample, vertex, in_position);
-        }
-        previous = (prev_model(index) * vec4(prev_position, 1.0)).xyz;
-    }
-    write_motion(world.xyz, previous);
-#endif
 #elif defined(OUTLINE_HULL)
     // VAT meshes are smooth-shaded skins: extrude along the animated normal.
     gl_Position = outline_hull_position(world.xyz, mat3(transpose(inverse(instance.model))) * normal,
@@ -171,6 +151,8 @@ void main() {
 #ifdef GBUFFER
     out_outline_slot = instance.params.x;
 #ifdef MOTION_VECTORS
+    // ADR-0021 §2b: the previous pose is sampled a second time here (the forward scene's VAT
+    // shader does not).
     uint index = uint(gl_InstanceIndex);
     vec3 previous = world.xyz;
     if (prev_valid(index)) {

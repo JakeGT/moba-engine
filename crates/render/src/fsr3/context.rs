@@ -1251,6 +1251,10 @@ impl TemporalUpscaler for Fsr3 {
         true
     }
 
+    fn depth_convention(&self) -> crate::depth::DepthConvention {
+        super::DEPTH_CONVENTION
+    }
+
     /// See [`Fsr3::record_frame`].
     ///
     /// # Panics
@@ -1261,7 +1265,7 @@ impl TemporalUpscaler for Fsr3 {
         inputs: &UpscaleInputs,
         out: &UpscaleOutput,
     ) {
-        expect_depth_convention(UpscalerKind::Fsr3, super::DEPTH_CONVENTION, inputs);
+        expect_depth_convention(UpscalerKind::Fsr3, self.depth_convention(), inputs);
         // SAFETY: the trait's contract gives `record_frame`'s: each recorded buffer submitted
         // once, in order, on one queue, and at most FRAMES_IN_FLIGHT pending with
         // `inputs.frame_slot`'s last submission finished. `record_frame` needs at most

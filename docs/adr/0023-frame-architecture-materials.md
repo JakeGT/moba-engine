@@ -1016,9 +1016,10 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
    are built for reversed-Z only (TAAU's nearest-depth cross takes the largest depth; FSR 3.1
    builds with `FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1`, and its reconstructed-depth target
    is cleared to the bits of 0.0, its `InterlockedMax` far value), so each declares that
-   convention and `record` refuses another (`expect_depth_convention`, a panic: a renderer
-   bug). Unit tests tie each back end's declared convention to its shader source, its far
-   value and the refusal. The vendor back ends' inverted-depth flags belong to #365 (N1c);
+   convention through `TemporalUpscaler::depth_convention` (a required method with no
+   default, so a back end cannot compile without one) and `record` refuses another
+   (`expect_depth_convention`, a panic: a renderer bug). Unit tests tie each back end's
+   declared convention to its shader source, its far value and the refusal. The vendor back ends' inverted-depth flags belong to #365 (N1c);
    see item 15.
 5. **The G-buffer fragment stages are GLSL, not new Slang shaders** (departs from §1e). They
    are `GBUFFER` permutations of today's forward `unit.frag`, `terrain.frag` and
@@ -1094,9 +1095,13 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
     - **FSR 4:** `FFX_UPSCALE_ENABLE_DEPTH_INVERTED` in the context-creation flags;
     - **XeSS:** `XESS_INIT_FLAG_INVERTED_DEPTH` in the init flags.
 
-    Each back end's depth handling then gets the same test as TAAU's and FSR 3.1's (item 4).
-    Without those flags, a vendor upscaler would read the far plane as the near one and
-    reject the history everywhere.
+    Each back end must also implement `TemporalUpscaler::depth_convention`, which is
+    required and has no default, so a DLSS, FSR 4 or XeSS back end that has not decided its
+    convention does not compile. It returns the convention its flag was created with, and
+    `record` refuses other inputs through `expect_depth_convention`. Each back end's depth
+    handling then gets the same test as TAAU's and FSR 3.1's (item 4). Without those flags,
+    a vendor upscaler would read the far plane as the near one and reject the history
+    everywhere.
 16. **The G-buffer is stored only for a reader, and its content is checked on lavapipe.**
     - **Stored only when read.** Nothing reads `gb0`–`gb2` in N2a except a debug view and the
       motion probe's readback. Without one of those, the prepass stores them `DONT_CARE`, so
@@ -1110,16 +1115,38 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
       pipelines differ only in their masks, while pipelines that also differ in blending (the
       VFX, `tc_mask`, the overlay) behave.
     - **The fix.** Motion's mask is now RGBA. On its two-channel `R16G16_SFLOAT` format that
-      writes exactly R and G on any device. The remaining differences are harmless under
-      attachment 0's mask: the unit IDs' R mask on an `R8_UINT` target, and the empty masks of
-      outputs the shader never writes (the terrain's and foliage's ID slot, the sky's
-      G-buffer).
+      writes exactly R and G on any device. Every output a pipeline has an attachment for is
+      now written, with a mask covering it, except one:
+      - **Units:** the ID's R mask on the one-channel `R8_UINT` target writes the whole
+        texel, so attachment 0's RGBA is the same mask there.
+      - **Terrain:** writes ID 0 (no unit) explicitly, RGBA mask (`terrain_gbuffer_ids.frag`).
+        The terrain draws first, onto the ID clear of 0, so this changes no pixel on any
+        device.
+      - **Sky:** writes zero (`UNLIT`, no flags) to `gb0`–`gb2` and, with IDs, ID 0, all RGBA
+        masks (`sky_motion.frag`, `sky_motion_ids.frag`). It draws only where nothing else
+        did, onto the same clear values, so the sky's G-buffer is written as zero, not left
+        unwritten, with the same bits.
+      - **Foliage (the one exception):** writes no ID and keeps an empty mask on the ID
+        attachment, so a unit under the brush keeps its outline slot. On a conformant device
+        that is defined: an empty mask leaves the attachment unchanged, whatever the shader
+        did not write. On lavapipe the mask is not honoured, so attachment 0's RGBA mask
+        applies and the unwritten output's value is undefined. Only the outline-ID pixels
+        where foliage covers a unit can differ, and only on lavapipe (CI's software renderer,
+        never a shipping device). Those pixels decide whether a unit's screen-space outline
+        shows through the brush. Whether outlines *should* show under brush is a gameplay
+        decision for the maintainer and stays open; this PR keeps the real-GPU behaviour.
     - **The check.** The motion probe (`scripts/motion-probe.sh`, CI `renderer-gate`) reads
-      `gb1` and `gb2` back. It checks each draw class against item 9: units, skinned and VAT
-      are `STANDARD`, F0 0.04, `UNIT | NO_FOG_OF_WAR`; terrain is `STANDARD`, F0 0.04, no
-      flags; foliage is `FOLIAGE`; every rim slot is 0. A third frame at the horizon checks
-      that the sky's pixels keep the clear value (`UNLIT`, every bit 0). This is gate 1's
-      in-frame complement to `gbuffer-smoke`, which tests the encoder alone.
+      `gb0`, `gb1` and `gb2` back. It checks each draw class against item 9:
+      - units, skinned and VAT are `STANDARD`, F0 0.04, `UNIT | NO_FOG_OF_WAR`, and `gb0`
+        holds their instance colour within one step per channel (its blue is a channel the
+        fault dropped);
+      - terrain is `STANDARD`, F0 0.04, no flags;
+      - foliage is `FOLIAGE`;
+      - every class has metallic 0 and rim slot 0.
+
+      A third frame at the horizon checks that the sky's pixels are zero in all three
+      targets (`UNLIT`). This is gate 1's in-frame complement to `gbuffer-smoke`, which tests
+      the encoder alone.
 
 ## Corrections to the roadmap
 

@@ -45,17 +45,19 @@ validation were clean.
     3.05e-5);
   - 719 surfaces with a value within 0.01 of a step of a rounding boundary were redrawn.
   CI runs it in `tiered-temporal`.
-- **In the frame, on lavapipe:** the motion probe reads `gb1` and `gb2` back (amendment 1
-  item 16). `scripts/motion-probe.sh`, at Low and High, 853×480, validation required:
+- **In the frame, on lavapipe:** the motion probe reads `gb0`, `gb1` and `gb2` back
+  (amendment 1 item 16). Every class must also hold metallic 0 in `gb0`, and the units their
+  instance colour (0.75, 0.35, 0.2) within one step per channel. `scripts/motion-probe.sh`,
+  at Low and High, 853×480, validation required:
 
   | Class | What it must hold | Pixels (Low / High) | Mismatches |
   |---|---|---|---|
-  | unit (static, reset, unkeyed) | `STANDARD`, F0 0.04, `UNIT \| NO_FOG_OF_WAR`, rim 0 | 8,711 / 8,711 | 0 |
+  | unit (static, reset, unkeyed) | `STANDARD`, F0 0.04, `UNIT \| NO_FOG_OF_WAR`, rim 0, instance colour | 8,711 / 8,711 | 0 |
   | skinned | as unit | 1,709 / 1,709 | 0 |
   | vat | as unit | 2,163 / 2,163 | 0 |
   | terrain (outside the foliage patches) | `STANDARD`, F0 0.04, no flags | 369,616 / 369,616 | 0 |
   | foliage | `FOLIAGE`, no flags | 6,323 / 7,186 | 0 |
-  | sky (frame C, at the horizon) | the clear value: `UNLIT`, every bit 0 | 216,662 / 216,662 | 0 |
+  | sky (frame C, at the horizon) | written as zero: `UNLIT`, every bit of `gb0`–`gb2` 0 | 216,662 / 216,662 | 0 |
 
   **The check found a real fault.** Its first run failed every class on lavapipe: `gb1`'s
   roughness and flags and `gb2`'s model read 0, so every surface decoded as `UNLIT`. The
@@ -63,7 +65,10 @@ validation were clean.
   not at fault. The cause was the per-attachment write masks: lavapipe applied attachment 0's
   (motion's R|G) to every attachment. With motion's mask set to RGBA, which on its
   `R16G16_SFLOAT` format writes the same R and G, every class passes. The RTX debug views
-  (gate 6) were right before the fix, because the NVIDIA driver honours the masks.
+  (gate 6) were right before the fix, because the NVIDIA driver honours the masks. The
+  terrain and the sky now also write their ID (0) and the sky its G-buffer (zero)
+  explicitly, so only the foliage's ID slot still relies on an empty mask, which lavapipe
+  leaves undefined (item 16). Neither change moved a tiered hash.
 - **Reflection tests:** `gbuffer_debug.slang`'s push block against `DebugPush` (24 bytes),
   and the smoke's bindings and push. The GLSL-vertex / Slang-fragment interface test moves to
   N2c with the first Slang G-buffer fragment stage (amendment 1 item 5).
@@ -99,7 +104,7 @@ validation were clean.
   - **Unchanged by the fixes.** All eight rows above came out identical to the digit. So the
     review fixes, including the motion write mask (amendment 1 item 16), move no tiered
     pixel.
-  - **How much changes.** 2.0–5.1 % of pixels change: `image-check` counts 7,000 (TAAU low)
+  - **How much changes.** 3.0–5.1 % of pixels change: `image-check` counts 7,000 (TAAU low)
     to 11,729 (FSR 3.1 overlay) of 230,400. Most changes are one or two steps. In TAAU low,
     5,114 of the 7,000 changed pixels move by 1–2, and 1,886 by more than 2.
   - **Where.** Mapping the changes (FSR 3.1 native, kept with the raw logs) puts every
@@ -177,9 +182,12 @@ origin/main `ab42718`), against a detached build of `ab42718` in its own tempora
 - **Rounds:** three. Each held `flock handoff/gpu.lock` and ran every configuration on main
   and then the branch, with no other `moba-client` running (checked before each run).
 - **Results:** medians of the three rounds, in ms; the three rounds' GPU totals agree within
-  0.003 ms. The raw logs are in `~/.cache/moba-evidence/n2a-ab/` (not committed).
+  0.003 ms. The raw logs are retained locally in `~/Projects/MOBA/handoff/evidence/n2a-ab/`
+  (not committed).
 - **The earlier A/B** (2026-11-03, against `657a7ab`) measured the same deltas at about 0.03 ms
-  higher absolute totals. It is superseded by this one.
+  higher absolute totals. The drop is the machine's stack: this A/B ran on driver 620.70.06
+  and Linux 7.3.4, the earlier one on Linux 7.3.0. Both arms of each A/B ran on the same
+  stack, so the ratios stand. The earlier A/B is superseded by this one.
 
 | Configuration | GPU total p50 | GPU total p95 | `prepass` p50 | `scene` p50 | `temporal` p50 | Frame p95 |
 |---|---|---|---|---|---|---|

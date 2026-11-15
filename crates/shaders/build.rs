@@ -238,9 +238,19 @@ const PERMUTATIONS: &[Permutation] = &[
         defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS"],
     },
     Permutation {
+        source: "terrain.frag",
+        output: "terrain_gbuffer_ids.frag",
+        defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS", "PREPASS_IDS"],
+    },
+    Permutation {
         source: "foliage.frag",
         output: "foliage_gbuffer.frag",
         defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS"],
+    },
+    Permutation {
+        source: "sky_motion.frag",
+        output: "sky_motion_ids.frag",
+        defines: &["PREPASS_IDS"],
     },
     // Reversed-Z depth consumers on Tiered (ADR-0023 §1c); Compat keeps the default builds.
     Permutation {

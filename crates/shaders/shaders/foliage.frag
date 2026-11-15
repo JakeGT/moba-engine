@@ -28,6 +28,10 @@ layout(location = 0) out vec4 out_motion;
 layout(location = 1) out vec4 out_gb0;
 layout(location = 2) out vec4 out_gb1;
 layout(location = 3) out vec4 out_gb2;
+// No ID output: a unit under the brush keeps its outline slot, through the ID attachment's
+// empty write mask. lavapipe does not honour that mask, so there (CI only) the slot under
+// foliage is undefined (ADR-0023 amendment 1 item 16). Whether outlines should show under
+// brush at all is a gameplay decision left open.
 #else
 layout(location = 0) out vec4 out_color;
 #endif

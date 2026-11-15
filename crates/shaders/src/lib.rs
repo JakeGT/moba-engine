@@ -191,8 +191,11 @@ pub const FOLIAGE_MOTION_VERT: &[u8] =
 /// Foliage colour pass with an `invariant` position (matches `foliage_motion.vert`'s depth).
 pub const FOLIAGE_TIERED_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/foliage_tiered.vert.spv"));
-/// Sky motion vectors (camera rotation only, ADR-0021 §2).
+/// Sky motion vectors (camera rotation only, ADR-0021 §2) and a zero (`UNLIT`) G-buffer.
 pub const SKY_MOTION_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion.frag.spv"));
+/// [`SKY_MOTION_FRAG`] that also writes the outline ID 0 (no unit).
+pub const SKY_MOTION_IDS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion_ids.frag.spv"));
 /// Water's transparency-and-composition mask (ADR-0021 §2b).
 pub const TC_MASK_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tc_mask.frag.spv"));
 /// The post-upscale gameplay overlay (ADR-0021 §5): outlines, rims and telegraphs at output resolution.
@@ -273,6 +276,9 @@ pub const UNIT_TEXTURED_GBUFFER_IDS_FRAG: &[u8] = include_bytes!(concat!(
 /// The terrain into the G-buffer and motion (ADR-0023 §1e).
 pub const TERRAIN_GBUFFER_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer.frag.spv"));
+/// The terrain into the G-buffer and motion, and the outline ID 0 (ADR-0023 §1e).
+pub const TERRAIN_GBUFFER_IDS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer_ids.frag.spv"));
 /// Foliage into the G-buffer (`FOLIAGE` model) and motion (ADR-0023 §1e).
 pub const FOLIAGE_GBUFFER_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/foliage_gbuffer.frag.spv"));
@@ -571,6 +577,10 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: SKY_MOTION_FRAG,
     },
     ShaderModule {
+        name: "sky_motion_ids.frag",
+        spirv: SKY_MOTION_IDS_FRAG,
+    },
+    ShaderModule {
         name: "tc_mask.frag",
         spirv: TC_MASK_FRAG,
     },
@@ -669,6 +679,10 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "terrain_gbuffer.frag",
         spirv: TERRAIN_GBUFFER_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_ids.frag",
+        spirv: TERRAIN_GBUFFER_IDS_FRAG,
     },
     ShaderModule {
         name: "foliage_gbuffer.frag",

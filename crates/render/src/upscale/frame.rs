@@ -169,6 +169,9 @@ mod tests {
         fn has_sharpening(&self) -> bool {
             true
         }
+        fn depth_convention(&self) -> crate::depth::DepthConvention {
+            crate::depth::DepthConvention::Reversed
+        }
         unsafe fn record(
             &mut self,
             _cmd: ash::vk::CommandBuffer,

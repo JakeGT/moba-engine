@@ -374,13 +374,17 @@ impl TemporalUpscaler for Taau {
         true
     }
 
+    fn depth_convention(&self) -> DepthConvention {
+        DEPTH_CONVENTION
+    }
+
     unsafe fn record(
         &mut self,
         cmd: vk::CommandBuffer,
         inputs: &UpscaleInputs,
         out: &UpscaleOutput,
     ) {
-        expect_depth_convention(UpscalerKind::Taau, DEPTH_CONVENTION, inputs);
+        expect_depth_convention(UpscalerKind::Taau, self.depth_convention(), inputs);
         self.barriers(cmd);
         let reset = self.reset || inputs.reset;
         let set = self.sets[inputs.frame_slot % SET_RING];

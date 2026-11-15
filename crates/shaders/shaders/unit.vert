@@ -27,7 +27,7 @@ invariant gl_Position;
 #include "outline.glsl"
 #endif
 #ifdef MOTION_VECTORS
-// ADR-0021 §2b: the temporal prepass's motion (with DEPTH_PREPASS).
+// ADR-0021 §2b: the G-buffer prepass's motion (with GBUFFER, ADR-0023 §1e).
 #define MOTION_VECTORS_VERTEX
 #define MOTION_PREV_INSTANCES
 #include "motion.glsl"
@@ -82,13 +82,6 @@ void main() {
 #elif defined(DEPTH_PREPASS)
     gl_Position = camera.view_proj * world;
     out_outline = instance.params.x;
-#ifdef MOTION_VECTORS
-    uint index = uint(gl_InstanceIndex);
-    vec3 previous = prev_valid(index)
-        ? (prev_model(index) * vec4(in_position, 1.0)).xyz
-        : world.xyz;
-    write_motion(world.xyz, previous);
-#endif
 #elif defined(OUTLINE_HULL)
     vec3 extrude = skin.reserved0 != 0u
         ? world.xyz - instance.model[3].xyz
