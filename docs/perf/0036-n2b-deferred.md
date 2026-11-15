@@ -23,7 +23,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | 1. Encoding and interfaces | **Met.** `gbuffer-smoke` adds the GLSL decode; push blocks pinned by SPIR-V and reflection tests |
 | 2. Deferred–forward parity | **Not met on the river** (max 15/255 at 7 of 921,600 pixels; 99.966 % within 2/255). Default scene and teamfight met. See [below](#gate-2-deferredforward-parity) |
 | 3. Light-set consistency | **Met** under all five caps |
-| 7. Performance (≤ 1.10× N1) | **Met**: 1.057–1.085× against `ab42718`, 0.987–0.999× against `790d9be` |
+| 7. Performance (≤ 1.10× N1) | **Met**: 1.061–1.087× against `ab42718`, 0.990–1.001× against `790d9be` |
 
 ## Gate 1: encoding and interfaces
 
@@ -137,52 +137,54 @@ lists the options for the maintainer.
 - **Rounds:** three, interleaved: each held `flock handoff/gpu.lock` and ran every
   configuration on `ab42718`, `790d9be` and the branch in turn, with no other `moba-client`
   running (checked before each run).
-- **Results:** medians of the three rounds, in ms. Within each configuration and build the
-  three GPU totals agree within 0.004 ms. The raw logs are kept locally in
-  `~/Projects/MOBA/handoff/evidence/n2b-ab/` (not committed).
+- **Results:** medians of the three rounds, in ms, from the final code (the rows-of-tiles
+  dispatch and the AO rebind fix included). Within each configuration and build the three GPU
+  totals agree within 0.005 ms. The raw logs are kept locally in
+  `~/Projects/MOBA/handoff/evidence/n2b-ab2/` (not committed). An earlier A/B on the branch
+  before those two changes measured 0.001–0.004 ms less on the branch and the same baselines.
 
 | Configuration | Build | GPU total p50 | p95 | `prepass` | `scene` | `light_classify` | `deferred_light` | `sky` | `temporal` |
 |---|---|---|---|---|---|---|---|---|---|
-| Tiered Low (TAAU) | `ab42718` | 0.506 | 0.517 | 0.020 | 0.078 | — | — | — | 0.125 |
+| Tiered Low (TAAU) | `ab42718` | 0.506 | 0.516 | 0.020 | 0.079 | — | — | — | 0.125 |
 | | `790d9be` | 0.550 | 0.560 | 0.063 | 0.077 | — | — | — | 0.125 |
-| | branch | 0.549 | 0.561 | 0.072 | — | 0.008 | 0.054 | 0.006 | 0.126 |
-| Tiered High (TAAU) | `ab42718` | 0.557 | 0.569 | 0.024 | 0.090 | — | — | — | 0.125 |
-| | `790d9be` | 0.604 | 0.616 | 0.069 | 0.089 | — | — | — | 0.125 |
-| | branch | 0.596 | 0.608 | 0.080 | — | 0.009 | 0.057 | 0.005 | 0.125 |
-| Tiered Ultra (TAAU) | `ab42718` | 0.557 | 0.568 | 0.024 | 0.090 | — | — | — | 0.125 |
-| | `790d9be` | 0.603 | 0.615 | 0.069 | 0.089 | — | — | — | 0.125 |
-| | branch | 0.596 | 0.609 | 0.080 | — | 0.009 | 0.057 | 0.005 | 0.125 |
-| Tiered Low (FSR 3.1) | `ab42718` | 0.654 | 0.667 | 0.020 | 0.078 | — | — | — | 0.277 |
-| | `790d9be` | 0.698 | 0.711 | 0.063 | 0.077 | — | — | — | 0.278 |
-| | branch | 0.697 | 0.711 | 0.072 | — | 0.008 | 0.054 | 0.006 | 0.278 |
-| Tiered High (FSR 3.1) | `ab42718` | 0.704 | 0.718 | 0.024 | 0.090 | — | — | — | 0.276 |
-| | `790d9be` | 0.753 | 0.766 | 0.069 | 0.089 | — | — | — | 0.277 |
-| | branch | 0.744 | 0.758 | 0.080 | — | 0.009 | 0.057 | 0.005 | 0.278 |
-| Compat Ultra | `ab42718` | 0.672 | 0.683 | 0.058 | 0.244 | — | — | — | — |
-| | `790d9be` | 0.672 | 0.683 | 0.058 | 0.244 | — | — | — | — |
-| | branch | 0.672 | 0.683 | 0.058 | 0.244 | — | — | — | — |
+| | branch | 0.550 | 0.561 | 0.072 | — | 0.009 | 0.055 | 0.005 | 0.126 |
+| Tiered High (TAAU) | `ab42718` | 0.557 | 0.566 | 0.024 | 0.090 | — | — | — | 0.125 |
+| | `790d9be` | 0.604 | 0.615 | 0.069 | 0.089 | — | — | — | 0.125 |
+| | branch | 0.599 | 0.609 | 0.080 | — | 0.009 | 0.059 | 0.005 | 0.125 |
+| Tiered Ultra (TAAU) | `ab42718` | 0.557 | 0.567 | 0.024 | 0.090 | — | — | — | 0.125 |
+| | `790d9be` | 0.604 | 0.614 | 0.069 | 0.089 | — | — | — | 0.125 |
+| | branch | 0.598 | 0.608 | 0.080 | — | 0.009 | 0.059 | 0.005 | 0.125 |
+| Tiered Low (FSR 3.1) | `ab42718` | 0.654 | 0.666 | 0.020 | 0.079 | — | — | — | 0.276 |
+| | `790d9be` | 0.698 | 0.712 | 0.063 | 0.077 | — | — | — | 0.277 |
+| | branch | 0.699 | 0.711 | 0.072 | — | 0.009 | 0.055 | 0.005 | 0.278 |
+| Tiered High (FSR 3.1) | `ab42718` | 0.705 | 0.717 | 0.024 | 0.091 | — | — | — | 0.276 |
+| | `790d9be` | 0.754 | 0.766 | 0.069 | 0.089 | — | — | — | 0.278 |
+| | branch | 0.748 | 0.760 | 0.080 | — | 0.009 | 0.059 | 0.005 | 0.278 |
+| Compat Ultra | `ab42718` | 0.672 | 0.683 | 0.058 | 0.246 | — | — | — | — |
+| | `790d9be` | 0.672 | 0.683 | 0.058 | 0.246 | — | — | — | — |
+| | branch | 0.672 | 0.683 | 0.058 | 0.245 | — | — | — | — |
 
 **Against ADR-0023 §9b's 1.10× gate** (GPU total, branch ÷ baseline):
 
 | Preset | p50 vs `ab42718` (gate) | p95 vs `ab42718` | p50 vs `790d9be` (N2a) | Headroom to 1.10× at p50 |
 |---|---|---|---|---|
-| Tiered Low (TAAU) | **1.085** | 1.085 | 0.998 | 0.008 ms (1.5 % of N1) |
-| Tiered High (TAAU) | **1.070** | 1.069 | 0.987 | 0.017 ms (3.0 %) |
-| Tiered Ultra (TAAU) | **1.070** | 1.072 | 0.988 | 0.017 ms (3.0 %) |
-| Tiered Low (FSR 3.1) | **1.066** | 1.066 | 0.999 | 0.022 ms (3.4 %) |
-| Tiered High (FSR 3.1) | **1.057** | 1.056 | 0.988 | 0.030 ms (4.3 %) |
+| Tiered Low (TAAU) | **1.087** | 1.087 | 1.000 | 0.007 ms (1.3 % of N1) |
+| Tiered High (TAAU) | **1.075** | 1.076 | 0.992 | 0.014 ms (2.5 %) |
+| Tiered Ultra (TAAU) | **1.074** | 1.072 | 0.990 | 0.015 ms (2.6 %) |
+| Tiered Low (FSR 3.1) | **1.069** | 1.068 | 1.001 | 0.020 ms (3.1 %) |
+| Tiered High (FSR 3.1) | **1.061** | 1.060 | 0.992 | 0.028 ms (3.9 %) |
 | Compat Ultra | 1.000 | 1.000 | 1.000 | not gated |
 
 - **The deferred lighting replaces the forward `scene` and costs a little less.** The three
-  new lanes add 0.068 ms at Low (classify 0.008, lighting 0.054, sky 0.006) and 0.071 ms at
+  new lanes add 0.069 ms at Low (classify 0.009, lighting 0.055, sky 0.005) and 0.073 ms at
   High and Ultra, against the 0.077–0.089 ms `scene` they remove. The G-buffer pass's `hdr`
-  attachment (emissive) adds 0.009–0.011 ms to `prepass`. Net: −0.001 ms at Low, −0.007 to
-  −0.009 ms at High and Ultra against N2a.
-- **Low has the least headroom** (1.085×, 0.008 ms), as with N2a: its `scene` was the
+  attachment (emissive) adds 0.009–0.011 ms to `prepass`. Net against N2a: 0.000 to
+  +0.001 ms at Low, −0.005 to −0.006 ms at High and Ultra.
+- **Low has the least headroom** (1.087×, 0.007 ms), as with N2a: its `scene` was the
   cheapest to remove. N2c–N2f find their cost in that headroom and in what the Slang port of
   the lighting saves (the scalarised loop, amendment 2 item 5).
 - **`temporal`, `water` and the post chain are unchanged.** So is Compat, to the microsecond.
-- **Frame time** is the 240 fps limit's: `p95_ms` 4.238–4.241 on every tiered run of every
+- **Frame time** is the 240 fps limit's: `p95_ms` 4.233–4.237 on every tiered run of every
   build.
 - **perf-gate** passes every log of every build (no regression flagged); `frames_dropped=0`,
   `locked_uploads=0` and `locked_pipelines=0` in every run.

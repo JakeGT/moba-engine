@@ -159,7 +159,7 @@ the semver check):
     not (max 15/255 at 7 shoreline pixels, from the frame's own instability: amendment 2
     item 16). `gbuffer-smoke` also checks the GLSL decode. A CPU test holds that the forward
     and deferred light loops visit the same lights under every cap. On the RTX 5070 Ti the
-    frame is 1.057–1.085× N1's forward frame (gate ≤ 1.10×) and 0.987–0.999× N2a's.
+    frame is 1.061–1.087× N1's forward frame (gate ≤ 1.10×) and 0.990–1.001× N2a's.
   - **Frame log:** `gpu_light_classify`, `gpu_deferred_light` and `gpu_sky` lanes.
     `MAX_PASSES` is 48 (the largest deferred topology has 40).
   - **Fix: a resize wrote a destroyed AO view.** The main view's lighting sets were
