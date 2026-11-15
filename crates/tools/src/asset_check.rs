@@ -9,19 +9,18 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::rc::Rc;
 
 use serde::Deserialize;
 
 use crate::imaging::{
-    Image, luma, luminance, oklch_display, parse_hex, percentile, read_png, round, srgb_to_linear,
-    std_dev,
+    Image, luma, luminance, oklch_display, parse_hex, percentile, percentile_sorted, read_png,
+    round, srgb_to_linear, std_dev,
 };
 
 /// Largest source manifest read, in bytes.
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
-/// Most texel visits the UV rasteriser makes (tiling UVs are wrapped, not unbounded).
-const MAX_RASTER_VISITS: u64 = 1 << 28;
 /// The team hues (palette-and-value §1): standard and colour-blind self, ally and enemy.
 pub(crate) const TEAM_HUES: [f32; 6] = [28.0, 77.0, 105.0, 142.0, 236.0, 259.0];
 /// Half-width of a reserved team-colour zone, in degrees (palette-and-value §1).
@@ -226,11 +225,162 @@ pub(crate) fn class_range(key: &str) -> Option<&'static ClassRange> {
     CLASSES.iter().find(|range| range.key == key)
 }
 
+/// A material-vocabulary §3 entry whose numbers disagree with its §2 class row. Where a class
+/// names one with `vocab`, the §3 numbers apply: §3 is the more specific rule (maintainer's
+/// decision, recorded in ADR-0022 amendment 2). This is a minimal slice of PBR-VOCAB-1: only
+/// the entries that conflict are data; every other entry is checked against its §2 row.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VocabEntry {
+    /// The §3 material name, as the manifest gives it (matched ignoring case).
+    pub(crate) name: &'static str,
+    /// The §2 class the entry belongs to; the manifest must declare the same class.
+    pub(crate) class: &'static str,
+    /// Where in material-vocabulary.md the numbers come from.
+    pub(crate) source: &'static str,
+    /// The entry's albedo luma range, if it replaces the §2 one.
+    pub(crate) albedo: Option<(f32, f32)>,
+    /// The entry's roughness range, if it replaces the §2 one.
+    pub(crate) roughness: Option<(f32, f32)>,
+    /// A wet mask: exempt from PBR-RGH-1 (§1.1, §6).
+    pub(crate) wet: bool,
+    /// A dark metal: left out of PBR-ALB-2's metal floor.
+    pub(crate) dark_metal: bool,
+    /// Its §3 roughness goes below 0.08: PBR-RGH-2's floor on heroes and minions is 0.045 here.
+    pub(crate) glossy: bool,
+}
+
+const fn vocab(
+    name: &'static str,
+    class: &'static str,
+    source: &'static str,
+    roughness: (f32, f32),
+) -> VocabEntry {
+    VocabEntry {
+        name,
+        class,
+        source,
+        albedo: None,
+        roughness: Some(roughness),
+        wet: false,
+        dark_metal: false,
+        glossy: false,
+    }
+}
+
+/// The §3 entries that conflict with §2 (ADR-0022 amendment 2 lists each one as a maintainer
+/// decision).
+pub(crate) const VOCAB: [VocabEntry; 13] = [
+    vocab(
+        "Void composite, matte",
+        "CERAM",
+        "§3.2 Void composite, matte: roughness 0.55-0.80",
+        (0.55, 0.80),
+    ),
+    vocab(
+        "Void composite, glazed",
+        "CERAM",
+        "§3.2 Void composite, glazed: base roughness 0.5-0.7",
+        (0.50, 0.70),
+    ),
+    vocab(
+        "Heat-shield ceramic, glazed",
+        "CERAM",
+        "§3.1 Heat-shield ceramic, glazed: base roughness 0.6-0.8",
+        (0.60, 0.80),
+    ),
+    vocab(
+        "Void silk",
+        "CLOTH",
+        "§3.2 Void silk: roughness 0.55-0.80",
+        (0.55, 0.80),
+    ),
+    vocab(
+        "Fused scorch (crust)",
+        "CHAR",
+        "§3.1 Fused scorch: crust roughness 0.7-0.9",
+        (0.70, 0.90),
+    ),
+    vocab(
+        "Levitating basalt (cut faces)",
+        "STONE-1",
+        "§3.2 Levitating basalt: cut faces roughness 0.4-0.55",
+        (0.40, 0.55),
+    ),
+    vocab(
+        "Forge basalt masonry (polished treads)",
+        "STONE-1",
+        "§3.1 Forge basalt masonry: polished treads roughness 0.35-0.5",
+        (0.35, 0.50),
+    ),
+    vocab(
+        "Polished black stone",
+        "STONE-2",
+        "§3.2 Polished black stone: roughness 0.15-0.40",
+        (0.15, 0.40),
+    ),
+    VocabEntry {
+        wet: true,
+        ..vocab(
+            "Basalt, wet",
+            "STONE-1",
+            "§3.3 Basalt, wet: roughness 0.10-0.30 where wet; wet masks are exempt from \
+             PBR-RGH-1 (§1.1)",
+            (0.10, 0.30),
+        )
+    },
+    VocabEntry {
+        albedo: Some((30.0, 140.0)),
+        dark_metal: true,
+        ..vocab(
+            "Emitter lattice",
+            "METAL",
+            "§3.1 Emitter lattice: metal 1 with the albedo of Forge dark alloy, scaled \
+             (#3A3836, luma 56; its OXIDE range 30-140), roughness 0.35-0.60",
+            (0.35, 0.60),
+        )
+    },
+    VocabEntry {
+        glossy: true,
+        ..vocab(
+            "Void-glass",
+            "GLASS",
+            "§3.2 Void-glass: roughness 0.045-0.15",
+            (0.045, 0.15),
+        )
+    },
+    VocabEntry {
+        glossy: true,
+        ..vocab(
+            "Sun-glass",
+            "GLASS",
+            "§3.1 Sun-glass: roughness 0.05-0.20",
+            (0.05, 0.20),
+        )
+    },
+    VocabEntry {
+        glossy: true,
+        ..vocab(
+            "Obsidian metamaterial, polished",
+            "STONE-2",
+            "§3.2 Obsidian metamaterial, polished: roughness 0.05-0.20",
+            (0.05, 0.20),
+        )
+    },
+];
+
+/// The conflicting §3 entry called `name` (ignoring case).
+pub(crate) fn vocab_entry(name: &str) -> Option<&'static VocabEntry> {
+    VOCAB
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(name.trim()))
+}
+
 /// Rules of the bible that `content-check --source` does not build yet, with the reason.
 const NOT_BUILT: [(&str, &str); 10] = [
     (
         "PBR-VOCAB-1",
-        "needs the §3 vocabulary as data (checks.md step 5)",
+        "only the §2/§3 conflicts are data (`vocab`, ADR-0022 amendment 2); naming a §3 entry \
+         for every material is not checked (checks.md step 5)",
     ),
     (
         "PBR-FORGE-1",
@@ -238,7 +388,8 @@ const NOT_BUILT: [(&str, &str); 10] = [
     ),
     (
         "PBR-VOID-1",
-        "needs the §3 vocabulary entry per class (checks.md step 5)",
+        "median luma half needs the §3 entry per class (checks.md step 5); the projected-area \
+         half is a review-render rule",
     ),
     (
         "PBR-VOID-2",
@@ -279,11 +430,17 @@ pub(crate) struct SourceManifest {
     /// 8-bit code value of one class id step in the class-ID map (`id = round(R / step)`).
     #[serde(default = "default_class_step")]
     pub(crate) class_step: u32,
-    /// Class id → §2 class key (`"1" = "METAL"`).
+    /// Class id → §2 class key (`"1" = "METAL"`), or a table naming the §3 entry too
+    /// (`"2" = { class = "CERAM", vocab = "Void composite, matte" }`).
     #[serde(default)]
-    pub(crate) classes: BTreeMap<String, String>,
-    /// Without a class-ID map: the one class every texel belongs to (terrain layers).
-    pub(crate) material_class: Option<String>,
+    pub(crate) classes: BTreeMap<String, ClassDecl>,
+    /// Without a class-ID map: the one class every texel belongs to (terrain layers), as in
+    /// `classes`.
+    pub(crate) material_class: Option<ClassDecl>,
+    /// The normal map stores X and Y in R and G only (B unused); a grey + alpha map is always
+    /// X in grey and Y in alpha.
+    #[serde(default)]
+    pub(crate) normal_xy: bool,
     /// The class id painted as the dust layer (PBR-WEAR-1 on units).
     pub(crate) dust_class: Option<u32>,
     /// The emissive colour and strength (with `maps.emissive`).
@@ -295,6 +452,35 @@ pub(crate) struct SourceManifest {
 
 fn default_class_step() -> u32 {
     1
+}
+
+/// A class declaration: a §2 key, or a key with the §3 entry it is.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ClassDecl {
+    /// `"METAL"`.
+    Key(String),
+    /// `{ class = "CERAM", vocab = "Void composite, matte" }`.
+    Entry(ClassEntry),
+}
+
+/// The table form of a [`ClassDecl`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClassEntry {
+    /// The §2 class key.
+    pub(crate) class: String,
+    /// The material-vocabulary §3 entry (PBR-VOCAB-1).
+    pub(crate) vocab: Option<String>,
+}
+
+impl ClassDecl {
+    fn parts(&self) -> (&str, Option<&str>) {
+        match self {
+            Self::Key(key) => (key, None),
+            Self::Entry(entry) => (&entry.class, entry.vocab.as_deref()),
+        }
+    }
 }
 
 /// One exported model in a [`SourceManifest`].
@@ -320,7 +506,8 @@ pub(crate) struct SourceMaps {
     pub(crate) metallic: Option<String>,
     /// Roughness in R (instead of the packed map).
     pub(crate) roughness: Option<String>,
-    /// Tangent-space normal, +Y up: XYZ (or XY) in RGB.
+    /// Tangent-space normal, +Y up: XYZ in RGB, XY in RG (`normal_xy`), or X in grey and Y in
+    /// alpha.
     pub(crate) normal: Option<String>,
     /// Emissive mask in R.
     pub(crate) emissive: Option<String>,
@@ -514,6 +701,7 @@ fn valid_name(name: &str, max: usize) -> bool {
 }
 
 /// A model's triangles in metres and UVs, as the engine's loader reads them.
+#[derive(Debug)]
 struct ModelGeometry {
     name: String,
     positions: Vec<[f32; 3]>,
@@ -521,34 +709,44 @@ struct ModelGeometry {
     indices: Vec<u32>,
 }
 
-/// Texels the model's UVs cover, and the model surface (m²) each one stands for.
-#[derive(Debug)]
-pub(crate) struct Coverage {
-    /// Per texel: covered surface in m² (0 = not covered).
-    pub(crate) area: Vec<f32>,
+/// Texel visits the UV rasteriser makes before it stops: 64 per texel of the map, at least
+/// 2^28 (tiling UVs wrap, so the work grows with how far they tile, not with the map).
+pub(crate) fn raster_budget(width: u32, height: u32) -> u64 {
+    (64 * u64::from(width) * u64::from(height)).max(1 << 28)
 }
 
-impl Coverage {
-    fn covered(&self, index: usize) -> bool {
-        self.area[index] > 0.0
-    }
+/// Largest UV extent, in texels, of one triangle or of any coordinate: far beyond any real
+/// tiling (2^28 texels is 65 536 repeats of a 4096² map), and small enough that every texel
+/// index below fits an `i64` exactly.
+const MAX_UV_TEXELS: f64 = (1u64 << 28) as f64;
+
+/// What [`rasterise_uvs`] measured.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Raster {
+    /// Every triangle was rasterised into the coverage.
+    Done,
+    /// The visit budget ran out: the coverage is incomplete and must not be used.
+    OverBudget,
 }
 
 /// Rasterises UV triangles (glTF convention: `(0, 0)` is the image's top-left) at texel centres,
-/// wrapping tiling UVs, and spreads each triangle's world area over its texels.
+/// wrapping tiling UVs, and adds each triangle's world area (m²), spread over its texels, to
+/// `area` (`width × height`, row-major). `visits` carries the texel visits across models.
+/// Returns an error for UVs no tiling explains (a coordinate or a triangle beyond
+/// [`MAX_UV_TEXELS`]).
 #[allow(clippy::many_single_char_names)] // Geometry: p, t, w, h, x, y.
 pub(crate) fn rasterise_uvs(
     positions: &[[f32; 3]],
     uvs: &[[f32; 2]],
     indices: &[u32],
-    width: u32,
-    height: u32,
-) -> Result<Coverage, String> {
+    (width, height): (u32, u32),
+    area: &mut [f32],
+    visits: &mut u64,
+) -> Result<Raster, String> {
     let (w, h) = (f64::from(width), f64::from(height));
-    let mut area = vec![0f32; width as usize * height as usize];
-    let mut visits = 0u64;
+    let budget = raster_budget(width, height);
     let mut texels: Vec<usize> = Vec::new();
-    for triangle in indices.as_chunks::<3>().0 {
+    for (number, triangle) in indices.as_chunks::<3>().0.iter().enumerate() {
         let corner = |k: usize| triangle[k] as usize;
         let p = [corner(0), corner(1), corner(2)].map(|i| positions[i].map(f64::from));
         let t = [corner(0), corner(1), corner(2)].map(|i| {
@@ -566,14 +764,35 @@ pub(crate) fn rasterise_uvs(
         if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
             continue;
         }
+        // Bound the coordinates before any conversion to integers: a huge finite UV would
+        // saturate the cast and wrap the span to nothing (or to an endless loop).
+        let reach = [min_x, max_x, min_y, max_y]
+            .iter()
+            .fold(0f64, |most, v| most.max(v.abs()));
+        if reach > MAX_UV_TEXELS || max_x - min_x > MAX_UV_TEXELS || max_y - min_y > MAX_UV_TEXELS {
+            return Err(format!(
+                "triangle {number} has UVs {reach:.3e} texels from the origin or across: \
+                 beyond any tiling (limit {MAX_UV_TEXELS:.0} texels)"
+            ));
+        }
         let (x0, x1) = ((min_x - 0.5).ceil() as i64, (max_x - 0.5).floor() as i64);
         let (y0, y1) = ((min_y - 0.5).ceil() as i64, (max_y - 0.5).floor() as i64);
-        let span = (x1 - x0 + 1).max(0) as u64 * (y1 - y0 + 1).max(0) as u64;
-        visits += span;
-        if visits > MAX_RASTER_VISITS {
-            return Err(String::from(
-                "the model's UVs tile too far to rasterise (over 2^28 texel visits)",
-            ));
+        let columns = x1
+            .checked_sub(x0)
+            .and_then(|d| d.checked_add(1))
+            .unwrap_or(0)
+            .max(0);
+        let rows = y1
+            .checked_sub(y0)
+            .and_then(|d| d.checked_add(1))
+            .unwrap_or(0)
+            .max(0);
+        let span = (columns as u64)
+            .checked_mul(rows as u64)
+            .ok_or_else(|| format!("triangle {number}: UV span overflows"))?;
+        *visits = visits.saturating_add(span);
+        if *visits > budget {
+            return Ok(Raster::OverBudget);
         }
         let signed = edge(t[0], t[1], t[2]);
         texels.clear();
@@ -593,7 +812,8 @@ pub(crate) fn rasterise_uvs(
             }
         }
         if texels.is_empty() {
-            // A sliver smaller than a texel: credit the texel under its centroid.
+            // A sliver smaller than a texel: credit the texel under its centroid (bounded
+            // above, so the cast is exact).
             let cx = ((t[0][0] + t[1][0] + t[2][0]) / 3.0).floor() as i64;
             let cy = ((t[0][1] + t[1][1] + t[2][1]) / 3.0).floor() as i64;
             let tx = cx.rem_euclid(i64::from(width)) as usize;
@@ -605,7 +825,7 @@ pub(crate) fn rasterise_uvs(
             area[texel] += share;
         }
     }
-    Ok(Coverage { area })
+    Ok(Raster::Done)
 }
 
 fn edge(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
@@ -668,35 +888,52 @@ pub(crate) fn texel_density(
     Some((at(0.05), at(0.50), at(0.95)))
 }
 
-/// The maps of one asset, loaded and checked for matching sizes.
+/// One channel of a loaded map (the packed metallic-roughness image is shared by two).
+struct Channel {
+    image: Rc<Image>,
+    channel: usize,
+}
+
+impl Channel {
+    fn at(&self, index: usize) -> f32 {
+        self.image.at(index, self.channel)
+    }
+}
+
+/// The maps most rules read, loaded and checked for matching sizes. The single-use maps
+/// (normal, AO, emissive, team mask) are read by their own rule and dropped after it, so a
+/// 4096² asset never holds them all at once.
 struct Maps {
     base: Image,
-    metallic: Option<(Image, usize)>,
-    roughness: Option<(Image, usize)>,
-    normal: Option<Image>,
-    emissive: Option<Image>,
-    ao: Option<Image>,
+    metallic: Option<Channel>,
+    roughness: Option<Channel>,
     class: Option<Image>,
-    team_mask: bool,
+}
+
+/// Reads the map `name` (relative to `dir`) and checks it has the base map's size.
+fn read_same(dir: &Path, name: &str, what: &str, size: (u32, u32)) -> Result<Image, String> {
+    let image = read_png(&dir.join(name))?;
+    if (image.width, image.height) == size {
+        Ok(image)
+    } else {
+        Err(format!(
+            "maps.{what} is {}x{}, maps.base {}x{}: bake the source maps at one size",
+            image.width, image.height, size.0, size.1
+        ))
+    }
 }
 
 fn load_maps(manifest: &SourceManifest, dir: &Path) -> Result<Maps, String> {
-    let path = |name: &str| -> PathBuf { dir.join(name) };
-    let base = read_png(&path(&manifest.maps.base))?;
-    let same = |image: Image, what: &str| -> Result<Image, String> {
-        if image.width == base.width && image.height == base.height {
-            Ok(image)
-        } else {
-            Err(format!(
-                "maps.{what} is {}x{}, maps.base {}x{}: bake the source maps at one size",
-                image.width, image.height, base.width, base.height
-            ))
-        }
-    };
+    let base = read_png(&dir.join(&manifest.maps.base))?;
+    let size = (base.width, base.height);
     let optional = |name: &Option<String>, what: &str| -> Result<Option<Image>, String> {
-        name.as_ref()
-            .map(|name| read_png(&path(name)).and_then(|image| same(image, what)))
+        name.as_deref()
+            .map(|name| read_same(dir, name, what, size))
             .transpose()
+    };
+    let single = |image: Image| Channel {
+        image: Rc::new(image),
+        channel: 0,
     };
     let (metallic, roughness) = match (
         &manifest.maps.metallic_roughness,
@@ -704,12 +941,24 @@ fn load_maps(manifest: &SourceManifest, dir: &Path) -> Result<Maps, String> {
         &manifest.maps.roughness,
     ) {
         (Some(packed), None, None) => {
-            let image = same(read_png(&path(packed))?, "metallic_roughness")?;
-            (Some((image.clone(), 0)), Some((image, 1)))
+            let image = read_same(dir, packed, "metallic_roughness", size)?;
+            if image.channels < 3 {
+                return Err(String::from(
+                    "maps.metallic_roughness needs R (metallic) and G (roughness): it is grey",
+                ));
+            }
+            let image = Rc::new(image);
+            (
+                Some(Channel {
+                    image: Rc::clone(&image),
+                    channel: 0,
+                }),
+                Some(Channel { image, channel: 1 }),
+            )
         }
         (None, metallic, roughness) => (
-            optional(metallic, "metallic")?.map(|image| (image, 0)),
-            optional(roughness, "roughness")?.map(|image| (image, 0)),
+            optional(metallic, "metallic")?.map(single),
+            optional(roughness, "roughness")?.map(single),
         ),
         _ => {
             return Err(String::from(
@@ -720,13 +969,115 @@ fn load_maps(manifest: &SourceManifest, dir: &Path) -> Result<Maps, String> {
     Ok(Maps {
         metallic,
         roughness,
-        normal: optional(&manifest.maps.normal, "normal")?,
-        emissive: optional(&manifest.maps.emissive, "emissive")?,
-        ao: optional(&manifest.maps.ao, "ao")?,
         class: optional(&manifest.maps.class, "class")?,
-        team_mask: manifest.maps.team_mask.is_some(),
         base,
     })
+}
+
+/// A declared class: its id, its §2 row with any §3 override applied, and the §3 entry.
+struct Declared {
+    id: u32,
+    range: ClassRange,
+    /// The `vocab` name the manifest gave.
+    vocab: Option<String>,
+    /// The conflicting §3 entry it names, if it names one.
+    entry: Option<&'static VocabEntry>,
+}
+
+/// `class_of` value of a texel with no declared class.
+const NO_CLASS: u8 = u8::MAX;
+
+fn declare(id: u32, decl: &ClassDecl, what: &str) -> Result<Declared, String> {
+    let (key, vocab) = decl.parts();
+    let mut range = *class_range(key)
+        .ok_or_else(|| format!("{what}: {key:?} is not a material-vocabulary §2 class"))?;
+    let entry = vocab.and_then(vocab_entry);
+    if let Some(entry) = entry {
+        if entry.class != range.key {
+            return Err(format!(
+                "{what}: the §3 entry {:?} is a {} material, not {key}",
+                entry.name, entry.class
+            ));
+        }
+        if let Some(albedo) = entry.albedo {
+            range.albedo = albedo;
+        }
+        if let Some(roughness) = entry.roughness {
+            range.roughness = roughness;
+        }
+    }
+    Ok(Declared {
+        id,
+        range,
+        vocab: vocab.map(String::from),
+        entry,
+    })
+}
+
+/// The declared classes (at most 255) and the class of every texel, as an index into them.
+fn classify(
+    manifest: &SourceManifest,
+    maps: &Maps,
+    report: &mut SourceReport,
+) -> Result<(Vec<Declared>, Vec<u8>), String> {
+    let count = maps.base.len();
+    let mut declared = Vec::new();
+    for (id, decl) in &manifest.classes {
+        let number: u32 = id
+            .parse()
+            .ok()
+            .filter(|&number| number <= 255)
+            .ok_or_else(|| format!("classes: {id:?} is not a class id 0..=255"))?;
+        declared.push(declare(number, decl, &format!("classes.{id}"))?);
+    }
+    let class_of = match (&maps.class, &manifest.material_class) {
+        (Some(image), _) => {
+            let mut lookup = [NO_CLASS; 256];
+            for (index, class) in declared.iter().enumerate() {
+                lookup[class.id as usize] = index as u8;
+            }
+            let step = manifest.class_step as f32 / 255.0;
+            (0..count)
+                .map(|i| lookup[((image.at(i, 0) / step).round() as usize).min(255)])
+                .collect()
+        }
+        (None, Some(decl)) => {
+            declared.push(declare(0, decl, "material_class")?);
+            vec![(declared.len() - 1) as u8; count]
+        }
+        (None, None) => vec![NO_CLASS; count],
+    };
+    for class in &declared {
+        let Some(name) = &class.vocab else { continue };
+        let rule = format!("PBR-VOCAB (id {})", class.id);
+        match class.entry {
+            Some(entry) => {
+                let base = class_range(entry.class).expect("vocabulary classes are §2 classes");
+                report.push(
+                    &rule,
+                    None,
+                    format!("{}: §3 applies", entry.name),
+                    format!(
+                        "{}; replaces §2 {} albedo {}-{}, roughness {}-{} (§3 is the more \
+                         specific rule; ADR-0022 amendment 2)",
+                        entry.source,
+                        base.rule,
+                        base.albedo.0,
+                        base.albedo.1,
+                        base.roughness.0,
+                        base.roughness.1
+                    ),
+                );
+            }
+            None => report.push(
+                &rule,
+                None,
+                format!("{name:?}: no §2/§3 conflict recorded"),
+                format!("§2 {} applies", class.range.rule),
+            ),
+        }
+    }
+    Ok((declared, class_of))
 }
 
 /// Runs every built rule on the asset described by the manifest at `manifest_path`.
@@ -746,38 +1097,55 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         models.push(check_model(decl, &dir.join(&decl.path), &mut report)?);
     }
     let maps = load_maps(&manifest, dir)?;
-    let (width, height) = (maps.base.width, maps.base.height);
+    let size = (maps.base.width, maps.base.height);
+    let (width, height) = size;
     let count = maps.base.len();
 
     // Coverage: the models' UVs, or every texel of a tiling layer.
-    let coverage = if models.is_empty() {
-        Coverage {
-            area: vec![1.0; count],
-        }
+    let mut area = vec![0f32; count];
+    if models.is_empty() {
+        area.fill(1.0);
     } else {
-        let mut area = vec![0f32; count];
+        let mut visits = 0u64;
+        let mut outcome = Raster::Done;
         for geometry in &models {
-            let one = rasterise_uvs(
+            outcome = rasterise_uvs(
                 &geometry.positions,
                 &geometry.uvs,
                 &geometry.indices,
-                width,
-                height,
+                size,
+                &mut area,
+                &mut visits,
             )?;
-            for (sum, add) in area.iter_mut().zip(one.area) {
-                *sum += add;
+            if outcome == Raster::OverBudget {
+                break;
             }
         }
-        let coverage = Coverage { area };
-        let covered = (0..count).filter(|&i| coverage.covered(i)).count();
-        report.uv_coverage = Some(round(covered as f32 / count as f32, 4));
-        coverage
-    };
-    let covered: Vec<usize> = (0..count).filter(|&i| coverage.covered(i)).collect();
-    if covered.is_empty() {
+        if outcome == Raster::OverBudget {
+            area.fill(1.0);
+            report.push(
+                "UV-COVERAGE",
+                None,
+                String::from("coverage not measured"),
+                format!(
+                    "the UVs tile past the raster budget ({} texel visits): every texel counts \
+                     as covered, padding included, and class shares are texel shares",
+                    raster_budget(width, height)
+                ),
+            );
+        } else {
+            let covered = area.iter().filter(|&&a| a > 0.0).count();
+            report.uv_coverage = Some(round(covered as f32 / count as f32, 4));
+        }
+    }
+    let area: &[f32] = &area;
+    let covered = move || (0..count).filter(move |&i| area[i] > 0.0);
+    let covered_count = covered().count();
+    if covered_count == 0 {
         return Err(String::from("the model's UVs cover no texel of maps.base"));
     }
-    let total_area: f64 = covered.iter().map(|&i| f64::from(coverage.area[i])).sum();
+    let share_of = |texels: usize| texels as f32 / covered_count as f32;
+    let total_area: f64 = covered().map(|i| f64::from(area[i])).sum();
 
     // Texel density (roadmap §9.1) and the shipped texture size.
     let shipped = manifest.shipped_size.unwrap_or(width);
@@ -797,10 +1165,13 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         })
         .collect();
     if models.is_empty() {
-        let tiled = manifest.tile_m.filter(|&tile| tile > 0.0).map(|tile| {
-            let d = shipped as f32 / tile;
-            (d, d, d)
-        });
+        let tiled = manifest
+            .tile_m
+            .filter(|&tile| tile.is_finite() && tile > 0.0)
+            .map(|tile| {
+                let d = shipped as f32 / tile;
+                (d, d, d)
+            });
         densities.push((manifest.asset.clone(), tiled));
     }
     for (name, density) in densities {
@@ -818,11 +1189,17 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
                 format!("median {p50:.0} px/m (p5 {p5:.0}, p95 {p95:.0}) at {shipped}²"),
                 "no px/m target for this class in roadmap §9.1 or the bible (reported only)",
             ),
-            (None, _) => report.push(
+            (None, Some((lo, hi))) => report.push(
+                &rule,
+                Some(false),
+                String::from("nothing to measure"),
+                format!("{lo:.0}-{hi:.0} px/m needs [[models]] with UV'd triangles, or tile_m > 0"),
+            ),
+            (None, None) => report.push(
                 &rule,
                 None,
                 String::from("not measured"),
-                "needs [[models]] (UVs) or tile_m",
+                "no px/m target for this class (needs [[models]] or tile_m to report)",
             ),
         }
     }
@@ -837,58 +1214,24 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
 
     // Per-texel quantities.
     let lumas: Vec<f32> = (0..count).map(|i| luma(maps.base.rgb(i))).collect();
-    let metal_at = |i: usize| {
-        maps.metallic
-            .as_ref()
-            .map_or(0.0, |(image, channel)| image.at(i, *channel))
-    };
-    let rough_at = |i: usize| {
-        maps.roughness
-            .as_ref()
-            .map_or(1.0, |(image, channel)| image.at(i, *channel))
-    };
+    let metal_at = |i: usize| maps.metallic.as_ref().map_or(0.0, |map| map.at(i));
+    let rough_at = |i: usize| maps.roughness.as_ref().map_or(1.0, |map| map.at(i));
 
     // PBR-CLASS-1 and the class of every texel.
-    let step = manifest.class_step as f32 / 255.0;
-    let mut declared: BTreeMap<u32, &'static ClassRange> = BTreeMap::new();
-    for (id, key) in &manifest.classes {
-        let id: u32 = id
-            .parse()
-            .map_err(|_| format!("classes: {id:?} is not a class id"))?;
-        let range = class_range(key).ok_or_else(|| {
-            format!("classes.{id}: {key:?} is not a material-vocabulary §2 class")
-        })?;
-        declared.insert(id, range);
-    }
-    let single = manifest
-        .material_class
-        .as_deref()
-        .map(|key| {
-            class_range(key).ok_or_else(|| {
-                format!("material_class {key:?} is not a material-vocabulary §2 class")
-            })
-        })
-        .transpose()?;
-    let class_of: Vec<Option<u32>> = match (&maps.class, single) {
-        (Some(image), _) => (0..count)
-            .map(|i| {
-                let id = (image.at(i, 0) / step).round() as u32;
-                declared.contains_key(&id).then_some(id)
-            })
-            .collect(),
-        (None, Some(range)) => {
-            declared.insert(0, range);
-            vec![Some(0); count]
-        }
-        (None, None) => vec![None; count],
+    let (declared, class_of) = classify(&manifest, &maps, &mut report)?;
+    let entry_of = |i: usize| -> Option<&'static VocabEntry> {
+        declared
+            .get(usize::from(class_of[i]))
+            .and_then(|class| class.entry)
     };
-    let classed = covered.iter().filter(|&&i| class_of[i].is_some()).count();
+    let classed = covered().filter(|&i| class_of[i] != NO_CLASS).count();
     report.push(
         "PBR-CLASS-1",
-        Some(classed == covered.len()),
+        Some(classed == covered_count),
         format!(
-            "{:.4} of covered texels",
-            classed as f32 / covered.len() as f32
+            "{:.4} of covered texels ({} without)",
+            share_of(classed),
+            covered_count - classed
         ),
         if maps.class.is_some() || manifest.material_class.is_some() {
             "100 % have a declared class"
@@ -898,41 +1241,64 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
     );
 
     // PBR-ALB-1, PBR-ALB-2, PBR-MET-1.
-    let mut dielectric: Vec<f32> = covered
-        .iter()
-        .filter(|&&i| metal_at(i) < 0.5)
-        .map(|&i| lumas[i])
-        .collect();
-    let mut metal: Vec<f32> = covered
-        .iter()
-        .filter(|&&i| metal_at(i) >= 0.5)
-        .map(|&i| lumas[i])
-        .collect();
-    if let (Some(p1), Some(p99)) = (
-        percentile(&mut dielectric, 1.0),
-        percentile(&mut dielectric, 99.0),
-    ) {
-        report.push(
-            "PBR-ALB-1",
-            Some(p1 >= 30.0 && p99 <= 240.0),
-            format!("p1 {p1:.1}, p99 {p99:.1} ({} texels)", dielectric.len()),
-            "dielectric luma p1 ≥ 30, p99 ≤ 240",
-        );
+    {
+        let mut dielectric: Vec<f32> = covered()
+            .filter(|&i| metal_at(i) < 0.5)
+            .map(|i| lumas[i])
+            .collect();
+        dielectric.sort_unstable_by(f32::total_cmp);
+        if !dielectric.is_empty() {
+            let (p1, p99) = (
+                percentile_sorted(&dielectric, 1.0),
+                percentile_sorted(&dielectric, 99.0),
+            );
+            report.push(
+                "PBR-ALB-1",
+                Some(p1 >= 30.0 && p99 <= 240.0),
+                format!("p1 {p1:.1}, p99 {p99:.1} ({} texels)", dielectric.len()),
+                "dielectric luma p1 ≥ 30, p99 ≤ 240",
+            );
+        }
     }
-    if let Some(p1) = percentile(&mut metal, 1.0) {
-        report.push(
-            "PBR-ALB-2",
-            Some(p1 >= 180.0),
-            format!("p1 {p1:.1} ({} texels)", metal.len()),
-            "metal luma p1 ≥ 180",
-        );
+    {
+        let mut dark = 0usize;
+        let mut metal: Vec<f32> = covered()
+            .filter(|&i| metal_at(i) >= 0.5)
+            .filter(|&i| {
+                let is_dark = entry_of(i).is_some_and(|entry| entry.dark_metal);
+                dark += usize::from(is_dark);
+                !is_dark
+            })
+            .map(|i| lumas[i])
+            .collect();
+        let note = if dark > 0 {
+            format!(
+                "metal luma p1 ≥ 180 ({dark} texels of a §3 dark metal left out: Emitter lattice)"
+            )
+        } else {
+            String::from("metal luma p1 ≥ 180")
+        };
+        if let Some(p1) = percentile(&mut metal, 1.0) {
+            report.push(
+                "PBR-ALB-2",
+                Some(p1 >= 180.0),
+                format!("p1 {p1:.1} ({} texels)", metal.len()),
+                note,
+            );
+        } else if dark > 0 {
+            report.push(
+                "PBR-ALB-2",
+                None,
+                String::from("no bright-metal texels"),
+                note,
+            );
+        }
     }
     if maps.metallic.is_some() {
-        let transition = covered
-            .iter()
-            .filter(|&&i| metal_at(i) > 0.1 && metal_at(i) < 0.9)
-            .count() as f32
-            / covered.len() as f32;
+        let transition = covered()
+            .filter(|&i| metal_at(i) > 0.1 && metal_at(i) < 0.9)
+            .count();
+        let transition = share_of(transition);
         report.push(
             "PBR-MET-1",
             Some(transition <= 0.03),
@@ -948,22 +1314,40 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         );
     }
 
-    // PBR-RGH-2: the roughness floor.
+    // PBR-RGH-2: the roughness floor (0.045 on §3 entries whose own range goes below 0.08).
     if maps.roughness.is_some() {
-        let floor = if matches!(manifest.class, AssetClass::Hero | AssetClass::Minion) {
-            0.08
-        } else {
-            0.045
+        let unit = matches!(manifest.class, AssetClass::Hero | AssetClass::Minion);
+        let floor_at = |i: usize| {
+            if unit && !entry_of(i).is_some_and(|entry| entry.glossy) {
+                0.08
+            } else {
+                0.045
+            }
         };
-        let lowest = covered
+        let (mut lowest, mut under) = (f32::INFINITY, 0usize);
+        for i in covered() {
+            let rough = rough_at(i);
+            lowest = lowest.min(rough);
+            under += usize::from(rough < floor_at(i) - 0.5 / 255.0);
+        }
+        let glossy: Vec<&str> = declared
             .iter()
-            .map(|&i| rough_at(i))
-            .fold(f32::INFINITY, f32::min);
+            .filter_map(|class| class.entry.filter(|entry| entry.glossy))
+            .map(|entry| entry.name)
+            .collect();
+        let limit = match (unit, glossy.is_empty()) {
+            (true, false) => format!(
+                "≥ 0.08 everywhere, ≥ 0.045 on §3 entries below 0.08 ({})",
+                glossy.join(", ")
+            ),
+            (true, true) => String::from("≥ 0.08 everywhere"),
+            (false, _) => String::from("≥ 0.045 everywhere"),
+        };
         report.push(
             "PBR-RGH-2",
-            Some(lowest >= floor - 0.5 / 255.0),
-            format!("min {lowest:.3}"),
-            format!("≥ {floor} everywhere"),
+            Some(under == 0),
+            format!("min {lowest:.3}, {under} texels under"),
+            limit,
         );
     } else {
         report.push(
@@ -974,47 +1358,48 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         );
     }
 
-    // Per-class ranges and PBR-RGH-1 on interior texels (all 8 neighbours covered and of the
-    // same class: class borders are filtered mixes of two materials).
-    let interior = |i: usize| -> bool {
-        let Some(id) = class_of[i] else { return false };
-        let (cols, rows) = (width as usize, height as usize);
-        let (column, row) = (i % cols, i / cols);
-        for dy in -1isize..=1 {
-            for dx in -1isize..=1 {
-                let (Some(nx), Some(ny)) =
-                    (column.checked_add_signed(dx), row.checked_add_signed(dy))
-                else {
-                    return false;
-                };
-                if nx >= cols || ny >= rows {
-                    return false;
-                }
-                let n = ny * cols + nx;
-                if !coverage.covered(n) || class_of[n] != Some(id) {
-                    return false;
-                }
-            }
+    // Interior texels: all 8 neighbours covered and of the same class (class borders are
+    // filtered mixes of two materials). A bitset: 2 MiB at 4096².
+    let mut interior_bits = vec![0u64; count.div_ceil(64)];
+    let (cols, rows) = (width as usize, height as usize);
+    for i in covered() {
+        let class = class_of[i];
+        if class == NO_CLASS {
+            continue;
         }
-        true
-    };
-    let interior_texels: Vec<usize> = covered.iter().copied().filter(|&i| interior(i)).collect();
-    for (&id, range) in &declared {
-        let texels: Vec<usize> = interior_texels
-            .iter()
-            .copied()
-            .filter(|&i| class_of[i] == Some(id))
-            .collect();
-        let share: f64 = covered
-            .iter()
-            .filter(|&&i| class_of[i] == Some(id))
-            .map(|&i| f64::from(coverage.area[i]))
-            .sum::<f64>()
-            / total_area;
+        let (column, row) = (i % cols, i / cols);
+        if column == 0 || row == 0 || column + 1 >= cols || row + 1 >= rows {
+            continue;
+        }
+        let inside = (row - 1..=row + 1).all(|ny| {
+            (column - 1..=column + 1).all(|nx| {
+                let n = ny * cols + nx;
+                area[n] > 0.0 && class_of[n] == class
+            })
+        });
+        if inside {
+            interior_bits[i / 64] |= 1 << (i % 64);
+        }
+    }
+    let interior = |i: usize| interior_bits[i / 64] >> (i % 64) & 1 == 1;
+
+    // Per-class ranges and PBR-RGH-1 on interior texels.
+    let mut class_area = vec![0f64; declared.len()];
+    for i in covered() {
+        if let Some(sum) = class_area.get_mut(usize::from(class_of[i])) {
+            *sum += f64::from(area[i]);
+        }
+    }
+    for (index, class) in declared.iter().enumerate() {
+        let (id, range) = (class.id, &class.range);
         *report
             .class_share
             .entry(format!("{id}:{}", range.key))
-            .or_default() += (share * 10_000.0).round() / 10_000.0;
+            .or_default() += (class_area[index] / total_area * 10_000.0).round() / 10_000.0;
+        let texels: Vec<u32> = covered()
+            .filter(|&i| usize::from(class_of[i]) == index && interior(i))
+            .map(|i| i as u32)
+            .collect();
         let name = format!("{} (id {id})", range.rule);
         if texels.is_empty() {
             report.push(
@@ -1025,36 +1410,47 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
             );
             continue;
         }
-        let mut albedo: Vec<f32> = texels.iter().map(|&i| lumas[i]).collect();
-        let (a1, a99) = (
-            percentile(&mut albedo, 1.0).unwrap_or(0.0),
-            percentile(&mut albedo, 99.0).unwrap_or(0.0),
-        );
-        report.push(
-            &format!("{name} albedo"),
-            Some(a1 >= range.albedo.0 && a99 <= range.albedo.1),
-            format!("p1 {a1:.1}, p99 {a99:.1} ({} texels)", texels.len()),
-            format!("luma {}-{}", range.albedo.0, range.albedo.1),
-        );
-        if maps.roughness.is_some() {
-            let mut rough: Vec<f32> = texels.iter().map(|&i| rough_at(i)).collect();
-            let sigma = std_dev(&rough);
-            let (r1, r5, r95, r99) = (
-                percentile(&mut rough, 1.0).unwrap_or(0.0),
-                percentile(&mut rough, 5.0).unwrap_or(0.0),
-                percentile(&mut rough, 95.0).unwrap_or(0.0),
-                percentile(&mut rough, 99.0).unwrap_or(0.0),
+        let range_note = class
+            .entry
+            .map_or(String::new(), |entry| format!(" (§3 {})", entry.name));
+        {
+            let mut albedo: Vec<f32> = texels.iter().map(|&i| lumas[i as usize]).collect();
+            albedo.sort_unstable_by(f32::total_cmp);
+            let (a1, a99) = (
+                percentile_sorted(&albedo, 1.0),
+                percentile_sorted(&albedo, 99.0),
             );
+            report.push(
+                &format!("{name} albedo"),
+                Some(a1 >= range.albedo.0 && a99 <= range.albedo.1),
+                format!("p1 {a1:.1}, p99 {a99:.1} ({} texels)", texels.len()),
+                format!("luma {}-{}{range_note}", range.albedo.0, range.albedo.1),
+            );
+        }
+        if maps.roughness.is_some() {
+            let mut rough: Vec<f32> = texels.iter().map(|&i| rough_at(i as usize)).collect();
+            let sigma = std_dev(&rough);
+            rough.sort_unstable_by(f32::total_cmp);
+            let at = |q: f32| percentile_sorted(&rough, q);
+            let (r1, r5, r95, r99) = (at(1.0), at(5.0), at(95.0), at(99.0));
             let (lo, hi) = range.roughness;
             report.push(
                 &format!("{name} roughness"),
                 Some(r1 >= lo && r99 <= hi),
                 format!("p1 {r1:.3}, p99 {r99:.3}"),
-                format!("{lo}-{hi}"),
+                format!("{lo}-{hi}{range_note}"),
             );
-            if range.key != "GLASS" {
+            let rule = format!("PBR-RGH-1 (id {id} {})", range.key);
+            if class.entry.is_some_and(|entry| entry.wet) {
                 report.push(
-                    &format!("PBR-RGH-1 (id {id} {})", range.key),
+                    &rule,
+                    None,
+                    format!("σ {sigma:.4}, p95-p5 {:.4}", r95 - r5),
+                    "exempt: a wet mask (material-vocabulary §1.1)",
+                );
+            } else if range.key != "GLASS" {
+                report.push(
+                    &rule,
                     Some(sigma >= 0.03 && r95 - r5 >= 0.08),
                     format!("σ {sigma:.4}, p95-p5 {:.4}", r95 - r5),
                     "σ ≥ 0.03 and p95 − p5 ≥ 0.08",
@@ -1064,10 +1460,11 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         if let Some(want_metal) = range.metal
             && maps.metallic.is_some()
         {
-            let mut metalness: Vec<f32> = texels.iter().map(|&i| metal_at(i)).collect();
+            let mut metalness: Vec<f32> = texels.iter().map(|&i| metal_at(i as usize)).collect();
+            metalness.sort_unstable_by(f32::total_cmp);
             let (m1, m99) = (
-                percentile(&mut metalness, 1.0).unwrap_or(0.0),
-                percentile(&mut metalness, 99.0).unwrap_or(0.0),
+                percentile_sorted(&metalness, 1.0),
+                percentile_sorted(&metalness, 99.0),
             );
             let (ok, limit) = if want_metal {
                 (
@@ -1086,72 +1483,43 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         }
     }
 
-    // PBR-NRM-1 and PBR-NRM-2.
-    if let Some(normal) = &maps.normal {
-        // One 8-bit code is 2/255 in [-1, 1]: rounding moves a component by up to 1/255.
-        let quantum = if normal.sixteen_bit {
-            1.0 / 65535.0
-        } else {
-            1.0 / 255.0
-        };
-        let decode = |i: usize, c: usize| normal.at(i, c) * 2.0 - 1.0;
-        if normal.channels >= 3 {
-            let mut worst = 0f32;
-            let within = covered
-                .iter()
-                .filter(|&&i| {
-                    let n = [decode(i, 0), decode(i, 1), decode(i, 2)];
-                    let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                    worst = worst.max((length - 1.0).abs());
-                    (length - 1.0).abs() <= 0.02
-                })
-                .count();
-            report.push(
-                "PBR-NRM-1",
-                Some(within == covered.len()),
-                format!(
-                    "{:.4} within, worst |len − 1| {worst:.3}",
-                    within as f32 / covered.len() as f32
-                ),
-                "every texel 1 ± 0.02",
-            );
-        } else {
-            report.push(
-                "PBR-NRM-1",
-                None,
-                String::from("XY only"),
-                "an XY map has no stored length",
+    // PBR-NRM-1 and PBR-NRM-2 (on the source PNG: NRM-2 is a proxy for the BC5 bake).
+    match &manifest.maps.normal {
+        None => report.push(
+            "PBR-NRM-1",
+            Some(false),
+            String::from("no normal map"),
+            "maps.normal is required (PBR-NRM-1, PBR-NRM-2)",
+        ),
+        Some(name) => {
+            let normal = read_same(dir, name, "normal", size)?;
+            check_normals(
+                &normal,
+                manifest.normal_xy,
+                covered,
+                covered_count,
+                &mut report,
             );
         }
-        let over = covered
-            .iter()
-            .filter(|&&i| {
-                let x = (decode(i, 0).abs() - quantum).max(0.0);
-                let y = (decode(i, 1).abs() - quantum).max(0.0);
-                x * x + y * y > 1.0
-            })
-            .count();
-        report.push(
-            "PBR-NRM-2",
-            Some(over == 0),
-            format!("{over} texels over"),
-            "X² + Y² ≤ 1 per texel (within one code of rounding)",
-        );
     }
 
-    // PBR-DELIGHT-1: blurred albedo luma against the baked AO.
-    if let Some(ao) = &maps.ao {
+    // PBR-DELIGHT-1: 8×8-blurred albedo luma against the baked AO, within each class's
+    // interior texels (a dark material in the cavities is not painted-in shadow).
+    if let Some(name) = &manifest.maps.ao {
+        let ao = read_same(dir, name, "ao", size)?;
         let block = 8usize;
-        let (bw, bh) = (width as usize / block, height as usize / block);
-        let (mut xs, mut ys) = (Vec::new(), Vec::new());
-        for by in 0..bh {
-            for bx in 0..bw {
-                let mut ok = true;
-                let (mut sum_l, mut sum_a) = (0f64, 0f64);
+        let mut samples: Vec<(Vec<f64>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); declared.len()];
+        for by in 0..rows / block {
+            for bx in 0..cols / block {
+                let first = class_of[by * block * cols + bx * block];
+                let Some((xs, ys)) = samples.get_mut(usize::from(first)) else {
+                    continue;
+                };
+                let (mut ok, mut sum_l, mut sum_a) = (true, 0f64, 0f64);
                 for y in by * block..(by + 1) * block {
                     for x in bx * block..(bx + 1) * block {
-                        let i = y * width as usize + x;
-                        ok &= coverage.covered(i);
+                        let i = y * cols + x;
+                        ok &= interior(i) && class_of[i] == first;
                         sum_l += f64::from(lumas[i]);
                         sum_a += f64::from(ao.at(i, 0));
                     }
@@ -1162,19 +1530,30 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
                 }
             }
         }
-        match correlation(&xs, &ys) {
-            Some(r) => report.push(
-                "PBR-DELIGHT-1",
-                Some(r < 0.3),
-                format!("r {r:.3} over {} blocks", xs.len()),
-                "correlation of 8×8-blurred albedo luma with AO < 0.3",
-            ),
-            None => report.push(
+        if declared.is_empty() {
+            report.push(
                 "PBR-DELIGHT-1",
                 None,
-                String::from("too few fully covered 8×8 blocks"),
-                "< 0.3",
-            ),
+                String::from("no declared class"),
+                "measured within each class's interior texels",
+            );
+        }
+        for (class, (xs, ys)) in declared.iter().zip(&samples) {
+            let rule = format!("PBR-DELIGHT-1 (id {} {})", class.id, class.range.key);
+            match correlation(xs, ys) {
+                Some(r) => report.push(
+                    &rule,
+                    Some(r < 0.3),
+                    format!("r {r:.3} over {} blocks", xs.len()),
+                    "correlation of 8×8-blurred albedo luma with AO < 0.3, within the class",
+                ),
+                None => report.push(
+                    &rule,
+                    None,
+                    format!("{} interior 8×8 blocks", xs.len()),
+                    "too few, or no variation, to correlate",
+                ),
+            }
         }
     } else {
         report.push(
@@ -1186,45 +1565,47 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
     }
 
     // PAL-1 / PAL-2 and VAL-1.
-    let mut chroma: Vec<f32> = covered
-        .iter()
-        .map(|&i| oklch_display(maps.base.rgb(i))[1])
-        .collect();
     let ground = manifest.class == AssetClass::Terrain;
-    let (rule, cap) = if ground {
-        ("PAL-1", 0.06)
-    } else {
-        ("PAL-2", 0.08)
-    };
-    if let Some(p99) = percentile(&mut chroma, 99.0) {
-        report.push(
-            rule,
-            Some(p99 <= cap),
-            format!("C p99 {p99:.4}"),
-            format!("≤ {cap}"),
-        );
+    {
+        let mut chroma: Vec<f32> = covered()
+            .map(|i| oklch_display(maps.base.rgb(i))[1])
+            .collect();
+        let (rule, cap) = if ground {
+            ("PAL-1", 0.06)
+        } else {
+            ("PAL-2", 0.08)
+        };
+        if let Some(p99) = percentile(&mut chroma, 99.0) {
+            report.push(
+                rule,
+                Some(p99 <= cap),
+                format!("C p99 {p99:.4}"),
+                format!("≤ {cap}"),
+            );
+        }
     }
     if ground {
-        let mut lightness: Vec<f32> = covered
-            .iter()
-            .map(|&i| oklch_display(maps.base.rgb(i))[0])
+        let mut lightness: Vec<f32> = covered()
+            .map(|i| oklch_display(maps.base.rgb(i))[0])
             .collect();
+        lightness.sort_unstable_by(f32::total_cmp);
         let (p1, p99) = (
-            percentile(&mut lightness, 1.0).unwrap_or(0.0),
-            percentile(&mut lightness, 99.0).unwrap_or(0.0),
+            percentile_sorted(&lightness, 1.0),
+            percentile_sorted(&lightness, 99.0),
         );
         report.push(
             "VAL-1",
             Some(p1 >= 0.32 && p99 <= 0.62),
             format!("L p1 {p1:.3}, p99 {p99:.3}"),
-            "terrain albedo L 0.32-0.62",
+            "terrain albedo L 0.32-0.62 (read at p1 / p99)",
         );
     }
 
     // Emissive: PAL-4 / PAL-5, PBR-EMIT-1, PBR-EMIT-2.
     let l_ref = manifest.lighting.l_ref()?;
-    match (&maps.emissive, &manifest.emissive) {
-        (Some(mask), Some(decl)) => {
+    match (&manifest.maps.emissive, &manifest.emissive) {
+        (Some(name), Some(decl)) => {
+            let mask = read_same(dir, name, "emissive", size)?;
             let colour = parse_hex(&decl.colour)
                 .ok_or_else(|| format!("emissive.colour {:?} is not #RRGGBB", decl.colour))?;
             let [_, c, h] = oklch_display(colour);
@@ -1255,13 +1636,12 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
                 "PBR-EMIT-1",
                 Some(ev <= cap_ev + 0.005),
                 format!("{ev:+.2} EV over L_ref {l_ref:.4}"),
-                format!("≤ +{cap_ev:.0} EV ({usage})"),
+                format!("≤ +{cap_ev:.0} EV ({usage}), one L_ref for the map's lighting"),
             );
             let gain = y / l_ref;
-            let lit: f64 = covered
-                .iter()
-                .filter(|&&i| mask.at(i, 0) * gain > 0.25)
-                .map(|&i| f64::from(coverage.area[i]))
+            let lit: f64 = covered()
+                .filter(|&i| mask.at(i, 0) * gain > 0.25)
+                .map(|i| f64::from(area[i]))
                 .sum::<f64>()
                 / total_area;
             let cap = manifest.class.emissive_area_cap();
@@ -1277,11 +1657,15 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
                 "maps.emissive needs an [emissive] table (colour, strength, use)",
             ));
         }
-        (None, _) => report.push(
+        (None, decl) => report.push(
             "PBR-EMIT-2",
             None,
             String::from("no emissive map"),
-            "nothing emits",
+            if decl.is_some() {
+                "nothing emits (the [emissive] table has no maps.emissive to apply to)"
+            } else {
+                "nothing emits"
+            },
         ),
     }
 
@@ -1289,10 +1673,10 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
     if manifest.class.is_unit() {
         match manifest.dust_class {
             Some(dust) => {
-                let share: f64 = covered
-                    .iter()
-                    .filter(|&&i| class_of[i] == Some(dust))
-                    .map(|&i| f64::from(coverage.area[i]))
+                let index = declared.iter().position(|class| class.id == dust);
+                let share: f64 = covered()
+                    .filter(|&i| index.is_some_and(|index| usize::from(class_of[i]) == index))
+                    .map(|i| f64::from(area[i]))
                     .sum::<f64>()
                     / total_area;
                 report.push(
@@ -1314,21 +1698,105 @@ pub(crate) fn check_source(manifest_path: &Path) -> Result<SourceReport, String>
         manifest.class,
         AssetClass::Hero | AssetClass::Minion | AssetClass::Structure
     ) {
+        let (pass, value) = match &manifest.maps.team_mask {
+            None => (false, String::from("no team mask")),
+            Some(name) => match read_same(dir, name, "team_mask", size) {
+                Ok(mask) => {
+                    let marked = covered().filter(|&i| mask.at(i, 0) >= 0.5).count();
+                    (
+                        true,
+                        format!("{:.4} of covered texels marked", share_of(marked)),
+                    )
+                }
+                Err(error) => (false, error),
+            },
+        };
         report.push(
             "TINT-1",
-            Some(maps.team_mask),
-            String::from(if maps.team_mask {
-                "team mask given"
-            } else {
-                "no team mask"
-            }),
-            "team mask present (Compat keeps the tint)",
+            Some(pass),
+            value,
+            "team mask loads at the maps' size (Compat keeps the tint)",
         );
     }
     for (rule, why) in NOT_BUILT {
         report.push(rule, None, String::from("not built"), why);
     }
     Ok(report)
+}
+
+/// PBR-NRM-1 (stored length) and PBR-NRM-2 (X² + Y² ≤ 1) on the source normal map. A grey +
+/// alpha map is X in grey and Y in alpha; `xy` says an RGB map holds X and Y in R and G only.
+fn check_normals<I: Iterator<Item = usize>>(
+    normal: &Image,
+    xy: bool,
+    covered: impl Fn() -> I,
+    covered_count: usize,
+    report: &mut SourceReport,
+) {
+    if normal.channels == 1 {
+        report.push(
+            "PBR-NRM-1",
+            Some(false),
+            String::from("grey normal map"),
+            "a normal map needs X and Y (RG, RGB, or grey + alpha)",
+        );
+        return;
+    }
+    // One 8-bit code is 2/255 in [-1, 1]: rounding moves a component by up to 1/255.
+    let quantum = if normal.sixteen_bit {
+        1.0 / 65535.0
+    } else {
+        1.0 / 255.0
+    };
+    let decode = |i: usize, c: usize| normal.at(i, c) * 2.0 - 1.0;
+    let (y_channel, xy_only) = if normal.channels == 2 {
+        (3, true)
+    } else {
+        (1, xy)
+    };
+    if xy_only {
+        report.push(
+            "PBR-NRM-1",
+            None,
+            format!(
+                "XY only (Y in {})",
+                if y_channel == 3 { "alpha" } else { "G" }
+            ),
+            "an XY map has no stored length",
+        );
+    } else {
+        let mut worst = 0f32;
+        let within = covered()
+            .filter(|&i| {
+                let n = [decode(i, 0), decode(i, 1), decode(i, 2)];
+                let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                worst = worst.max((length - 1.0).abs());
+                (length - 1.0).abs() <= 0.02
+            })
+            .count();
+        report.push(
+            "PBR-NRM-1",
+            Some(within == covered_count),
+            format!(
+                "{:.4} within, worst |len − 1| {worst:.3}",
+                within as f32 / covered_count as f32
+            ),
+            "every texel 1 ± 0.02",
+        );
+    }
+    let over = covered()
+        .filter(|&i| {
+            let x = (decode(i, 0).abs() - quantum).max(0.0);
+            let y = (decode(i, y_channel).abs() - quantum).max(0.0);
+            x * x + y * y > 1.0
+        })
+        .count();
+    report.push(
+        "PBR-NRM-2",
+        Some(over == 0),
+        format!("{over} texels over"),
+        "X² + Y² ≤ 1 per texel, on the source PNG as a proxy for the BC5 bake (within one code)",
+    );
 }
 
 /// Pearson correlation of two equal-length samples (`None` under 2 samples or no variance).
@@ -1446,7 +1914,8 @@ pub(crate) fn tangent_agreement(file: &[[f32; 4]], generated: &[[f32; 4]]) -> (f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::imaging::{Image, oklch_display};
+    use crate::imaging::{Image, MAX_PNG_SIDE, oklch_display};
+    use std::path::PathBuf;
 
     #[test]
     fn luma_matches_the_bible_examples() {
@@ -1507,26 +1976,41 @@ mod tests {
         assert!((hue_distance(350.0, 10.0) - 20.0).abs() < 1e-4);
     }
 
+    /// Rasterises one model into a fresh `width × height` coverage.
+    fn raster(
+        positions: &[[f32; 3]],
+        uvs: &[[f32; 2]],
+        indices: &[u32],
+        size: (u32, u32),
+    ) -> Result<(Raster, Vec<f32>), String> {
+        let mut area = vec![0f32; size.0 as usize * size.1 as usize];
+        let mut visits = 0;
+        rasterise_uvs(positions, uvs, indices, size, &mut area, &mut visits)
+            .map(|outcome| (outcome, area))
+    }
+
+    const QUAD: [[f32; 3]; 4] = [
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [0.0, 2.0, 0.0],
+    ];
+
     #[test]
     fn uv_raster_covers_a_square_and_spreads_its_area() {
         // A 2 m × 2 m quad mapped to the left half of an 8×8 texture.
-        let positions = [
-            [0.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0],
-            [2.0, 2.0, 0.0],
-            [0.0, 2.0, 0.0],
-        ];
         let uvs = [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]];
         let indices = [0, 1, 2, 0, 2, 3];
-        let coverage = rasterise_uvs(&positions, &uvs, &indices, 8, 8).expect("raster");
-        let covered = coverage.area.iter().filter(|&&a| a > 0.0).count();
+        let (outcome, area) = raster(&QUAD, &uvs, &indices, (8, 8)).expect("raster");
+        assert_eq!(outcome, Raster::Done);
+        let covered = area.iter().filter(|&&a| a > 0.0).count();
         assert_eq!(covered, 32);
-        let total: f32 = coverage.area.iter().sum();
+        let total: f32 = area.iter().sum();
         assert!((total - 4.0).abs() < 1e-4);
         // Left half only.
-        assert!(coverage.area[7] == 0.0 && coverage.area[0] > 0.0);
+        assert!(area[7] == 0.0 && area[0] > 0.0);
         // 4 texels across 2 m and 8 down 2 m: sqrt(32 / 4) = 2.83 px/m.
-        let (p5, p50, p95) = texel_density(&positions, &uvs, &indices, 8, 8).expect("density");
+        let (p5, p50, p95) = texel_density(&QUAD, &uvs, &indices, 8, 8).expect("density");
         assert!(
             (p50 - 8f32.sqrt()).abs() < 1e-4 && (p5 - p50).abs() < 1e-6 && (p95 - p50).abs() < 1e-6
         );
@@ -1535,16 +2019,32 @@ mod tests {
     #[test]
     fn uv_raster_wraps_tiling_uvs() {
         // A trim strip whose UVs run from 1.0 to 1.5: it lands on the left half, wrapped.
-        let positions = [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ];
         let uvs = [[1.0, 0.0], [1.5, 0.0], [1.5, 1.0], [1.0, 1.0]];
-        let coverage = rasterise_uvs(&positions, &uvs, &[0, 1, 2, 0, 2, 3], 4, 4).expect("raster");
-        let covered: Vec<usize> = (0..16).filter(|&i| coverage.area[i] > 0.0).collect();
+        let (_, area) = raster(&QUAD, &uvs, &[0, 1, 2, 0, 2, 3], (4, 4)).expect("raster");
+        let covered: Vec<usize> = (0..16).filter(|&i| area[i] > 0.0).collect();
         assert_eq!(covered, [0, 1, 4, 5, 8, 9, 12, 13]);
+    }
+
+    #[test]
+    fn huge_uvs_are_refused_not_looped_over() {
+        // u = ±1e30 is finite: the old cast saturated and the span wrapped (a hang).
+        let across = [[-1e30, 0.0], [1e30, 0.0], [0.0, 1.0], [0.0, 1.0]];
+        let error = raster(&QUAD, &across, &[0, 1, 2], (16, 16)).expect_err("huge span");
+        assert!(error.contains("beyond any tiling"), "{error}");
+        // Far from the origin but a tiny triangle: still no tiling explains it.
+        let far = [[1e30, 0.0], [1e30, 0.5], [1e30, 1.0], [0.0, 0.0]];
+        assert!(raster(&QUAD, &far, &[0, 1, 2], (16, 16)).is_err());
+    }
+
+    #[test]
+    fn uvs_tiling_past_the_budget_are_not_measured() {
+        // 1e5 repeats each way on a 16² map: 2.6e12 visits, far past 2^28.
+        let uvs = [[0.0, 0.0], [1e5, 0.0], [1e5, 1e5], [0.0, 1e5]];
+        let (outcome, _) = raster(&QUAD, &uvs, &[0, 1, 2, 0, 2, 3], (16, 16)).expect("raster");
+        assert_eq!(outcome, Raster::OverBudget);
+        // The budget follows the map: 64 visits per texel, never under 2^28.
+        assert_eq!(raster_budget(16, 16), 1 << 28);
+        assert_eq!(raster_budget(4096, 4096), 64 * 4096 * 4096);
     }
 
     #[test]
@@ -1557,15 +2057,20 @@ mod tests {
         assert_eq!(tangent_agreement(&a, &b), (0.5, 0.5));
     }
 
-    /// Writes an RGBA8 PNG.
-    fn write_png(path: &Path, width: u32, height: u32, rgba: &[[u8; 4]]) {
+    /// Writes an 8-bit PNG of `colour` from interleaved samples.
+    fn write_png_as(path: &Path, width: u32, height: u32, colour: png::ColorType, bytes: &[u8]) {
         let file = std::fs::File::create(path).expect("create");
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
-        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_color(colour);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().expect("header");
+        writer.write_image_data(bytes).expect("data");
+    }
+
+    /// Writes an RGBA8 PNG.
+    fn write_png(path: &Path, width: u32, height: u32, rgba: &[[u8; 4]]) {
         let bytes: Vec<u8> = rgba.iter().flatten().copied().collect();
-        writer.write_image_data(&bytes).expect("data");
+        write_png_as(path, width, height, png::ColorType::Rgba, &bytes);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -1576,9 +2081,21 @@ mod tests {
         dir
     }
 
-    /// A 16×16 terrain-style layer: noisy roughness, a flat normal, one class.
-    fn layer(dir: &Path, albedo: [u8; 3]) -> PathBuf {
-        let n = 16 * 16;
+    /// Noisy roughness around `centre` (± 0.07 over five steps), metal 0, in the engine's
+    /// packing (R metallic, G roughness).
+    fn mr_map(n: usize, centre: f32) -> Vec<[u8; 4]> {
+        (0..n)
+            .map(|i| {
+                let rough = centre - 0.07 + 0.035 * (i % 5) as f32;
+                [0, (rough * 255.0).round() as u8, 0, 255]
+            })
+            .collect()
+    }
+
+    /// A `side`² set: base of `albedo` with a little jitter, `mr_map` around `rough`, a flat
+    /// normal. Returns the directory's manifest path after writing `manifest`.
+    fn set(dir: &Path, side: u32, albedo: [u8; 3], rough: f32, manifest: &str) -> PathBuf {
+        let n = (side * side) as usize;
         let base: Vec<[u8; 4]> = (0..n)
             .map(|i| {
                 let jitter = (i % 5) as u8;
@@ -1590,22 +2107,34 @@ mod tests {
                 ]
             })
             .collect();
-        let mr: Vec<[u8; 4]> = (0..n)
-            .map(|i| [0, 220 + (i * 7 % 35) as u8, 0, 255])
-            .collect();
-        let normal = vec![[128, 128, 255, 255]; n];
-        write_png(&dir.join("base.png"), 16, 16, &base);
-        write_png(&dir.join("mr.png"), 16, 16, &mr);
-        write_png(&dir.join("normal.png"), 16, 16, &normal);
-        let manifest = dir.join("ash.source.toml");
-        std::fs::write(
-            &manifest,
-            "asset = \"ash\"\nclass = \"terrain\"\ntile_m = 4.0\nshipped_size = 1024\n\
-             material_class = \"CHAR\"\n\
-             [maps]\nbase = \"base.png\"\nmetallic_roughness = \"mr.png\"\nnormal = \"normal.png\"\n",
+        write_png(&dir.join("base.png"), side, side, &base);
+        write_png(&dir.join("mr.png"), side, side, &mr_map(n, rough));
+        write_png(
+            &dir.join("normal.png"),
+            side,
+            side,
+            &vec![[128, 128, 255, 255]; n],
+        );
+        let path = dir.join("x.source.toml");
+        std::fs::write(&path, manifest).expect("manifest");
+        path
+    }
+
+    const MAPS: &str =
+        "[maps]\nbase = \"base.png\"\nmetallic_roughness = \"mr.png\"\nnormal = \"normal.png\"\n";
+
+    /// A 16×16 terrain-style layer: noisy roughness, a flat normal, one class.
+    fn layer(dir: &Path, albedo: [u8; 3]) -> PathBuf {
+        set(
+            dir,
+            16,
+            albedo,
+            0.93,
+            &format!(
+                "asset = \"ash\"\nclass = \"terrain\"\ntile_m = 4.0\nshipped_size = 1024\n\
+                 material_class = \"CHAR\"\n{MAPS}"
+            ),
         )
-        .expect("manifest");
-        manifest
     }
 
     fn rule<'a>(report: &'a SourceReport, id: &str) -> &'a RuleResult {
@@ -1625,12 +2154,371 @@ mod tests {
         assert_eq!(rule(&good, "TD-1 (ash)").pass, Some(true)); // 1024 px / 4 m = 256 px/m
         assert_eq!(rule(&good, "VAL-1").pass, Some(true));
         assert_eq!(rule(&good, "PBR-NRM-1").pass, Some(true));
+        assert_eq!(rule(&good, "PBR-NRM-2").pass, Some(true));
         // Crushed to luma ~20: PBR-ALB-1, the CHAR range and VAL-1 fail.
         let bad = check_source(&layer(&dir, [20, 20, 20])).expect("check");
         assert!(!bad.passed());
         assert_eq!(rule(&bad, "PBR-ALB-1").pass, Some(false));
         assert_eq!(rule(&bad, "PBR-CHAR-1 (id 0) albedo").pass, Some(false));
         assert_eq!(rule(&bad, "VAL-1").pass, Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_maps_and_density_inputs_fail_rather_than_skip() {
+        let dir = scratch("missing");
+        let ash = [0x6B, 0x65, 0x60];
+        // No normal map, no tile_m: PBR-NRM-1 and TD-1 fail (terrain has a px/m target).
+        let path = set(
+            &dir,
+            16,
+            ash,
+            0.93,
+            "asset = \"ash\"\nclass = \"terrain\"\nmaterial_class = \"CHAR\"\n\
+             [maps]\nbase = \"base.png\"\nmetallic_roughness = \"mr.png\"\n",
+        );
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-NRM-1").pass, Some(false));
+        assert_eq!(rule(&report, "TD-1 (ash)").pass, Some(false));
+        // tile_m = 0 is no tile size either.
+        std::fs::write(
+            &path,
+            format!(
+                "asset = \"ash\"\nclass = \"terrain\"\ntile_m = 0.0\nmaterial_class = \"CHAR\"\n{MAPS}"
+            ),
+        )
+        .expect("manifest");
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "TD-1 (ash)").pass, Some(false));
+        // No metallic-roughness map: PBR-MET-1 and PBR-RGH-2 fail.
+        std::fs::write(
+            &path,
+            "asset = \"ash\"\nclass = \"terrain\"\ntile_m = 4.0\nmaterial_class = \"CHAR\"\n\
+             [maps]\nbase = \"base.png\"\nnormal = \"normal.png\"\n",
+        )
+        .expect("manifest");
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-MET-1").pass, Some(false));
+        assert_eq!(rule(&report, "PBR-RGH-2").pass, Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transition_metalness_and_roughness_floor_fail() {
+        let dir = scratch("metal");
+        // A hero in leather: half its texels at metalness 0.5 and roughness 0.05.
+        let path = set(
+            &dir,
+            16,
+            [0x7A, 0x5A, 0x40],
+            0.6,
+            &format!("asset = \"hero\"\nclass = \"hero\"\nmaterial_class = \"LEATHER\"\n{MAPS}"),
+        );
+        let mr: Vec<[u8; 4]> = (0..256)
+            .map(|i| {
+                if i % 2 == 0 {
+                    [128, 13, 0, 255]
+                } else {
+                    [0, 150, 0, 255]
+                }
+            })
+            .collect();
+        write_png(&dir.join("mr.png"), 16, 16, &mr);
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-MET-1").pass, Some(false));
+        assert_eq!(rule(&report, "PBR-RGH-2").pass, Some(false));
+        assert_eq!(rule(&report, "TINT-1").pass, Some(false)); // no team mask
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn emissive_rules_fail_on_hue_brightness_and_area() {
+        let dir = scratch("emit");
+        let manifest = |colour: &str, strength: f32| {
+            format!(
+                "asset = \"prop\"\nclass = \"prop\"\nmaterial_class = \"STONE-1\"\n\
+                 [emissive]\ncolour = \"{colour}\"\nstrength = {strength}\nuse = \"accent\"\n\
+                 {MAPS}emissive = \"emit.png\"\n"
+            )
+        };
+        let path = set(
+            &dir,
+            16,
+            [0x4A, 0x47, 0x44],
+            0.75,
+            &manifest("#A08CD0", 0.1),
+        );
+        // A quarter of the texels lit.
+        let emit: Vec<[u8; 4]> = (0..256)
+            .map(|i| {
+                if i < 64 {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        write_png(&dir.join("emit.png"), 16, 16, &emit);
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PAL-5").pass, Some(true));
+        assert_eq!(rule(&report, "PBR-EMIT-1").pass, Some(true));
+        assert_eq!(rule(&report, "PBR-EMIT-2").pass, Some(false)); // 0.25 > 0.03
+        // Saturated orange inside the CB-orange zone, far too bright.
+        std::fs::write(&path, manifest("#FF8000", 40.0)).expect("manifest");
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PAL-4").pass, Some(false));
+        assert_eq!(rule(&report, "PBR-EMIT-1").pass, Some(false));
+        // Saturated violet outside every zone: PAL-5 at C > 0.12.
+        std::fs::write(&path, manifest("#8000FF", 0.1)).expect("manifest");
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PAL-5").pass, Some(false));
+        // An emissive map without the table is an error, not a silent skip.
+        std::fs::write(
+            &path,
+            format!(
+                "asset = \"prop\"\nclass = \"prop\"\nmaterial_class = \"STONE-1\"\n\
+                 {MAPS}emissive = \"emit.png\"\n"
+            ),
+        )
+        .expect("manifest");
+        assert!(check_source(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normal_maps_fail_on_length_and_read_xy_from_the_right_channel() {
+        let dir = scratch("normal");
+        let path = layer(&dir, [0x6B, 0x65, 0x60]);
+        // Unnormalised (0.5 long) and over-long XY: both rules fail.
+        write_png(
+            &dir.join("normal.png"),
+            16,
+            16,
+            &vec![[128, 128, 191, 255]; 256],
+        );
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-NRM-1").pass, Some(false));
+        write_png(
+            &dir.join("normal.png"),
+            16,
+            16,
+            &vec![[255, 255, 128, 255]; 256],
+        );
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-NRM-2").pass, Some(false));
+        // Grey + alpha: X in grey, Y in alpha. X = 0 and Y = +1 is valid; reading Y from the
+        // grey would see X = 0, Y = 0 and pass either way, so make the alpha the bad one.
+        let ga = |x: u8, y: u8| -> Vec<u8> { (0..256).flat_map(|_| [x, y]).collect() };
+        write_png_as(
+            &dir.join("normal.png"),
+            16,
+            16,
+            png::ColorType::GrayscaleAlpha,
+            &ga(128, 255),
+        );
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-NRM-1").pass, None, "{}", report.text());
+        assert_eq!(rule(&report, "PBR-NRM-2").pass, Some(true));
+        write_png_as(
+            &dir.join("normal.png"),
+            16,
+            16,
+            png::ColorType::GrayscaleAlpha,
+            &ga(255, 255),
+        );
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-NRM-2").pass, Some(false));
+        // RG in RGB with normal_xy: no length check, X² + Y² still checked.
+        write_png(
+            &dir.join("normal.png"),
+            16,
+            16,
+            &vec![[128, 255, 0, 255]; 256],
+        );
+        let text = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, format!("normal_xy = true\n{text}")).expect("write");
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "PBR-NRM-1").pass, None);
+        assert_eq!(rule(&report, "PBR-NRM-2").pass, Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delight_fails_when_albedo_follows_the_ao_within_a_class() {
+        let dir = scratch("delight");
+        let path = set(
+            &dir,
+            32,
+            [0x6B, 0x65, 0x60],
+            0.93,
+            &format!(
+                "asset = \"ash\"\nclass = \"terrain\"\ntile_m = 4.0\nshipped_size = 1024\n\
+                 material_class = \"CHAR\"\n{MAPS}ao = \"ao.png\"\n"
+            ),
+        );
+        // AO by 8×8 block; albedo painted with the same cavities.
+        let block = |i: usize| ((i % 32) / 8 + (i / 32) / 8 * 4) as u8;
+        let ao: Vec<[u8; 4]> = (0..1024)
+            .map(|i| {
+                let v = 120 + 9 * block(i);
+                [v, v, v, 255]
+            })
+            .collect();
+        write_png(&dir.join("ao.png"), 32, 32, &ao);
+        let base: Vec<[u8; 4]> = (0..1024)
+            .map(|i| {
+                let v = 70 + 4 * block(i);
+                [v, v, v, 255]
+            })
+            .collect();
+        write_png(&dir.join("base.png"), 32, 32, &base);
+        let report = check_source(&path).expect("check");
+        let delight = rule(&report, "PBR-DELIGHT-1 (id 0 CHAR)");
+        assert_eq!(delight.pass, Some(false), "{}", report.text());
+        assert!(delight.value.contains("4 blocks"), "{}", delight.value);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_vocab_entry_replaces_a_conflicting_section_2_range() {
+        let dir = scratch("vocab");
+        // Void composite, matte: CERAM at roughness 0.57-0.71, luma ~47.
+        let manifest = |class: &str| {
+            format!("asset = \"void\"\nclass = \"prop\"\nmaterial_class = {class}\n{MAPS}")
+        };
+        let path = set(&dir, 16, [0x31, 0x2D, 0x37], 0.64, &manifest("\"CERAM\""));
+        let plain = check_source(&path).expect("check");
+        assert_eq!(
+            rule(&plain, "PBR-CERAM-1 (id 0) roughness").pass,
+            Some(false)
+        );
+        std::fs::write(
+            &path,
+            manifest("{ class = \"CERAM\", vocab = \"void composite, matte\" }"),
+        )
+        .expect("manifest");
+        let named = check_source(&path).expect("check");
+        assert_eq!(
+            rule(&named, "PBR-CERAM-1 (id 0) roughness").pass,
+            Some(true)
+        );
+        assert!(
+            rule(&named, "PBR-VOCAB (id 0)")
+                .limit
+                .contains("§3 is the more specific")
+        );
+        // The entry must belong to the declared class.
+        std::fs::write(
+            &path,
+            manifest("{ class = \"CLOTH\", vocab = \"Void composite, matte\" }"),
+        )
+        .expect("manifest");
+        assert!(check_source(&path).is_err());
+        // Every entry's class is a §2 class.
+        for entry in &VOCAB {
+            assert!(class_range(entry.class).is_some(), "{}", entry.name);
+            assert!(vocab_entry(&entry.name.to_uppercase()).is_some());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn team_masks_are_loaded_and_size_checked() {
+        let dir = scratch("tint");
+        let manifest = format!(
+            "asset = \"tower\"\nclass = \"structure\"\nmaterial_class = \"STONE-1\"\n\
+             {MAPS}team_mask = \"team.png\"\n"
+        );
+        let path = set(&dir, 16, [0x4A, 0x47, 0x44], 0.75, &manifest);
+        write_png(&dir.join("team.png"), 8, 8, &vec![[255, 255, 255, 255]; 64]);
+        let report = check_source(&path).expect("check");
+        let tint = rule(&report, "TINT-1");
+        assert_eq!(tint.pass, Some(false));
+        assert!(tint.value.contains("8x8"), "{}", tint.value);
+        write_png(
+            &dir.join("team.png"),
+            16,
+            16,
+            &vec![[255, 255, 255, 255]; 256],
+        );
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "TINT-1").pass, Some(true));
+        std::fs::remove_file(dir.join("team.png")).expect("remove");
+        let report = check_source(&path).expect("check");
+        assert_eq!(rule(&report, "TINT-1").pass, Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const SENTINEL: &[u8] = include_bytes!("../../../content/models/sentinel.glb");
+
+    #[test]
+    fn models_go_through_the_engines_loader_and_the_glb_rules() {
+        let dir = scratch("glb");
+        std::fs::write(dir.join("sentinel.glb"), SENTINEL).expect("model");
+        let mut report = SourceReport::default();
+        let decl = ModelDecl {
+            path: String::from("sentinel.glb"),
+            hover_m: 0.0,
+        };
+        let loaded = check_model(&decl, &dir.join("sentinel.glb"), &mut report);
+        assert_eq!(rule(&report, "GLB-NAME (sentinel)").pass, Some(true));
+        assert_eq!(rule(&report, "GLB-LOAD (sentinel)").pass, Some(true));
+        let feet = rule(&report, "GLB-FEET (sentinel)").pass;
+        let tangent = rule(&report, "GLB-TANGENT (sentinel)").pass;
+        assert!(tangent.is_some() && feet.is_some());
+        // A documented hover far from the mesh fails GLB-FEET.
+        let mut hovering = SourceReport::default();
+        let high = ModelDecl {
+            path: String::from("sentinel.glb"),
+            hover_m: 50.0,
+        };
+        let _ = check_model(&high, &dir.join("sentinel.glb"), &mut hovering);
+        assert_eq!(rule(&hovering, "GLB-FEET (sentinel)").pass, Some(false));
+        // A bad file stem fails GLB-NAME; a truncated file is refused by the loader.
+        std::fs::write(dir.join("bad name.glb"), SENTINEL).expect("model");
+        let mut named = SourceReport::default();
+        let _ = check_model(&decl, &dir.join("bad name.glb"), &mut named);
+        assert_eq!(rule(&named, "GLB-NAME (bad name)").pass, Some(false));
+        std::fs::write(dir.join("broken.glb"), &SENTINEL[..64]).expect("model");
+        let error = check_model(&decl, &dir.join("broken.glb"), &mut SourceReport::default())
+            .expect_err("truncated");
+        assert!(error.contains("loader refuses"), "{error}");
+        // The geometry comes back for the UV checks when the mesh has UVs.
+        if let Ok(geometry) = loaded {
+            assert!(
+                !geometry.positions.is_empty() && geometry.uvs.len() == geometry.positions.len()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_png_refuses_directories_garbage_and_oversized_images() {
+        let dir = scratch("readpng");
+        assert!(
+            read_png(&dir)
+                .expect_err("dir")
+                .contains("not a regular file")
+        );
+        assert!(read_png(&dir.join("absent.png")).is_err());
+        std::fs::write(dir.join("junk.png"), b"not a png at all").expect("write");
+        assert!(read_png(&dir.join("junk.png")).is_err());
+        // A real PNG cut short.
+        write_png(&dir.join("whole.png"), 16, 16, &vec![[1, 2, 3, 255]; 256]);
+        let bytes = std::fs::read(dir.join("whole.png")).expect("read");
+        std::fs::write(dir.join("cut.png"), &bytes[..bytes.len() / 2]).expect("write");
+        assert!(read_png(&dir.join("cut.png")).is_err());
+        // One pixel past the side limit.
+        let wide = vec![0u8; MAX_PNG_SIDE as usize + 1];
+        write_png_as(
+            &dir.join("wide.png"),
+            MAX_PNG_SIDE + 1,
+            1,
+            png::ColorType::Grayscale,
+            &wide,
+        );
+        let error = read_png(&dir.join("wide.png")).expect_err("too wide");
+        assert!(error.contains("outside"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1659,11 +2547,17 @@ mod tests {
         .expect("write");
         let error = check_source(&path).expect_err("STONE is not a §2 class");
         assert!(error.contains("not a material-vocabulary"), "{error}");
+        std::fs::write(
+            &path,
+            "asset = \"x\"\nclass = \"prop\"\n[classes]\n256 = \"METAL\"\n[maps]\nbase = \"b.png\"\n",
+        )
+        .expect("write");
+        assert!(check_source(&path).expect_err("id 256").contains("0..=255"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn image_reads_sixteen_bit_and_grey() {
+    fn image_reads_sixteen_bit_grey_and_grey_alpha() {
         let dir = scratch("png16");
         let path = dir.join("g16.png");
         let file = std::fs::File::create(&path).expect("create");
@@ -1679,6 +2573,17 @@ mod tests {
         assert_eq!((image.width, image.height, image.channels), (2, 1, 1));
         assert!((image.get(0, 0, 0) - 1.0).abs() < 1e-6);
         assert!((image.get(1, 0, 2) - 0.5).abs() < 1e-3);
+        assert!((image.get(1, 0, 3) - 1.0).abs() < 1e-6); // no alpha reads 1
+        let ga = dir.join("ga.png");
+        write_png_as(&ga, 1, 1, png::ColorType::GrayscaleAlpha, &[51, 204]);
+        let image = read_png(&ga).expect("read");
+        assert_eq!(image.channels, 2);
+        assert!((image.at(0, 1) - 0.2).abs() < 1e-6 && (image.at(0, 3) - 0.8).abs() < 1e-6);
+        let rgb = dir.join("rgb.png");
+        write_png_as(&rgb, 1, 1, png::ColorType::Rgb, &[51, 102, 204]);
+        let image = read_png(&rgb).expect("read");
+        assert_eq!(image.rgb(0), [0.2, 0.4, 0.8]);
+        assert!((image.at(0, 3) - 1.0).abs() < 1e-6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

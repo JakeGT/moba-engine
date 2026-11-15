@@ -12,7 +12,9 @@ pub(crate) const MAX_PNG_BYTES: u64 = 256 * 1024 * 1024;
 /// Largest PNG side accepted, in pixels (4K renders and 4096² bakes fit).
 pub(crate) const MAX_PNG_SIDE: u32 = 8192;
 
-/// A decoded image: RGBA, 16 bits per channel (8-bit sources are scaled to 16 bits).
+/// A decoded image, kept at the depth and channel count the file stored (a 4096² RGB8 bake is
+/// 48 MiB, not the 128 MiB of an RGBA16 copy). Reads present it as RGBA: grey is replicated to
+/// R, G and B, and a missing alpha reads 1.
 #[derive(Clone, Debug)]
 pub(crate) struct Image {
     pub(crate) width: u32,
@@ -21,35 +23,35 @@ pub(crate) struct Image {
     pub(crate) channels: u8,
     /// Whether the file stored 16 bits per channel (else 8).
     pub(crate) sixteen_bit: bool,
-    texels: Vec<[u16; 4]>,
+    /// Samples, row-major from the top, `channels` per texel; 16-bit samples big-endian.
+    samples: Vec<u8>,
 }
 
 impl Image {
-    /// An image from RGBA16 texels (row-major, row 0 at the top).
-    pub(crate) fn from_texels(
-        width: u32,
-        height: u32,
-        channels: u8,
-        texels: Vec<[u16; 4]>,
-    ) -> Self {
-        assert_eq!(texels.len(), width as usize * height as usize);
-        Self {
-            width,
-            height,
-            channels,
-            sixteen_bit: false,
-            texels,
-        }
-    }
-
-    /// Channel `channel` of texel `(x, y)` in 0..=1.
+    /// Channel `channel` (0 R, 1 G, 2 B, 3 A) of texel `(x, y)` in 0..=1.
     pub(crate) fn get(&self, x: u32, y: u32, channel: usize) -> f32 {
-        f32::from(self.texels[(y * self.width + x) as usize][channel]) / 65535.0
+        self.at((y * self.width + x) as usize, channel)
     }
 
-    /// Channel `channel` of the texel at linear index `index`, in 0..=1.
+    /// Channel `channel` (0 R, 1 G, 2 B, 3 A) of the texel at linear index `index`, in 0..=1.
+    /// Grey + alpha files keep their alpha in channel 3.
     pub(crate) fn at(&self, index: usize, channel: usize) -> f32 {
-        f32::from(self.texels[index][channel]) / 65535.0
+        let stored = usize::from(self.channels);
+        let source = match (stored, channel) {
+            (1 | 2, 0..=2) => 0,
+            (1 | 3, _) if channel >= 3 => return 1.0,
+            (2, _) => 1,
+            (_, channel) => channel,
+        };
+        let sample = index * stored + source;
+        if self.sixteen_bit {
+            f32::from(u16::from_be_bytes([
+                self.samples[2 * sample],
+                self.samples[2 * sample + 1],
+            ])) / 65535.0
+        } else {
+            f32::from(self.samples[sample]) / 255.0
+        }
     }
 
     /// The RGB of the texel at `index`, in 0..=1.
@@ -59,7 +61,7 @@ impl Image {
 
     /// Number of texels.
     pub(crate) fn len(&self) -> usize {
-        self.texels.len()
+        self.width as usize * self.height as usize
     }
 }
 
@@ -88,11 +90,10 @@ pub(crate) fn read_png(path: &Path) -> Result<Image, String> {
     let size = reader
         .output_buffer_size()
         .ok_or_else(|| format!("{shown}: image too large"))?;
-    let mut buffer = vec![0; size];
+    let mut samples = vec![0; size];
     let frame = reader
-        .next_frame(&mut buffer)
+        .next_frame(&mut samples)
         .map_err(|error| format!("{shown}: {error}"))?;
-    let buffer = &buffer[..frame.buffer_size()];
     let (colour, depth) = (frame.color_type, frame.bit_depth);
     let channels: usize = match colour {
         png::ColorType::Grayscale => 1,
@@ -102,43 +103,24 @@ pub(crate) fn read_png(path: &Path) -> Result<Image, String> {
         png::ColorType::Indexed => return Err(format!("{shown}: unexpanded palette")),
     };
     let sixteen = depth == png::BitDepth::Sixteen;
-    let sample = |index: usize| -> u16 {
-        if sixteen {
-            u16::from_be_bytes([buffer[2 * index], buffer[2 * index + 1]])
-        } else {
-            u16::from(buffer[index]) * 257
-        }
-    };
-    let count = width as usize * height as usize;
-    let needed = count * channels * if sixteen { 2 } else { 1 };
-    if buffer.len() < needed {
+    if !sixteen && depth != png::BitDepth::Eight {
+        return Err(format!("{shown}: {depth:?}-bit samples after expansion"));
+    }
+    let needed = width as usize * height as usize * channels * if sixteen { 2 } else { 1 };
+    if frame.buffer_size() < needed
+        || frame.line_size != width as usize * channels * if sixteen { 2 } else { 1 }
+    {
         return Err(format!("{shown}: truncated image data"));
     }
-    let texels = (0..count)
-        .map(|texel| {
-            let base = texel * channels;
-            match channels {
-                1 => {
-                    let v = sample(base);
-                    [v, v, v, u16::MAX]
-                }
-                2 => {
-                    let v = sample(base);
-                    [v, v, v, sample(base + 1)]
-                }
-                3 => [sample(base), sample(base + 1), sample(base + 2), u16::MAX],
-                _ => [
-                    sample(base),
-                    sample(base + 1),
-                    sample(base + 2),
-                    sample(base + 3),
-                ],
-            }
-        })
-        .collect();
-    let mut image = Image::from_texels(width, height, channels as u8, texels);
-    image.sixteen_bit = sixteen;
-    Ok(image)
+    samples.truncate(needed);
+    samples.shrink_to_fit();
+    Ok(Image {
+        width,
+        height,
+        channels: channels as u8,
+        sixteen_bit: sixteen,
+        samples,
+    })
 }
 
 /// An 8-bit RGB canvas for contact sheets.
