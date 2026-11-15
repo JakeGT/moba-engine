@@ -726,8 +726,9 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
   tangents there**, and a normal map baked before is then off.
   - Bake inside the same block: `export_glb.bake_normals(objects, **bake_kwargs)` runs
     `bpy.ops.object.bake(type="NORMAL")` inside it (`normal_space` defaults to `TANGENT`), in
-    the rest pose: the armatures are set to `REST` for the bake and restored afterwards. Bakes made from the UI's Bake button get no
-    quantisation, so a bake that goes with this convention must be scripted.
+    the rest pose: the armatures are set to `REST` for the bake and restored afterwards. Bakes
+    made from the UI's Bake button get no quantisation, so a bake that goes with this convention
+    must be scripted.
   - Measured on the repro quad, baked selected-to-active from a plane tilted 10° (128² map,
     12 237 interior texels decoded with the file's `TANGENT` and `NORMAL`): baked and exported
     inside the block, at most 0.011° from the plane; baked without it and exported inside it,

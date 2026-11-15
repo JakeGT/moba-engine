@@ -232,7 +232,7 @@ def check_guard():
         v.co.x += 3.0
     ob.modifiers.new("mirror", "MIRROR")
     error = guarded(ob)
-    check("guard: Mirror raises on the corner count",
+    check("guard: Mirror raises: changes topology",
           error is not None and "changes topology" in error and "NOT RESTORED" not in error,
           error)
     reset()
@@ -247,7 +247,7 @@ def check_guard():
     ob.modifiers.new("subsurf", "SUBSURF")
     ob.modifiers.new("triangulate", "TRIANGULATE")
     error = guarded(ob)
-    check("guard: Subdivision + Triangulate raises on the corner count",
+    check("guard: Subdivision + Triangulate raises: changes topology",
           error is not None and "changes topology" in error and "SUBSURF" in error, error)
     reset()
     ob = sphere("weighted")
