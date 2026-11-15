@@ -350,10 +350,10 @@ def tangent_splits(doc, bin_chunk):
     """Vertices in the file that share POSITION, NORMAL and TEXCOORD_0 (bit for bit, within one
     glTF mesh) with another vertex but have a different TANGENT: the symptom of tangents computed
     on normals other than the written ones, which the engine's MikkTSpace welds and averages
-    (GLB-MIKK). Information, an upper bound: MikkTSpace itself gives a vertex two tangents where
-    two fans of its triangles meet only at that vertex, and the engine reproduces those. The Void
-    Monolith (A3) exports 1032 without `quantised_normals` and 2 with it, at GLB-MIKK 1.0000
-    (ADR-0022 amendment 3)."""
+    (GLB-MIKK). Information, an upper bound: MikkTSpace itself can give one welded vertex two
+    tangents (two fans of triangles meeting only at that vertex, by its grouping), and the engine
+    reproduces those. The Void Monolith (A3) exports 1032 without `quantised_normals` and 2 with
+    it, at GLB-MIKK 1.0000 (ADR-0022 amendment 3)."""
     split = 0
     for mesh in doc.get("meshes", []):
         groups = {}

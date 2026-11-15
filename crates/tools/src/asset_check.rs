@@ -1862,8 +1862,20 @@ fn check_model(
         format!("{stem:?}"),
         "model name (file stem) 1..=16 of [A-Za-z0-9_-]",
     );
-    let mesh = moba_assets::load_glb_file_with(path, moba_assets::GlbTangents::FileOnly)
-        .map_err(|error| format!("{shown}: the engine's loader refuses it: {error}"))?;
+    // Read before the load: the loader refuses a `w` far from ±1 outright, and the count
+    // belongs in that refusal.
+    let defects = moba_assets::tangent_defects_file(path);
+    let mesh = moba_assets::load_glb_file_with(path, moba_assets::GlbTangents::FileOnly).map_err(
+        |error| {
+            let counted = match &defects {
+                Ok(defects) if !defects.is_clean() => {
+                    format!(" (GLB-TANGENT: {})", tangent_rule(Ok(()), Ok(*defects)).1)
+                }
+                _ => String::new(),
+            };
+            format!("{shown}: the engine's loader refuses it: {error}{counted}")
+        },
+    )?;
     report.push(
         &format!("GLB-LOAD ({stem})"),
         Some(true),
@@ -1874,10 +1886,7 @@ fn check_model(
         ),
         "loads with the engine's bounded loader (ADR-0007)",
     );
-    let (pass, detail) = tangent_rule(
-        moba_assets::check_baked_tangents_file(path),
-        moba_assets::tangent_defects_file(path),
-    );
+    let (pass, detail) = tangent_rule(moba_assets::check_baked_tangents_file(path), defects);
     report.push(
         &format!("GLB-TANGENT ({stem})"),
         Some(pass),
@@ -2579,6 +2588,11 @@ mod tests {
     /// `glb` with its first `TANGENT` element's `xyz` zeroed, as an exporter writes a corner
     /// without tangent space.
     fn zero_first_tangent(glb: &[u8]) -> Vec<u8> {
+        patch_first_tangent(glb, 0, &[0; 12])
+    }
+
+    /// `glb` with `bytes` written into its first `TANGENT` element at byte `at`.
+    fn patch_first_tangent(glb: &[u8], at: usize, bytes: &[u8]) -> Vec<u8> {
         let json_len = u32::from_le_bytes(glb[12..16].try_into().expect("header")) as usize;
         let doc: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_len]).expect("json");
         let index = |value: &serde_json::Value| value.as_u64().map_or(0, |v| v as usize);
@@ -2588,7 +2602,7 @@ mod tests {
         // The BIN chunk's data starts after the JSON chunk and the BIN chunk header.
         let start = 20 + json_len + 8 + index(&view["byteOffset"]) + index(&accessor["byteOffset"]);
         let mut out = glb.to_vec();
-        out[start..start + 12].fill(0);
+        out[start + at..start + at + bytes.len()].copy_from_slice(bytes);
         out
     }
 
@@ -2651,6 +2665,15 @@ mod tests {
             tangent.value.starts_with("1 of ") && tangent.value.contains("(1 zero)"),
             "{}",
             tangent.value
+        );
+        // A `w` of 0.5: the loader refuses the file, and the refusal carries the count.
+        let half = patch_first_tangent(SENTINEL, 12, &0.5f32.to_le_bytes());
+        std::fs::write(dir.join("halfw.glb"), half).expect("model");
+        let error = check_model(&decl, &dir.join("halfw.glb"), &mut SourceReport::default())
+            .expect_err("bad handedness");
+        assert!(
+            error.contains("loader refuses") && error.contains("1 with w not ±1"),
+            "{error}"
         );
         // A documented hover far from the mesh fails GLB-FEET.
         let mut hovering = SourceReport::default();

@@ -878,7 +878,7 @@ save the .blend inside the block (free normals do not follow deformation). A scr
 `check_scene`, `gltf_options` and `verify_glb` itself must do the same. A map baked without it
 is off by up to the tangent spread wherever groups merge, so re-bake it. The export info's
 `tangent_splits` counts vertices that differ from another only in `TANGENT`; a few are normal,
-because MikkTSpace itself splits a vertex where two fans of triangles meet only there.
+because MikkTSpace itself can give one welded vertex two tangents (GLB-MIKK is the measure).
 
 ### Source checks (A1)
 
@@ -939,7 +939,8 @@ It reports, in order:
 - **Export checks** (GLB-*): the loader, baked `TANGENT`, feet and the MikkTSpace agreement.
   GLB-TANGENT also fails, with a count, any file tangent whose `xyz` length is more than 1e-3
   from 1 (zero-length ones included: an exporter writes them on degenerate or zero-UV-area
-  slivers) or whose `w` is more than 1e-3 from ±1. GLB-MIKK is information.
+  slivers) or whose `w` is more than 1e-3 from ±1 (the loader refuses such a `w` outright, and
+  its refusal carries the count). GLB-MIKK is information.
 - **Texel density.** TD-1, px/m, passes or fails for structures, props and terrain (and fails
   when there is nothing to measure it with); it is reported for units. TD-2 is the authored
   size. UVs that tile past the raster budget report "coverage not measured".

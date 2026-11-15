@@ -633,7 +633,9 @@ tangent space.
 
 - GLB-TANGENT now also counts the file's **raw** `TANGENT` elements whose `xyz` length is not
   within **1e-3** of 1 (zero included), or whose `w` is not within 1e-3 of ±1, and fails on any.
-  It reports the count, for example "35 of 9682 TANGENT not unit length (35 zero)".
+  It reports the count, for example "35 of 9682 TANGENT not unit length (35 zero)". A `w`
+  outside the tolerance also makes the loader refuse the file, so `content-check` stops at the
+  load; the counts are then appended to the loader's refusal.
 - **Why 1e-3:** it is the loader's own snap for `w` (`MeshData::with_tangents`). It is also about
   10× the error of Blender's exporter, which rounds each tangent component to 4 decimals without
   renormalising (at most √3 × 5e-5 ≈ 8.7e-5 in length). The engine's own tangents (`sample-mesh`,
@@ -673,8 +675,10 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
   - On exit, each mesh's previous custom normals are restored.
   - `main` exports inside it.
   - `verify_glb` reports `tangent_splits`: vertices equal in POSITION, NORMAL and TEXCOORD_0 but
-    not in `TANGENT`. It is information, not an error, because MikkTSpace itself splits a vertex
-    where two fans meet only at that vertex, and the engine reproduces those splits.
+    not in `TANGENT`. It is information, not an error: MikkTSpace itself can give one welded
+    vertex two tangents, and the engine reproduces those splits. On the Monolith the 2 that
+    remain are such a pair (measured: GLB-MIKK 1.0000). That the cause is two triangle fans
+    meeting only at that vertex is deduced from MikkTSpace's grouping, not traced.
 - **After the fix:**
   - the repro gives 4 vertices and GLB-MIKK 1.0000, through `main` and through the helpers;
   - the Monolith gives 860 vertices (the file has 859 unique position, normal and UV
