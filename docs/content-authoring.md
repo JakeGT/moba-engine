@@ -1500,6 +1500,116 @@ size, each channel's output range and the mean absolute deviation from the ident
 grades an 8-bit PNG (its values taken as display-encoded) for side-by-side previews.
 `scripts/bake-sample-textures.sh` regenerates the shipped three.
 
+## Provenance
+
+Every file in a content root's asset directories (`models/`, `textures/`, `vfx/`, `maps/ao/`
+and so on) needs a provenance entry in the `provenance.toml` of its own directory (A0,
+[ADR-0022](adr/0022-provenance-gate-mikktspace.md)). The root itself may hold only packs
+(`*.toml`) and the generated `CREDITS.txt` and `AI-DISCLOSURE.md`; put any other file in an
+asset directory. Dot-files and dot-directories (`.gitkeep`, `.cache/`, ...) and symlinks are
+rejected everywhere, so nothing in a content root is hidden from the gate, and so are FIFOs,
+devices and other special files: the gate reads manifests and notices only as plain files.
+Directory names follow the file-name rule (ASCII letters, digits, `.`, `_`, `-`). On macOS, Finder
+writes `.DS_Store` files that fail the gate (and its unit test); clear them with
+`find content -name .DS_Store -delete`.
+
+One entry can cover several files. List binary assets (textures, meshes, LUTs, audio) by
+name, so each new one is a reviewed manifest change; a `*` pattern may cover only `*.toml`
+descriptors, and the gate fails one that matches anything else:
+
+```toml
+[[asset]]
+files = ["rock-042-color.ktx2", "rock-042-normal.ktx2"]   # names (or `*` patterns) here, no `/`
+title = "Rock 042"
+source = "https://ambientcg.com/view?id=Rock042"   # or "original" (made for this project)
+author = "ambientCG"
+licence = "CC0-1.0"
+made_with = "texture-bake bake … --kind color"     # optional
+# attribution = "…"                    # required for CC-BY-*: the exact credit line
+# notes = "…"                          # optional
+# sha256 = { "rock-042-color.ktx2" = "…", "rock-042-normal.ktx2" = "…" }
+#                                      # required unless source = "original"
+
+# Only for AI-generated assets (roadmap §9.5):
+# [asset.ai]
+# model = "TRELLIS.2-4B"
+# model_version = "2025-12"
+# weights_licence = "MIT"
+# seed = 1234
+# human_modified = false               # true, with `notes` on the changes, for CC-BY
+# prompt = "a bronze brazier, game asset"   # or empty when inputs drive it
+# tools = ["ComfyUI 0.3.x", "mesh-bake"]
+# [[asset.ai.inputs]]
+# name = "brazier-concept.png"
+# source = "original"                  # a third-party input must be CC0-1.0
+# licence = "CC0-1.0"
+```
+
+**The gate.** `content-check --provenance` fails when a file has no entry or two, a pattern
+matches nothing (or is not a plain ASCII name: letters, digits, `.`, `_`, `-`, `*`), a key is
+unknown, the root holds something other than packs and notices, a dot entry or symlink
+exists, or a licence is not allowed:
+
+- allowed: `CC0-1.0`, `CC-BY-3.0`, `CC-BY-4.0`, `MIT`, `Apache-2.0`, `MIT OR Apache-2.0`,
+  `OFL-1.1`;
+- approved exceptions, each only where it was approved: `LicenseRef-CMU-Mocap` as an asset
+  `licence` under `animations/`, and `LicenseRef-NVIDIA-Open-Model-License` (Kimodo) as
+  `ai.weights_licence`. A new exception, or a wider scope, is a code change in
+  `moba_assets::provenance`, approved by the maintainer;
+- rejected: non-commercial (`NC`), no-derivatives (`ND`), share-alike, unknown and
+  all-rights-reserved.
+- concept only, rejected everywhere: `LicenseRef-Gemini-API-Output` (Gemini API, "Nano
+  Banana", images). The maintainer approved the service for concept art and model sheets
+  only (art bible, concept generation). Model from those images by hand and say so in the
+  asset's `notes` (for example "modelled from the Kiln Warden sheet, Gemini concept"), but
+  never ship one or feed one to a generator. An `ai.model` or `ai.tools` entry naming Gemini
+  or Nano Banana, or an AI input with that licence or whose name or source names the service,
+  fails the gate whatever licence the entry claims.
+
+**SHA-256 pins.** An entry whose `source` is not `"original"` records the SHA-256 of every file
+it covers (`sha256sum`, 64 lower-case hex digits), and the gate fails when a file no longer
+matches, so a third-party file cannot change after its licence was reviewed. Original work may
+record hashes too; they are verified when present. Hash the committed bytes:
+`.gitattributes` turns text files to LF, so hash after `git add`, or mark a third-party text
+file `-text` there to keep its upstream bytes.
+
+**Baked tangents.** Every `.glb` in the content root that has `TEXCOORD_0` must carry a
+`TANGENT` attribute on every primitive (export MikkTSpace tangents; `sample-mesh` writes them).
+The loader can generate tangents at runtime, but only as a bounded fallback for mods and
+development files (ADR-0022 amendment 1).
+
+`CC-BY-*` needs `attribution`. An AI-generated asset is `CC0-1.0`, or `CC-BY-*` only with
+`ai.human_modified = true` and `notes` saying what a person changed; it records its model,
+version, weights licence (allowed or an exception), seed, tools and a prompt or inputs.
+Manifest text may not contain control characters (line breaks included), Unicode line
+separators or bidirectional controls (U+2028, U+2029, U+202A–U+202E, U+2066–U+2069) or
+`<!--`/`-->`, so it cannot break or disguise the generated files; Markdown characters are
+escaped in them.
+
+The gate checks what the manifest declares, not where a file came from: an asset that omits
+its `[asset.ai]` block or claims `source = "original"` is taken at its word, so review the
+manifest change. It covers only the content root it is given (`content/` by default).
+
+**Generated notices.** The same command writes the content section of `THIRD_PARTY.md`
+(between its `BEGIN`/`END content provenance` markers: exactly one of each, in order, on
+their own lines, or the command fails without writing; with neither it appends the section;
+a notice path that is a symlink or special file fails the command before anything is written),
+`content/CREDITS.txt` (plain text the
+game can show) and `content/AI-DISCLOSURE.md` (the Steam AI-disclosure list). Commit them with
+the asset; `--check` writes nothing and fails when any is stale, and
+`scripts/agent-verify.sh` runs it:
+
+```text
+$ cargo run -p moba-tools --bin content-check -- --provenance          # check and write
+$ cargo run -p moba-tools --bin content-check -- --provenance --check  # CI: check only
+$ cargo run -p moba-tools --bin content-check -- --provenance --content mods/x --third-party mods/x/NOTICES.md
+```
+
+`provenance.toml` is never an asset: the VFX loader skips `vfx/provenance.toml`, so do not
+name an effect, map visuals, environment, material or animation set `provenance` (nothing
+rejects the name; the file would be read as a manifest). Provenance is never hashed, signed or
+sent, and the client never reads it.
+
 ## Hot reload
 
 ```bash

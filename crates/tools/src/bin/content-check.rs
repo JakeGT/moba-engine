@@ -1,4 +1,6 @@
-//! Validate a content pack and print its catalogue summary.
+//! Validate a content pack and print its catalogue summary, or (`--provenance`) run the
+//! asset licence and provenance gate over a content root and write (or `--check`) the
+//! notices generated from it (A0, ADR-0022).
 #![allow(clippy::print_stdout)]
 
 #[path = "../map_site.rs"]
@@ -29,10 +31,27 @@ fn main() {
     let mut json = false;
     let mut require_attestation = false;
     let mut publisher: Option<String> = None;
+    let mut provenance = false;
+    let mut check = false;
+    let mut content_root = String::from("content");
+    let mut third_party = String::from("THIRD_PARTY.md");
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--json" => json = true,
+            "--provenance" => provenance = true,
+            "--check" => check = true,
+            "--content" | "--third-party" => {
+                let Some(value) = args.next() else {
+                    eprintln!("{argument} needs a path");
+                    std::process::exit(2);
+                };
+                if argument == "--content" {
+                    content_root = value;
+                } else {
+                    third_party = value;
+                }
+            }
             "--require-attestation" => require_attestation = true,
             "--publisher" => {
                 let Some(value) = args.next() else {
@@ -43,7 +62,8 @@ fn main() {
             }
             "--help" => {
                 eprintln!(
-                    "usage: content-check [--json] [--require-attestation] [--publisher HEX] <pack.toml>"
+                    "usage: content-check [--json] [--require-attestation] [--publisher HEX] <pack.toml>\n       \
+                     content-check --provenance [--check] [--content DIR] [--third-party FILE]"
                 );
                 return;
             }
@@ -53,6 +73,21 @@ fn main() {
                 std::process::exit(2);
             }
         }
+    }
+    if provenance {
+        if path.is_some() || json || require_attestation || publisher.is_some() {
+            eprintln!("--provenance takes a content root (--content DIR), not a pack");
+            std::process::exit(2);
+        }
+        std::process::exit(provenance_gate(
+            std::path::Path::new(&content_root),
+            std::path::Path::new(&third_party),
+            check,
+        ));
+    }
+    if check {
+        eprintln!("--check only applies to --provenance");
+        std::process::exit(2);
     }
     let Some(path) = path else {
         eprintln!("usage: content-check [--json] <pack.toml>");
@@ -346,9 +381,11 @@ fn map_consistency(
         // under the pack directory; the assumed footprint when it does not load).
         let footprint = visuals.ground.as_ref().and_then(|ground| {
             let mesh = ground.edge_mesh.as_deref()?;
-            let data =
-                moba_assets::load_glb_file(&pack_dir.join("models").join(format!("{mesh}.glb")))
-                    .ok()?;
+            let data = moba_assets::load_glb_file_with(
+                &pack_dir.join("models").join(format!("{mesh}.glb")),
+                moba_assets::GlbTangents::FileOnly,
+            )
+            .ok()?;
             let (min, max) = data.bounds();
             moba_assets::edge_footprint_radius(min, max, ground.edge_mesh_height)
         });
@@ -428,4 +465,107 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+/// Largest generated notices file (`THIRD_PARTY.md`, the credits, the AI disclosure) the
+/// gate reads.
+const MAX_NOTICE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// How the content root is written in the notices: its path with `.` components and any
+/// trailing separator dropped and `/` separators, so `./content`, `content/` and `content`
+/// give the same text.
+fn content_label(content: &std::path::Path) -> String {
+    let normal: std::path::PathBuf = content
+        .components()
+        .filter(|component| *component != std::path::Component::CurDir)
+        .collect();
+    let label = normal.to_string_lossy().replace('\\', "/");
+    if label.is_empty() {
+        String::from(".")
+    } else {
+        label
+    }
+}
+
+/// The licence and provenance gate (A0, ADR-0022): checks every asset under `content`
+/// (and that every shipped `.glb` with UVs has baked tangents) and writes, or with `check`
+/// compares, the generated notices: the content section of `third_party`,
+/// `content/CREDITS.txt` and `content/AI-DISCLOSURE.md`. Only plain files are read or
+/// written: a notice path that is a symlink or special file is an error and is never
+/// written through. Returns the exit status: 0 when the gate passes (and, with `check`,
+/// every notice is current), else 1.
+fn provenance_gate(content: &std::path::Path, third_party: &std::path::Path, check: bool) -> i32 {
+    use moba_assets::provenance;
+    let mut report = provenance::check_provenance(content);
+    let tangent_errors = provenance::baked_tangent_errors(content, &report);
+    report.errors.extend(tangent_errors);
+    for error in &report.errors {
+        eprintln!("error: {error}");
+    }
+    let label = content_label(content);
+    let label = label.as_str();
+    // A missing notices file starts empty (written, or reported stale with `check`).
+    let existing = match provenance::read_plain_file(third_party, MAX_NOTICE_BYTES) {
+        Ok(text) => text.unwrap_or_default(),
+        Err(error) => {
+            eprintln!("error: {}: {error}", third_party.display());
+            return 1;
+        }
+    };
+    // Compare and write with LF line endings, whatever the checkout uses.
+    let existing = existing.replace("\r\n", "\n");
+    let section = provenance::third_party_section(&report, label);
+    let spliced = match provenance::splice_third_party(&existing, &section) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("error: {}: {error}", third_party.display());
+            return 1;
+        }
+    };
+    let outputs = [
+        (third_party.to_path_buf(), spliced),
+        (
+            content.join(provenance::CREDITS_FILE),
+            provenance::credits_text(&report),
+        ),
+        (
+            content.join(provenance::AI_DISCLOSURE_FILE),
+            provenance::ai_disclosure(&report, label),
+        ),
+    ];
+    let mut status = i32::from(!report.errors.is_empty());
+    for (path, text) in &outputs {
+        let current = match provenance::read_plain_file(path, MAX_NOTICE_BYTES) {
+            Ok(current) => current.map(|text| text.replace("\r\n", "\n")),
+            Err(error) => {
+                // Never written through: `fs::write` would follow a symlink.
+                eprintln!("error: {}: {error}", path.display());
+                status = 1;
+                continue;
+            }
+        };
+        if current.as_deref() == Some(text.as_str()) {
+            continue;
+        }
+        if check {
+            eprintln!(
+                "error: {} is stale; run `cargo run -p moba-tools --bin content-check -- --provenance`",
+                path.display()
+            );
+            status = 1;
+        } else if report.errors.is_empty() {
+            if let Err(error) = std::fs::write(path, text) {
+                eprintln!("cannot write {}: {error}", path.display());
+                status = 1;
+            } else {
+                println!("wrote      {}", path.display());
+            }
+        }
+    }
+    println!("content    {label}");
+    println!("entries    {}", report.entries.len());
+    println!("files      {}", report.files);
+    println!("ai         {}", report.ai_entries().count());
+    println!("valid      {}", report.errors.is_empty());
+    status
 }

@@ -149,7 +149,8 @@ fn rasterise(occluders: &Occluders, texel: f32, root: &Path) -> bake::HeightFiel
 /// the built-in block, and so does the bake.
 fn load_mesh(root: &Path, name: &str) -> Option<MeshData> {
     let path = root.join("models").join(format!("{name}.glb"));
-    match moba_assets::load_glb_file(&path) {
+    // Occlusion needs positions only: tangents are never read.
+    match moba_assets::load_glb_file_with(&path, moba_assets::GlbTangents::FileOnly) {
         Ok(mesh) => Some(mesh),
         Err(error) => {
             eprintln!(

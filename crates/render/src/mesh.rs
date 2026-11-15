@@ -40,7 +40,7 @@ pub(crate) struct SkinnedVertex {
 const DEFAULT_TANGENT: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 /// Per-vertex tangents for `data`: the file's (renormalised), else generated from the UVs
-/// (MikkTSpace-style, `MeshData::generate_tangents`), else [`DEFAULT_TANGENT`].
+/// (`MikkTSpace`, `MeshData::generate_tangents`), else [`DEFAULT_TANGENT`].
 fn tangents(data: &moba_assets::MeshData) -> Vec<[f32; 4]> {
     let count = data.vertex_count();
     let normalised = |tangent: &[f32; 4]| {
@@ -261,7 +261,10 @@ impl CpuMesh {
                     tangent: DEFAULT_TANGENT,
                 });
             }
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            // Counter-clockwise about the face normal (glTF's front face), which MikkTSpace
+            // assumes when it takes the handedness from the UV winding (A0, ADR-0022). The
+            // corners above run clockwise, so the fan is reversed; nothing culls back faces.
+            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
         }
         Self::with_generated_tangents(vertices, indices)
     }
@@ -304,7 +307,8 @@ impl CpuMesh {
             corner(half, half),
             corner(-half, half),
         ];
-        let indices = vec![0, 1, 2, 0, 2, 3];
+        // Counter-clockwise seen from +Y, the normal (see `cube`).
+        let indices = vec![0, 2, 1, 0, 3, 2];
         Self::with_generated_tangents(vertices, indices)
     }
 
@@ -710,6 +714,15 @@ mod tests {
 
     #[test]
     fn built_in_meshes_get_unit_tangents_orthogonal_to_their_normals() {
+        let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
         for mesh in [CpuMesh::cube(), CpuMesh::plane(10.0)] {
             for vertex in &mesh.vertices {
                 let [x, y, z, w] = vertex.tangent;
@@ -717,6 +730,23 @@ mod tests {
                 assert!(((x * x + y * y + z * z).sqrt() - 1.0).abs() < 1e-4);
                 assert!((x * nx + y * ny + z * nz).abs() < 1e-4);
                 assert_eq!(w.abs(), 1.0);
+            }
+            for triangle in mesh.indices.as_chunks::<3>().0 {
+                let [a, b, c] = [0, 1, 2].map(|k| &mesh.vertices[triangle[k] as usize]);
+                // Front faces are counter-clockwise about the normal (MikkTSpace's input).
+                let face = cross(sub(b.position, a.position), sub(c.position, a.position));
+                assert!(dot(face, a.normal) > 0.0, "{triangle:?}");
+                // The bitangent cross(n, t.xyz) * w points up the image (decreasing v).
+                for (from, to) in [(a, b), (b, c), (c, a)] {
+                    let dv = to.uv[1] - from.uv[1];
+                    if dv == 0.0 {
+                        continue;
+                    }
+                    let t = [from.tangent[0], from.tangent[1], from.tangent[2]];
+                    let bitangent = cross(from.normal, t).map(|v| v * from.tangent[3]);
+                    let along = dot(bitangent, sub(to.position, from.position));
+                    assert!(along * dv < 0.0, "{triangle:?}: bitangent {bitangent:?}");
+                }
             }
         }
         // The terrain plane: +u along +X, v along +Z, so the bitangent (up the image, -v)

@@ -51,7 +51,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use meshopt::{SimplifyOptions, SimplifyVertex};
-use moba_assets::{MAX_MESH_LODS, MeshData, MeshLods, load_glb_file, load_lods_for, lod_path};
+use moba_assets::{
+    GlbTangents, MAX_MESH_LODS, MeshData, MeshLods, load_glb_file_with, load_lods_for, lod_path,
+};
 use moba_core::math::Vec3;
 
 /// Default target ratios of the LOD0 triangle count, LOD1 first.
@@ -126,7 +128,8 @@ fn main() -> ExitCode {
             _ => return usage(),
         }
     }
-    let mesh = match load_glb_file(&input) {
+    // LODs are index lists over the model's vertices: tangents are never read.
+    let mesh = match load_glb_file_with(&input, GlbTangents::FileOnly) {
         Ok(mesh) => mesh,
         Err(error) => {
             eprintln!("{}: {error}", input.display());

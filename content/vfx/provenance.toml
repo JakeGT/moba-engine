@@ -1,0 +1,19 @@
+# Provenance of every file in this directory (A0, ADR-0022). `content-check --provenance`
+# checks it and generates THIRD_PARTY.md's content section, content/CREDITS.txt and
+# content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
+
+[[asset]]
+files = ["atlas.ktx2"]
+title = "Particle sprite atlas"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Procedural (moba_assets::procedural_atlas, crates/assets/src/vfx.rs) baked by texture-bake (scripts/bake-sample-textures.sh)"
+
+[[asset]]
+files = ["*.toml"]
+title = "Effect descriptors and bindings"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Hand-written TOML"

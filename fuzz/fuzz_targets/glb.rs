@@ -19,7 +19,12 @@ fuzz_target!(|data: &[u8]| {
                 .iter()
                 .all(|&index| (index as usize) < mesh.vertex_count())
         );
-        // File tangents: one per vertex, finite, handedness exactly ±1 (R2a).
+        // Tangents, from the file or generated once at load (bounded MikkTSpace, ADR-0022):
+        // present exactly when the mesh has UVs or the file had them, one per vertex,
+        // finite, handedness exactly ±1 (R2a). Not regenerated here: the load already ran it.
+        if mesh.uvs().is_some() {
+            assert!(mesh.tangents().is_some(), "a mesh with UVs gets tangents at load");
+        }
         if let Some(tangents) = mesh.tangents() {
             assert_eq!(tangents.len(), mesh.vertex_count());
             assert!(
@@ -28,9 +33,6 @@ fuzz_target!(|data: &[u8]| {
                     .all(|tangent| tangent.iter().all(|value| value.is_finite())
                         && (tangent[3] == 1.0 || tangent[3] == -1.0))
             );
-        }
-        if let Some(tangents) = mesh.generate_tangents() {
-            assert_eq!(tangents.len(), mesh.vertex_count());
         }
         if let Some(skin) = mesh.skin() {
             let joints = skin.skeleton().joint_count();

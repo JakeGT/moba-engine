@@ -103,6 +103,31 @@ impl MeshData {
     pub const MAX_VERTICES: usize = 65_536;
     /// Maximum indices per mesh (128 Ki triangles).
     pub const MAX_INDICES: usize = 3 * 131_072;
+    /// [`Self::generate_tangents`] skips `MikkTSpace` when more triangle corners than this
+    /// share one position. `MikkTSpace` groups the faces around a vertex recursively, one
+    /// stack frame per face (16 Ki overflow a thread's stack), and its time grows with the
+    /// square and cube of that count, so a hostile `.glb` could otherwise stall or abort a
+    /// loader. Real meshes have about 6 corners per position, and a 256-segment UV-sphere
+    /// pole has 256.
+    pub const TANGENT_MAX_SHARED_CORNERS: usize = 512;
+    /// [`Self::generate_tangents`] also skips `MikkTSpace` when the sum over positions of
+    /// (corners sharing the position)² exceeds this (2^22). `MikkTSpace` compares every
+    /// pair of corners around a vertex, and with incoherent UVs evaluates a tangent space per
+    /// pair (one `acos` each), about 55–70 ns per pair, so this caps that work at about
+    /// 0.3 s (ADR-0022 amendment 1). A dense mesh at the vertex cap is about 2.4 M.
+    pub const TANGENT_MAX_SHARING_COST: u64 = 1 << 22;
+    /// [`Self::generate_tangents`] also skips `MikkTSpace` when the sum over positions of
+    /// (corners sharing the position)³ exceeds this (2^28). Around one vertex `MikkTSpace`
+    /// can compare each corner's subgroup (up to `k` entries) with up to `k` others, so a
+    /// position with `k` corners can cost `k³` element compares; this caps that at about
+    /// 0.1 s. A dense mesh at the vertex cap is about 14 M, and a 256-segment pole 17 M.
+    pub const TANGENT_MAX_SUBGROUP_COST: u64 = 1 << 28;
+    /// [`Self::generate_tangents`] also skips `MikkTSpace` when (corners of degenerate
+    /// triangles) × (corners of the others) exceeds this (2^28). Each corner of a triangle
+    /// with two corners at one position scans every good corner for a tangent to copy, about
+    /// 0.1 ns per pair, so the cap is about 30 ms; a 65 536-vertex mesh may still have about
+    /// 220 degenerate triangles, and a 10 k-vertex one about 1500.
+    pub const TANGENT_MAX_DEGENERATE_COST: u64 = 1 << 28;
 
     /// Builds a mesh after checking every invariant listed in the module docs.
     ///
@@ -213,14 +238,29 @@ impl MeshData {
 
     /// Generates tangents from the UVs, or `None` for a mesh without UVs.
     ///
-    /// "`MikkTSpace`-style", not a `MikkTSpace` port: each triangle's tangent (`dP/du`) and
-    /// bitangent (`-dP/dv`, see [`MeshData`]) are accumulated per vertex,
-    /// weighted by the triangle's position × UV extent (degenerate UV triangles add
-    /// nothing), then orthogonalised against the vertex normal (Gram-Schmidt); `w` is
-    /// `-1` where the accumulated bitangent opposes `cross(normal, tangent)`, else `+1`. A
-    /// vertex with no usable tangent gets a fixed unit vector perpendicular to its normal and
-    /// `w = +1`. Vertices shared across a UV seam are not split. Only `+ - * /` and `sqrt`
-    /// are used, so the result is bit-identical on every platform.
+    /// The tangents are `MikkTSpace` (A0, ADR-0022), the tangent space normal-map bakers
+    /// (Blender, xNormal, Substance) and glTF assume: the reference algorithm through
+    /// `bevy_mikktspace`, a port of the C original, with its default 180° grouping threshold
+    /// and its `corrected-vertex-welding` and `corrected-edge-sorting` features, which
+    /// replace two steps of the C that are quadratic on crafted input (ADR-0022 amendment 1).
+    /// Where the C's welding or edge sort would group corners differently, the result can
+    /// differ from the C's; the shipped samples' tangents are identical. It runs on the unit normals and on `(u, -v)`: glTF `v` runs down
+    /// the image, so negating it gives the tangent space a DCC tool computes with `v` up
+    /// before its glTF export flips `v` (see [`MeshData`]); negation keeps every UV
+    /// difference and equality exact.
+    ///
+    /// `MikkTSpace` answers per triangle corner. A vertex whose corners get different
+    /// answers (a vertex shared across a mirrored UV seam, or two fans meeting at one
+    /// index) takes its first corner's, in index order; exporters split such vertices, so a
+    /// mesh exported with its seams split gets exact `MikkTSpace` everywhere. A vertex with
+    /// no tangent space (only degenerate triangles touch it, or a zero tangent) gets a fixed
+    /// unit vector perpendicular to its normal and `w = +1`. A mesh over
+    /// [`Self::TANGENT_MAX_SHARED_CORNERS`], [`Self::TANGENT_MAX_SHARING_COST`],
+    /// [`Self::TANGENT_MAX_SUBGROUP_COST`] or [`Self::TANGENT_MAX_DEGENERATE_COST`] gets that
+    /// fallback for every vertex, without running `MikkTSpace` (untrusted input must not
+    /// stall the loader; ADR-0022). Only `+ - * /` and `sqrt` are
+    /// used (the angle weights use an `acos` series in those operations), so the result is
+    /// bit-identical on every platform.
     #[must_use]
     pub fn generate_tangents(&self) -> Option<Vec<[f32; 4]>> {
         let uvs = self.uvs.as_deref()?;
@@ -423,14 +463,6 @@ fn dot(a: V3, b: V3) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
 /// `a / |a|`, or `None` when `a` is (numerically) zero.
 fn normalize(a: V3) -> Option<V3> {
     let length_sq = dot(a, a);
@@ -456,55 +488,192 @@ fn generate_tangents(
     uvs: &[[f32; 2]],
     indices: &[u32],
 ) -> Vec<[f32; 4]> {
-    let mut tangents = vec![[0.0f32; 3]; positions.len()];
-    let mut bitangents = vec![[0.0f32; 3]; positions.len()];
-    for triangle in indices.as_chunks::<3>().0 {
-        let [a, b, c] = [
-            triangle[0] as usize,
-            triangle[1] as usize,
-            triangle[2] as usize,
-        ];
-        let edge1 = sub(positions[b], positions[a]);
-        let edge2 = sub(positions[c], positions[a]);
-        // `v` is negated: the bitangent points up the image (glTF `v` runs down).
-        let (du1, dv1) = (uvs[b][0] - uvs[a][0], uvs[a][1] - uvs[b][1]);
-        let (du2, dv2) = (uvs[c][0] - uvs[a][0], uvs[a][1] - uvs[c][1]);
-        let area = du1 * dv2 - du2 * dv1;
-        if area == 0.0 || !area.is_finite() {
-            continue;
+    let unit_normals: Vec<V3> = normals
+        .iter()
+        .map(|&normal| normalize(normal).unwrap_or([0.0, 1.0, 0.0]))
+        .collect();
+    let fallback = |normal: &V3| {
+        let t = perpendicular(*normal);
+        [t[0], t[1], t[2], 1.0]
+    };
+    if !mikktspace_is_bounded(positions, indices) {
+        return unit_normals.iter().map(fallback).collect();
+    }
+    let mut geometry = MikkGeometry {
+        positions,
+        normals: &unit_normals,
+        uvs,
+        indices,
+        tangents: vec![None; positions.len()],
+    };
+    // `GenerateTangentSpaceError` is uninhabited: generation cannot fail.
+    let _ = bevy_mikktspace::generate_tangents::<_, DeterministicOps>(&mut geometry);
+    geometry
+        .tangents
+        .iter()
+        .zip(&unit_normals)
+        .map(|(tangent, normal)| tangent.unwrap_or_else(|| fallback(normal)))
+        .collect()
+}
+
+/// Whether `MikkTSpace` stays within [`MeshData::TANGENT_MAX_SHARED_CORNERS`],
+/// [`MeshData::TANGENT_MAX_SHARING_COST`], [`MeshData::TANGENT_MAX_SUBGROUP_COST`] and
+/// [`MeshData::TANGENT_MAX_DEGENERATE_COST`].
+/// A triangle is degenerate, as `MikkTSpace` decides it, when two of its corners have equal
+/// positions. Corners are counted per **position** (bit
+/// pattern, `-0.0` as `0.0`), not per welded vertex: `MikkTSpace` is also quadratic in
+/// vertices that share a position but differ in UV or normal, or in degenerate triangles
+/// collapsed onto one point, so the position is the conservative key. O(V log V).
+fn mikktspace_is_bounded(positions: &[V3], indices: &[u32]) -> bool {
+    // `+ 0.0` turns `-0.0` into `0.0`; for finite values (a `MeshData` invariant) equal
+    // keys are exactly `MikkTSpace`'s `==`.
+    let key = |vertex: u32| positions[vertex as usize].map(|value| (value + 0.0).to_bits());
+    let (triangles, _) = indices.as_chunks::<3>();
+    let degenerate = triangles
+        .iter()
+        .filter(|&&[a, b, c]| {
+            let (a, b, c) = (key(a), key(b), key(c));
+            a == b || b == c || a == c
+        })
+        .count() as u64;
+    let good = triangles.len() as u64 - degenerate;
+    if 3 * degenerate * 3 * good > MeshData::TANGENT_MAX_DEGENERATE_COST {
+        return false;
+    }
+    let mut corners = vec![0_u32; positions.len()];
+    for &index in indices {
+        corners[index as usize] += 1;
+    }
+    let mut keyed: Vec<([u32; 3], u32)> = (0..positions.len() as u32)
+        .zip(&corners)
+        .map(|(vertex, &count)| (key(vertex), count))
+        .collect();
+    keyed.sort_unstable_by_key(|&(key, _)| key);
+    let (mut pairs, mut triples) = (0_u64, 0_u64);
+    for run in keyed.chunk_by(|a, b| a.0 == b.0) {
+        let shared: u64 = run.iter().map(|&(_, count)| u64::from(count)).sum();
+        if shared > MeshData::TANGENT_MAX_SHARED_CORNERS as u64 {
+            return false;
         }
-        // Lengyel's `sdir`/`tdir` times `|area|`: the same directions, weighted by the
-        // triangle's size rather than divided by its UV area.
-        let sign = if area < 0.0 { -1.0 } else { 1.0 };
-        let tangent = scale(sub(scale(edge1, dv2), scale(edge2, dv1)), sign);
-        let bitangent = scale(sub(scale(edge2, du1), scale(edge1, du2)), sign);
-        for vertex in [a, b, c] {
-            tangents[vertex] = add(tangents[vertex], tangent);
-            bitangents[vertex] = add(bitangents[vertex], bitangent);
+        // At most 512² and 512³ per position, and every running total stops at its cap.
+        pairs += shared * shared;
+        triples += shared * shared * shared;
+        if pairs > MeshData::TANGENT_MAX_SHARING_COST
+            || triples > MeshData::TANGENT_MAX_SUBGROUP_COST
+        {
+            return false;
         }
     }
-    tangents
-        .iter()
-        .zip(&bitangents)
-        .zip(normals)
-        .map(|((&tangent, &bitangent), &normal)| {
-            let normal = normalize(normal).unwrap_or([0.0, 1.0, 0.0]);
-            let projected = sub(tangent, scale(normal, dot(normal, tangent)));
-            // Relative test: a tangent (nearly) parallel to the normal leaves only rounding.
-            let usable = dot(projected, projected) > 1e-10 * dot(tangent, tangent);
-            if let Some(t) = normalize(projected).filter(|_| usable) {
-                let w = if dot(cross(normal, t), bitangent) < 0.0 {
-                    -1.0
-                } else {
-                    1.0
-                };
-                [t[0], t[1], t[2], w]
-            } else {
-                let t = perpendicular(normal);
-                [t[0], t[1], t[2], 1.0]
-            }
-        })
-        .collect()
+    true
+}
+
+/// A [`MeshData`]'s streams as `bevy_mikktspace` reads them (one triangle per face), and the
+/// first usable tangent written back for each vertex.
+struct MikkGeometry<'a> {
+    positions: &'a [V3],
+    /// Unit length.
+    normals: &'a [V3],
+    uvs: &'a [[f32; 2]],
+    indices: &'a [u32],
+    tangents: Vec<Option<[f32; 4]>>,
+}
+
+impl MikkGeometry<'_> {
+    fn vertex(&self, face: usize, corner: usize) -> usize {
+        self.indices[face * 3 + corner] as usize
+    }
+}
+
+impl bevy_mikktspace::Geometry<DeterministicOps> for MikkGeometry<'_> {
+    fn num_faces(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    fn num_vertices_of_face(&self, _face: usize) -> usize {
+        3
+    }
+
+    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+        self.positions[self.vertex(face, vert)]
+    }
+
+    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+        self.normals[self.vertex(face, vert)]
+    }
+
+    fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
+        // `v` negated: MikkTSpace's bitangent then points up the image (glTF `v` runs down).
+        let [u, v] = self.uvs[self.vertex(face, vert)];
+        [u, -v]
+    }
+
+    fn set_tangent(
+        &mut self,
+        tangent_space: Option<bevy_mikktspace::TangentSpace>,
+        face: usize,
+        vert: usize,
+    ) {
+        let vertex = self.vertex(face, vert);
+        if self.tangents[vertex].is_some() {
+            return;
+        }
+        let Some(space) = tangent_space else {
+            return;
+        };
+        let [x, y, z, w] = space.tangent_encoded();
+        // MikkTSpace leaves a tangent it could not orient at zero; keep looking.
+        if normalize([x, y, z]).is_some() {
+            self.tangents[vertex] = Some([x, y, z, w]);
+        }
+    }
+}
+
+/// `sqrt` and `acos` for `bevy_mikktspace` that give the same bits on every platform:
+/// `sqrt` is correctly rounded (IEEE 754), and [`acos`] uses only `+ - * /` and `sqrt`.
+/// The reference build uses the platform's `f64::acos`; both round to the same `f32`
+/// except where the platform's own last bit differs.
+struct DeterministicOps;
+
+impl bevy_mikktspace::Ops for DeterministicOps {
+    fn sqrt(x: f32) -> f32 {
+        x.sqrt()
+    }
+
+    fn acos(x: f32) -> f32 {
+        acos(f64::from(x)) as f32
+    }
+}
+
+/// `acos(x)` in radians for `x` in `-1..=1` (clamped; NaN stays NaN), to within a few
+/// `f64` ulps, from `+ - * /` and `sqrt` only. `|x| <= 0.5` uses `π/2 - asin(x)`; beyond
+/// that, `acos(x) = 2 asin(sqrt((1 - x) / 2))` (and its mirror for negative `x`) keeps the
+/// series argument at most `0.5`.
+fn acos(x: f64) -> f64 {
+    use core::f64::consts::{FRAC_PI_2, PI};
+    let x = x.clamp(-1.0, 1.0);
+    if x.abs() <= 0.5 {
+        FRAC_PI_2 - asin_series(x)
+    } else if x > 0.0 {
+        2.0 * asin_series(f64::midpoint(1.0, -x).sqrt())
+    } else {
+        PI - 2.0 * asin_series(f64::midpoint(1.0, x).sqrt())
+    }
+}
+
+/// The Maclaurin series of `asin(z)` for `|z| <= 0.5`:
+/// `sum (2n)! / (4^n (n!)^2 (2n + 1)) z^(2n + 1)`. Term `n + 1` is term `n` times
+/// `z² (2n + 1)² / ((2n + 2)(2n + 3))`, at most a quarter of it, so 30 terms leave under
+/// `1e-19`.
+fn asin_series(z: f64) -> f64 {
+    let z2 = z * z;
+    let mut term = z;
+    let mut sum = z;
+    for n in 0..30_u32 {
+        let k = f64::from(2 * n + 1);
+        term *= z2 * k * k / ((k + 1.0) * (k + 2.0));
+        sum += term;
+    }
+    sum
 }
 
 #[cfg(test)]
@@ -700,5 +869,558 @@ mod tests {
             MeshData::new(positions, normals, vec![0; MeshData::MAX_INDICES + 3]),
             Err(MeshError::TooManyIndices)
         );
+    }
+
+    /// The deterministic `acos` agrees with the platform's to `f64` rounding, and to the
+    /// `f32` bit nearly always (at most one ulp: platform libms differ in the last bit).
+    #[test]
+    fn deterministic_acos_matches_the_platform() {
+        let steps = 200_000_u32;
+        for step in 0..=steps {
+            let x = -1.0 + 2.0 * f64::from(step) / f64::from(steps);
+            let ours = acos(x);
+            assert!(
+                (ours - x.acos()).abs() < 4e-15,
+                "acos({x}) = {ours} vs {}",
+                x.acos()
+            );
+            let narrow = x as f32;
+            let ours = acos(f64::from(narrow)) as f32;
+            let platform = f64::from(narrow).acos() as f32;
+            assert!(
+                ours.to_bits().abs_diff(platform.to_bits()) <= 1,
+                "acos({narrow}): {ours} vs {platform}"
+            );
+        }
+        assert_eq!(acos(1.0), 0.0);
+        assert_eq!(acos(2.0), 0.0, "clamped");
+        assert!((acos(-1.0) - core::f64::consts::PI).abs() < 1e-15);
+        assert!(acos(f64::NAN).is_nan());
+    }
+
+    /// A smooth, closed three-triangle fan with non-affine UVs and very different triangle
+    /// sizes and corner angles: area weighting (the pre-A0 generator) and `MikkTSpace`'s
+    /// angle weighting disagree here.
+    fn fan() -> MeshData {
+        let positions = vec![
+            [0.0, 0.0, 0.3],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [-1.0, -1.0, 0.0],
+        ];
+        let normals = positions
+            .iter()
+            .map(|&[x, y, _]| normalize([x * 0.3, y * 0.3, 1.0]).expect("unit"))
+            .collect();
+        let uvs = positions
+            .iter()
+            .map(|&[x, y, _]| [0.5 + 0.3 * x + 0.02 * y * y, 0.5 - 0.25 * y + 0.05 * x * x])
+            .collect();
+        MeshData::new(positions, normals, vec![0, 1, 2, 0, 2, 3, 0, 3, 1])
+            .expect("valid")
+            .with_uvs(uvs)
+            .expect("uvs")
+    }
+
+    type D3 = [f64; 3];
+
+    fn d3(a: V3) -> D3 {
+        a.map(f64::from)
+    }
+
+    fn dsub(a: D3, b: D3) -> D3 {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+
+    fn dscale(a: D3, s: f64) -> D3 {
+        a.map(|value| value * s)
+    }
+
+    fn ddot(a: D3, b: D3) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn dunit(a: D3) -> D3 {
+        dscale(a, 1.0 / ddot(a, a).sqrt())
+    }
+
+    /// `a` projected onto the plane of the unit `n`.
+    fn dflat(a: D3, n: D3) -> D3 {
+        dsub(a, dscale(n, ddot(n, a)))
+    }
+
+    /// Per-vertex tangents written straight from Mikkelsen's definition (thesis §4.3, the
+    /// reference `GenerateTSpaces`/`EvalTspace`) in `f64`, for a mesh where every vertex has
+    /// one orientation-preserving group: each triangle's unit `dP/ds` (with `t = -v`), at
+    /// each corner projected onto the vertex's tangent plane, normalised and weighted by the
+    /// corner's angle in that plane; the sum normalised. `area_weighted` gives the pre-A0
+    /// generator instead: un-normalised `dP/ds` times `|UV area|`, projected once at the end.
+    fn reference_tangents(mesh: &MeshData, area_weighted: bool) -> Vec<D3> {
+        let (positions, normals, uvs) =
+            (mesh.positions(), mesh.normals(), mesh.uvs().expect("uvs"));
+        let mut sums = vec![[0.0f64; 3]; positions.len()];
+        for triangle in mesh.indices().as_chunks::<3>().0 {
+            let corners = triangle.map(|index| index as usize);
+            let [a, b, c] = corners;
+            let st = |vertex: usize| [f64::from(uvs[vertex][0]), -f64::from(uvs[vertex][1])];
+            let (t1, t2, t3) = (st(a), st(b), st(c));
+            let (t21, t31) = (
+                [t2[0] - t1[0], t2[1] - t1[1]],
+                [t3[0] - t1[0], t3[1] - t1[1]],
+            );
+            let d1 = dsub(d3(positions[b]), d3(positions[a]));
+            let d2 = dsub(d3(positions[c]), d3(positions[a]));
+            let area = t21[0] * t31[1] - t21[1] * t31[0];
+            assert!(
+                area > 0.0,
+                "the reference handles orientation-preserving fans only"
+            );
+            let os = dsub(dscale(d1, t31[1]), dscale(d2, t21[1]));
+            for (corner, &vertex) in corners.iter().enumerate() {
+                if area_weighted {
+                    // os / area * |area|: Lengyel's sdir weighted by the triangle's size.
+                    sums[vertex] = [0, 1, 2].map(|axis| sums[vertex][axis] + os[axis]);
+                    continue;
+                }
+                let n = dunit(d3(normals[vertex]));
+                let tangent = dunit(dflat(dunit(os), n));
+                let previous = corners[(corner + 2) % 3];
+                let next = corners[(corner + 1) % 3];
+                let here = d3(positions[vertex]);
+                let e1 = dunit(dflat(dsub(d3(positions[previous]), here), n));
+                let e2 = dunit(dflat(dsub(d3(positions[next]), here), n));
+                let angle = ddot(e1, e2).clamp(-1.0, 1.0).acos();
+                sums[vertex] = [0, 1, 2].map(|axis| sums[vertex][axis] + angle * tangent[axis]);
+            }
+        }
+        sums.iter()
+            .zip(normals)
+            .map(|(&sum, &normal)| dunit(dflat(sum, dunit(d3(normal)))))
+            .collect()
+    }
+
+    /// The A0 fix, pinned against an independent reference: the generated tangents are
+    /// Mikkelsen's angle-weighted average, not the area-weighted one the engine used before.
+    #[test]
+    fn generated_tangents_are_mikktspace() {
+        let mesh = fan();
+        let tangents = mesh.generate_tangents().expect("uvs");
+        let mikk = reference_tangents(&mesh, false);
+        let area = reference_tangents(&mesh, true);
+        let mut largest_change = 0.0f64;
+        for ((tangent, expected), old) in tangents.iter().zip(&mikk).zip(&area) {
+            assert_eq!(tangent[3], 1.0, "orientation preserving");
+            for axis in 0..3 {
+                assert!(
+                    (f64::from(tangent[axis]) - expected[axis]).abs() < 2e-6,
+                    "{tangent:?} vs MikkTSpace {expected:?}"
+                );
+                largest_change = largest_change.max((expected[axis] - old[axis]).abs());
+            }
+        }
+        // The fixture discriminates: the two weightings disagree by far more than rounding.
+        assert!(largest_change > 1e-2, "{largest_change}");
+    }
+
+    impl bevy_mikktspace::Geometry<bevy_mikktspace::StdOps> for MikkGeometry<'_> {
+        fn num_faces(&self) -> usize {
+            self.indices.len() / 3
+        }
+        fn num_vertices_of_face(&self, _face: usize) -> usize {
+            3
+        }
+        fn position(&self, face: usize, vert: usize) -> [f32; 3] {
+            self.positions[self.vertex(face, vert)]
+        }
+        fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
+            self.normals[self.vertex(face, vert)]
+        }
+        fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
+            let [u, v] = self.uvs[self.vertex(face, vert)];
+            [u, -v]
+        }
+        fn set_tangent(
+            &mut self,
+            tangent_space: Option<bevy_mikktspace::TangentSpace>,
+            face: usize,
+            vert: usize,
+        ) {
+            <Self as bevy_mikktspace::Geometry<DeterministicOps>>::set_tangent(
+                self,
+                tangent_space,
+                face,
+                vert,
+            );
+        }
+    }
+
+    /// The deterministic build agrees with the reference build (the platform's `f64::acos`,
+    /// as the C original uses; both builds have the same `corrected-*` features, so this
+    /// checks `acos` only, ADR-0022 amendment 1) on a mesh
+    /// with a smooth fan, a mirrored UV island, a UV-degenerate triangle and a
+    /// position-degenerate one.
+    #[test]
+    fn deterministic_mikktspace_matches_the_reference_build() {
+        let fan = fan();
+        let mut positions = fan.positions().to_vec();
+        let mut normals = fan.normals().to_vec();
+        let mut uvs = fan.uvs().expect("uvs").to_vec();
+        let mut indices = fan.indices().to_vec();
+        let mut push = |p: V3, n: V3, uv: [f32; 2], positions: &mut Vec<V3>| {
+            positions.push(p);
+            normals.push(n);
+            uvs.push(uv);
+            u32::try_from(positions.len() - 1).expect("small")
+        };
+        // A mirrored island (u runs -X), its own vertices.
+        let up = [0.0, 0.0, 1.0];
+        let m = [
+            push([3.0, 0.0, 0.0], up, [0.0, 1.0], &mut positions),
+            push([4.0, 0.0, 0.0], up, [-1.0, 1.0], &mut positions),
+            push([4.0, 1.0, 0.0], up, [-1.0, 0.0], &mut positions),
+        ];
+        indices.extend_from_slice(&m);
+        // Zero UV area, then two coincident corners.
+        let d = [
+            push([6.0, 0.0, 0.0], up, [0.5, 0.5], &mut positions),
+            push([7.0, 0.0, 0.0], up, [0.5, 0.5], &mut positions),
+            push([7.0, 1.0, 0.0], up, [0.5, 0.5], &mut positions),
+            push([9.0, 0.0, 0.0], up, [0.0, 0.0], &mut positions),
+            push([9.0, 0.0, 0.0], up, [0.0, 0.0], &mut positions),
+            push([9.0, 1.0, 0.0], up, [0.0, 1.0], &mut positions),
+        ];
+        indices.extend_from_slice(&d);
+        let mesh = MeshData::new(positions, normals, indices)
+            .expect("valid")
+            .with_uvs(uvs)
+            .expect("uvs");
+        let ours = mesh.generate_tangents().expect("uvs");
+        let mut reference = MikkGeometry {
+            positions: mesh.positions(),
+            normals: mesh.normals(),
+            uvs: mesh.uvs().expect("uvs"),
+            indices: mesh.indices(),
+            tangents: vec![None; mesh.vertex_count()],
+        };
+        let _ = bevy_mikktspace::generate_tangents::<_, bevy_mikktspace::StdOps>(&mut reference);
+        for (vertex, (ours, reference)) in ours.iter().zip(&reference.tangents).enumerate() {
+            match reference {
+                Some(reference) => assert!(
+                    ours.iter()
+                        .zip(reference)
+                        .all(|(a, b)| (a - b).abs() < 1e-6),
+                    "vertex {vertex}: {ours:?} vs {reference:?}"
+                ),
+                // No tangent space: the fallback, perpendicular to the (+Z) normal.
+                None => assert_eq!(ours, &[1.0, 0.0, 0.0, 1.0], "vertex {vertex}"),
+            }
+        }
+        // The mirrored island is left-handed.
+        for vertex in m {
+            assert_eq!(ours[vertex as usize][3], -1.0, "vertex {vertex}");
+        }
+    }
+
+    /// `MikkTSpace` answers per corner; a vertex index shared by two triangles that disagree
+    /// (here: mirrored UVs across the shared edge) takes its first corner's tangent space.
+    #[test]
+    fn a_shared_vertex_takes_its_first_corners_tangent_space() {
+        let mesh = MeshData::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [-1.0, 0.0, 0.0],
+            ],
+            vec![[0.0, 0.0, 1.0]; 4],
+            // Both triangles face +Z and share the edge 0-2.
+            vec![0, 1, 2, 0, 2, 3],
+        )
+        .expect("valid")
+        // u mirrors about x = 0: right-handed on the first triangle, left on the second.
+        .with_uvs(vec![[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]])
+        .expect("uvs");
+        let tangents = mesh.generate_tangents().expect("uvs");
+        assert_eq!(tangents[1], [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(tangents[3], [-1.0, 0.0, 0.0, -1.0]);
+        // The shared vertices keep the first triangle's right-handed space.
+        assert_eq!(tangents[0], [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(tangents[2], [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    /// A fan of `triangles` around one centre position. With `split`, every triangle has
+    /// its own centre vertex (same position, distinct UV), which `MikkTSpace` does not weld
+    /// but is still quadratic in.
+    fn high_valence_fan(triangles: u32, split: bool) -> MeshData {
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        for i in 0..=triangles {
+            let angle = i as f32 / triangles as f32 * 6.0;
+            positions.push([angle.cos(), angle.sin(), 0.0]);
+            uvs.push([0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()]);
+        }
+        let mut indices = Vec::new();
+        for i in 0..triangles {
+            if split || i == 0 {
+                positions.push([0.0, 0.0, 0.1]);
+                uvs.push([0.5, 0.5 + i as f32 * 1e-5]);
+            }
+            let centre = positions.len() as u32 - 1;
+            indices.extend([centre, i, i + 1]);
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid fan")
+    }
+
+    fn is_fallback(mesh: &MeshData) -> bool {
+        let fallback = perpendicular([0.0, 0.0, 1.0]);
+        mesh.generate_tangents().expect("uvs").iter().all(|t| {
+            t.map(f32::to_bits) == [fallback[0], fallback[1], fallback[2], 1.0].map(f32::to_bits)
+        })
+    }
+
+    /// Untrusted meshes cannot make `MikkTSpace` stall or overflow its stack: past the
+    /// shared-corner cap every vertex gets the fallback, quickly. (Unguarded, the
+    /// 16 Ki-triangle fan overflows a test thread's stack.)
+    #[test]
+    fn high_valence_meshes_skip_mikktspace() {
+        let at_cap = MeshData::TANGENT_MAX_SHARED_CORNERS as u32;
+        assert!(
+            !is_fallback(&high_valence_fan(at_cap, false)),
+            "at the cap: MikkTSpace"
+        );
+        for (triangles, split) in [(at_cap + 1, false), (at_cap + 1, true), (16_384, false)] {
+            let fan = high_valence_fan(triangles, split);
+            let start = std::time::Instant::now();
+            assert!(is_fallback(&fan), "{triangles} triangles, split {split}");
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(1),
+                "{triangles}: {:?}",
+                start.elapsed()
+            );
+        }
+    }
+
+    /// The shape and UVs of [`fans`].
+    #[derive(Clone, Copy, Debug)]
+    enum FanUvs {
+        /// A fan over most of a disc, with disc UVs: neighbouring triangles have similar
+        /// tangents.
+        Disc,
+        /// A sliver fan (0.01 rad) with a fixed pseudo-random UV angle per rim vertex: its
+        /// tangents are nearly antiparallel, so `MikkTSpace` splits a vertex's faces into
+        /// almost one subgroup per face and evaluates each (about one `acos` per corner
+        /// pair), its most expensive case (ADR-0022 amendment 1).
+        Sliver,
+    }
+
+    /// `count` fans of `triangles` triangles, 3 m apart, each around its own centre vertex.
+    /// Per fan, (corners per position)² sums to `t² + 4t - 2` and the cubes to
+    /// `t³ + 8t - 6`, over `t + 2` vertices.
+    fn fans(count: u32, triangles: u32, uvs: FanUvs) -> MeshData {
+        let (mut positions, mut uv, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+        let span = match uvs {
+            FanUvs::Disc => 6.0,
+            FanUvs::Sliver => 0.01,
+        };
+        for fan in 0..count {
+            let offset = fan as f32 * 3.0;
+            let base = positions.len() as u32;
+            for i in 0..=triangles {
+                let angle = i as f32 / triangles as f32 * span;
+                positions.push([offset + angle.cos(), angle.sin(), 0.0]);
+                let uv_angle = match uvs {
+                    FanUvs::Disc => angle,
+                    FanUvs::Sliver => {
+                        let hash = i.wrapping_mul(2_654_435_761) ^ fan.wrapping_mul(40_503);
+                        hash as f32 / u32::MAX as f32 * core::f32::consts::TAU
+                    }
+                };
+                uv.push([0.5 + 0.5 * uv_angle.cos(), 0.5 + 0.5 * uv_angle.sin()]);
+            }
+            positions.push([offset, 0.0, 0.1]);
+            uv.push([0.5, 0.5]);
+            let centre = positions.len() as u32 - 1;
+            for i in 0..triangles {
+                indices.extend([centre, base + i, base + i + 1]);
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uv))
+            .expect("valid fans")
+    }
+
+    fn bounded(mesh: &MeshData) -> bool {
+        mikktspace_is_bounded(mesh.positions(), mesh.indices())
+    }
+
+    /// The worst accepted case of each cap runs `MikkTSpace` within the load-time bound
+    /// ADR-0022 amendment 1 states. Timed in optimised builds only: a debug build runs the
+    /// generic `MikkTSpace` code unoptimised.
+    ///
+    /// The limit, 1.5 s, is about 6× the worst case measured on the reference machine
+    /// (about 0.25 s, two caps combined). The margin is deliberate: shared CI runners are
+    /// several times slower and noisier, and the test guards against the unbounded cases
+    /// the caps exist for (seconds to minutes, or a stack overflow), not against a few tens
+    /// of percent; the bench tracks the actual cost.
+    fn assert_within_bound(label: &str, mesh: &MeshData) {
+        let start = std::time::Instant::now();
+        let tangents = mesh.generate_tangents().expect("uvs");
+        let elapsed = start.elapsed();
+        assert_eq!(tangents.len(), mesh.vertex_count());
+        if !cfg!(debug_assertions) {
+            assert!(
+                elapsed < std::time::Duration::from_millis(1500),
+                "{label}: {elapsed:?}"
+            );
+        }
+    }
+
+    /// Many positions under the per-position cap add up: the sums of squares and cubes are
+    /// capped too, and the worst case just under each runs within the bound.
+    #[test]
+    fn sharing_costs_are_capped_and_bounded() {
+        // Squares: 964 sliver fans of 64 triangles are 964 × 4350 ≤ 2^22 < 965 × 4350. Of
+        // every fan size at the caps this is the slowest (about 0.23 s; with the degenerate cap
+        // as well, `two_caps_combined_stay_bounded`, 0.25 s; amendment 1).
+        let under = fans(964, 64, FanUvs::Sliver);
+        assert!(bounded(&under), "under the sharing cost");
+        assert_within_bound("964 sliver fans of 64", &under);
+        assert!(
+            !bounded(&fans(965, 64, FanUvs::Sliver)),
+            "over the sharing cost"
+        );
+        // Cubes: two fans of 510 are 2 × 132 655 074 ≤ 2^28 < three.
+        for uvs in [FanUvs::Disc, FanUvs::Sliver] {
+            let under = fans(2, 510, uvs);
+            assert!(bounded(&under), "under the subgroup cost, {uvs:?}");
+            assert_within_bound(&format!("2 fans of 510, {uvs:?}"), &under);
+        }
+        let over = fans(3, 510, FanUvs::Sliver);
+        assert!(!bounded(&over), "over the subgroup cost");
+        assert!(is_fallback(&over));
+    }
+
+    /// `mesh` plus `degenerate` triangles `(a, a, b)` on their own vertices, away from it.
+    fn with_degenerates(mesh: &MeshData, degenerate: u32) -> MeshData {
+        let mut positions = mesh.positions().to_vec();
+        let mut uvs = mesh.uvs().expect("uvs").to_vec();
+        let mut indices = mesh.indices().to_vec();
+        for d in 0..degenerate {
+            let at = positions.len() as u32;
+            positions.extend([[-1.0 - d as f32, -5.0, 0.0], [-1.0 - d as f32, -6.0, 0.0]]);
+            uvs.extend([[0.0, 0.0], [0.0, 1.0]]);
+            indices.extend([at, at, at + 1]);
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid mesh")
+    }
+
+    /// One mesh can sit just under two caps at once: 940 sliver fans of 64 (Σk² 4.09 M)
+    /// plus 495 degenerate triangles (1485 × 180 480 good corners ≤ 2^28 < 496). The
+    /// slowest accepted mesh found, about 0.25 s (amendment 1).
+    #[test]
+    fn two_caps_combined_stay_bounded() {
+        let fans = fans(940, 64, FanUvs::Sliver);
+        let worst = with_degenerates(&fans, 495);
+        assert!(bounded(&worst), "under every cap");
+        assert_within_bound("940 sliver fans of 64 + 495 degenerates", &worst);
+        assert!(
+            !bounded(&with_degenerates(&fans, 496)),
+            "over the degenerate cost"
+        );
+    }
+
+    /// `MikkTSpace`'s original vertex weld splits buckets on their widest axis and scans a
+    /// bucket pairwise once that axis spans adjacent floats, so a cluster spread only along
+    /// the other axes took a minute at the vertex cap (A0 review). Its
+    /// `corrected-vertex-welding` (a sorted map) is O(n log n): the same mesh is ordinary.
+    #[test]
+    fn an_adjacent_float_cluster_welds_quickly() {
+        let side = 255_u32;
+        let x0 = 1.0e6_f32;
+        let x1 = f32::from_bits(x0.to_bits() + 1);
+        let (mut positions, mut uvs, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+        for row in 0..side {
+            for column in 0..side {
+                // x alternates between adjacent floats; y and z spread far below x's ulp.
+                let x = if (row + column) % 2 == 1 { x1 } else { x0 };
+                positions.push([x, column as f32 * 1e-6, row as f32 * 1e-6]);
+                uvs.push([column as f32 / side as f32, row as f32 / side as f32]);
+            }
+        }
+        for row in 0..side - 1 {
+            for column in 0..side - 1 {
+                let at = row * side + column;
+                indices.extend([at, at + 1, at + side, at + 1, at + side + 1, at + side]);
+            }
+        }
+        // A far outlier puts the whole grid in one of the weld's top-level buckets.
+        let base = positions.len() as u32;
+        positions.extend([[x0, 1000.0, 0.0], [x0, 1001.0, 0.0], [x0, 1000.0, 1.0]]);
+        uvs.extend([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        indices.extend([base, base + 1, base + 2]);
+        let normals = vec![[1.0, 0.0, 0.0]; positions.len()];
+        let cluster = MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid cluster");
+        assert!(bounded(&cluster));
+        assert_within_bound("adjacent-float cluster", &cluster);
+    }
+
+    /// A `side × side` grid (good triangles) plus `degenerate` triangles `(a, a, b)` on
+    /// their own vertices, which match no good corner, so `MikkTSpace`'s degenerate pass
+    /// scans every good corner for each of their corners.
+    fn grid_with_degenerates(side: u32, degenerate: u32) -> MeshData {
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        for row in 0..side {
+            for column in 0..side {
+                positions.push([column as f32, row as f32, 0.0]);
+                uvs.push([column as f32 / side as f32, row as f32 / side as f32]);
+            }
+        }
+        for row in 0..side - 1 {
+            for column in 0..side - 1 {
+                let at = row * side + column;
+                indices.extend([at, at + 1, at + side, at + 1, at + side + 1, at + side]);
+            }
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        let grid = MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid grid");
+        with_degenerates(&grid, degenerate)
+    }
+
+    /// Degenerate triangles spread over many positions trip neither sharing cap, but their
+    /// pass is quadratic too: past the degenerate cost every vertex gets the fallback, fast.
+    #[test]
+    fn many_degenerate_triangles_skip_mikktspace() {
+        // A few degenerates on a normal mesh: MikkTSpace runs.
+        assert!(!is_fallback(&grid_with_degenerates(20, 3)));
+        // 50 × 50 grid: 14 406 good corners; 2^28 / 14 406 / 3 ≈ 6211 degenerate triangles.
+        assert!(bounded(&grid_with_degenerates(50, 6211)));
+        let over = grid_with_degenerates(50, 6212);
+        assert!(!bounded(&over));
+        let start = std::time::Instant::now();
+        assert!(is_fallback(&over));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        // At the vertex cap: a 255 × 255 grid has 387 096 good corners, so 230 degenerate
+        // triangles (690 corners) are just under 2^28 and 232 are over.
+        let worst = grid_with_degenerates(255, 230);
+        assert!(bounded(&worst));
+        assert_within_bound("255 grid + 230 degenerates", &worst);
+        assert!(!bounded(&grid_with_degenerates(255, 232)));
     }
 }
