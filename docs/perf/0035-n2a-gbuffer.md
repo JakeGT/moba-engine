@@ -83,15 +83,26 @@ validation were clean.
     back ends.
 
   The exact hashes in `tests/golden/render-tiered-hashes.txt` are keyed to CI's lavapipe
-  (Mesa 26.0.8, LLVM 21.1.8), so they were regenerated from CI rather than locally:
-  - the source is the `render-golden` (TAAU) and `tiered-temporal` (FSR 3.1) artifacts of
-    this PR's first CI run (render golden run 41679033229);
-  - each value is a `sha256sum` of the `-1.ppm` capture, and every capture was byte-identical
-    to its `-2.ppm` on CI;
-  - the device line is unchanged, and `WRITE_HASHES` was not run locally.
+  (Mesa 26.0.8, LLVM 21.1.8) and the runner's CPU class
+  ([ADR-0021 amendment 6](../adr/0021-temporal-upscaling-overlay.md#amendment-6-2026-11-14-the-tiered-exact-hashes-per-cpu-class)).
+  Both sections were filled from CI per amendment 6 item 5, after the branch merged main
+  (`9325ea3`), never from a local run:
+  - **Both classes:** the `tiered-hash-sections` artifact of the dispatch-only sampler, render
+    golden run 43657910589 at `ebd43a7`. Its eight legs agreed within each class, and every
+    capture of both back ends was present (none `# FAILED`).
+  - **Cross-check:** the PR's own `tiered-temporal` run on `ebd43a7` (render golden run
+    43657881765, an AMD EPYC 9V74) wrote the same AMD FSR 3.1 section. The `sha256sum` of its
+    downloaded `fsr3-*-1.ppm` captures gives the same values.
+  - **No local hashes:** `WRITE_HASHES` was not run locally.
 
-  All eight hashes changed (reversed-Z). On CI the 64×36 fingerprints passed unchanged, and so
-  did every other renderer-gate and tiered-temporal step, `gbuffer-smoke` included.
+  All eight hashes of both classes changed (reversed-Z), and the 64×36 fingerprints pass
+  unchanged. Before amendment 6, this PR's runs flipped between two values per capture. The
+  flip is the CPU split and nothing else:
+  - The Intel section is exactly the set first committed from run 41679033229 (TAAU low
+    `64e7f21c…`, FSR 3.1 low `7028ce84…`).
+  - The AMD section is exactly what `tiered-temporal` printed when it failed on `504013a`
+    (FSR 3.1 low `90364321…`; TAAU low `02f3c849…`).
+  - Every run was byte-identical to its own second run.
 - **Probes on lavapipe**, all passing:
   - `motion-probe.sh`: every class is within 0.0044 render px, against a bound of 1/64.
   - `ghost-probe.sh` with TAAU and FSR 3.1.
