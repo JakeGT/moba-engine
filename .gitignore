@@ -15,3 +15,7 @@ agents.local.md
 /match.mbr
 /match.jsonl
 /crates/tools/font-bake/target
+
+# Python bytecode (scripts/blender run inside Blender)
+__pycache__/
+*.pyc

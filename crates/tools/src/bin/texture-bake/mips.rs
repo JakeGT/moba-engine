@@ -4,8 +4,8 @@
 //!   re-encode), so dark/bright detail does not shift as it shrinks. Alpha is linear.
 //! - **Normal** maps keep tangent-space X/Y in R/G: mips average the reconstructed unit
 //!   vectors and renormalise them.
-//! - **Data** (metallic/roughness, two channels) and **mask** (one channel) are linear and
-//!   averaged as stored.
+//! - **Data** (metallic/roughness, two channels), **weights** (four linear channels, such as a
+//!   terrain splat) and **mask** (one channel) are linear and averaged as stored.
 
 use moba_assets::TextureFormat;
 
@@ -15,6 +15,8 @@ pub(crate) enum Kind {
     Color,
     Normal,
     Data,
+    /// Four linear channels (a terrain splat's layer weights, ADR-0014).
+    Weights,
     Mask,
 }
 
@@ -24,6 +26,7 @@ impl Kind {
             "color" => Some(Self::Color),
             "normal" => Some(Self::Normal),
             "data" => Some(Self::Data),
+            "weights" => Some(Self::Weights),
             "mask" => Some(Self::Mask),
             _ => None,
         }
@@ -31,7 +34,7 @@ impl Kind {
 
     pub(crate) const fn channels(self) -> usize {
         match self {
-            Self::Color => 4,
+            Self::Color | Self::Weights => 4,
             Self::Normal | Self::Data => 2,
             Self::Mask => 1,
         }
@@ -42,6 +45,7 @@ impl Kind {
         match self {
             Self::Color => TextureFormat::Bc7Srgb,
             Self::Normal | Self::Data => TextureFormat::Bc5Unorm,
+            Self::Weights => TextureFormat::Bc7Unorm,
             Self::Mask => TextureFormat::Bc4Unorm,
         }
     }
@@ -133,7 +137,7 @@ pub(crate) fn downsample(texels: &[u8], width: u32, height: u32, kind: Kind) -> 
                     out.push(((nx * 0.5 + 0.5) * 255.0).round() as u8);
                     out.push(((ny * 0.5 + 0.5) * 255.0).round() as u8);
                 }
-                Kind::Data | Kind::Mask => {
+                Kind::Data | Kind::Weights | Kind::Mask => {
                     for channel in 0..channels {
                         let sum: u32 = taps.iter().map(|tap| u32::from(tap[channel])).sum();
                         out.push(((sum + 2) / 4) as u8);
@@ -174,6 +178,18 @@ mod tests {
         let texels = [204, 128, 51, 128, 204, 128, 51, 128];
         let mip = downsample(&texels, 2, 2, Kind::Normal);
         assert_eq!(mip, [128, 128]);
+    }
+
+    #[test]
+    fn weight_mips_average_all_four_channels_linearly() {
+        // A splat's weights are linear: 0 and 255 average to 128 in every channel, alpha too.
+        let texels = [255, 0, 0, 255, 0, 255, 0, 0, 255, 0, 0, 255, 0, 255, 0, 0];
+        let mip = downsample(&texels, 2, 2, Kind::Weights);
+        assert_eq!(mip, [128, 128, 0, 128]);
+        assert_eq!(Kind::from_name("weights"), Some(Kind::Weights));
+        assert!(Kind::Weights.allows(TextureFormat::Bc7Unorm));
+        assert!(Kind::Weights.allows(TextureFormat::Rgba8Unorm));
+        assert!(!Kind::Weights.allows(TextureFormat::Bc7Srgb));
     }
 
     #[test]

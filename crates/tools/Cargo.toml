@@ -27,10 +27,16 @@ moba-render = { workspace = true, features = ["fsr3"] }
 moba-assets = { workspace = true, features = ["glb", "bc-decode"] }
 bcdec_rs.workspace = true
 png.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 # The mesh LOD baker's meshoptimizer (C++) is optional, so the released tools
 # (content-check, replay, ...) do not compile it (R8).
 meshopt = { workspace = true, optional = true }
+
+[dev-dependencies]
+# review-sheet's test that its camera constants are `Camera::orbit`'s (glam is moba-render's).
+glam.workspace = true
 
 [features]
 default = []
