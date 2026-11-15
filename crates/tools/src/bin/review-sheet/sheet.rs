@@ -78,8 +78,53 @@ fn block_height(block: &Block) -> u32 {
     }
 }
 
-/// Stacks `blocks` into one sheet `SHEET_WIDTH` wide.
+/// Width between the margins.
+const ROOM: u32 = SHEET_WIDTH - 2 * MARGIN;
+
+/// `blocks` with every row wrapped so no image runs past the right margin; an image wider than
+/// the sheet is scaled down to fit and its caption says so (nothing is clipped silently).
+fn layout(blocks: &[Block]) -> Vec<Block> {
+    let mut out = Vec::new();
+    for block in blocks {
+        match block {
+            Block::Text(scale, lines) => out.push(Block::Text(*scale, lines.clone())),
+            Block::Row(items) => {
+                let mut row: Vec<(Canvas, String)> = Vec::new();
+                let mut used = 0u32;
+                for (image, caption) in items {
+                    let (image, caption) = if image.width > ROOM {
+                        let height = (u64::from(image.height) * u64::from(ROOM)
+                            / u64::from(image.width))
+                        .max(1) as u32;
+                        (
+                            image.resample(ROOM, height),
+                            format!("{caption} (scaled down to fit the sheet)"),
+                        )
+                    } else {
+                        (image.clone(), caption.clone())
+                    };
+                    if !row.is_empty() && used + MARGIN + image.width > ROOM {
+                        out.push(Block::Row(std::mem::take(&mut row)));
+                    }
+                    used = if row.is_empty() {
+                        image.width
+                    } else {
+                        used + MARGIN + image.width
+                    };
+                    row.push((image, caption));
+                }
+                if !row.is_empty() {
+                    out.push(Block::Row(row));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Stacks `blocks` into one sheet `SHEET_WIDTH` wide, wrapping rows that would not fit.
 pub(crate) fn compose(blocks: &[Block]) -> Canvas {
+    let blocks = &layout(blocks);
     let height = MARGIN + blocks.iter().map(block_height).sum::<u32>();
     let mut canvas = Canvas::new(SHEET_WIDTH, height, BACKGROUND);
     let mut y = i64::from(MARGIN);
@@ -161,6 +206,12 @@ fn around(bbox: [i64; 4], min: i64) -> [i64; 4] {
     [cx - side / 2, cy - side / 2, side, side]
 }
 
+/// The enlargement for a crop of `region` (x, y, side, side): up to 4×, and no wider than the
+/// sheet (a tower's 3× region at 46 m is several hundred pixels).
+fn crop_factor(region: [i64; 4]) -> u32 {
+    (ROOM / (region[2].max(1) as u32)).clamp(1, 4)
+}
+
 /// Writes the five sheets into `out` and returns their file names.
 #[allow(clippy::too_many_lines)] // Five sheets, one after another.
 pub(crate) fn write_sheets(
@@ -184,9 +235,10 @@ pub(crate) fn write_sheets(
     let mut crops = Vec::new();
     for model in &frames.gameplay_1440p.models {
         let region = around(model.bbox, 96);
+        let factor = crop_factor(region);
         crops.push((
-            f1440.crop(region).enlarge(4),
-            format!("{} at 1440p (x4)", model.name),
+            f1440.crop(region).enlarge(factor),
+            format!("{} at 1440p (x{factor})", model.name),
         ));
         let region_4k = [
             region[0] * 3 / 2,
@@ -195,7 +247,7 @@ pub(crate) fn write_sheets(
             region[3] * 3 / 2,
         ];
         let crop_4k = f2160.crop(region_4k);
-        let enlarged = crop_4k.resample(region[2] as u32 * 4, region[3] as u32 * 4);
+        let enlarged = crop_4k.resample(region[2] as u32 * factor, region[3] as u32 * factor);
         crops.push((enlarged, format!("{} at 4K (same area)", model.name)));
     }
     let mut blocks = vec![
@@ -267,13 +319,15 @@ pub(crate) fn write_sheets(
             .iter()
             .find(|model| model.name == model_box.name);
         let label = model.map_or_else(String::new, |model| {
-            let height =
-                moba_assets::load_glb_file_with(&model.glb, moba_assets::GlbTangents::FileOnly)
-                    .map(|mesh| {
-                        let (low, high) = mesh.bounds();
-                        format!("{:.2} m", high[1] - low[1])
-                    })
-                    .unwrap_or_default();
+            let height = moba_assets::load_glb_file_with(
+                &dir.join(&model.glb),
+                moba_assets::GlbTangents::FileOnly,
+            )
+            .map(|mesh| {
+                let (low, high) = mesh.bounds();
+                format!("{:.2} m", high[1] - low[1])
+            })
+            .unwrap_or_default();
             format!("{} {height} {}", model.name, model.size_class)
         });
         // Neighbours' labels alternate between two heights so long names never overlap.
@@ -387,5 +441,43 @@ mod tests {
         ]);
         assert_eq!(sheet.width, SHEET_WIDTH);
         assert_eq!(sheet.height, MARGIN + (22 + MARGIN) + (30 + 22 + MARGIN));
+    }
+
+    #[test]
+    fn rows_wrap_and_oversized_images_are_scaled_not_clipped() {
+        let item = |width: u32| (Canvas::new(width, 40, [9, 9, 9]), String::from("x"));
+        // Three 1200-wide crops: two fit in 2560, the third wraps.
+        let laid = layout(&[Block::Row(vec![item(1200), item(1200), item(1200)])]);
+        let widths: Vec<Vec<u32>> = laid
+            .iter()
+            .map(|block| match block {
+                Block::Row(items) => items.iter().map(|(canvas, _)| canvas.width).collect(),
+                Block::Text(..) => Vec::new(),
+            })
+            .collect();
+        assert_eq!(widths, [vec![1200, 1200], vec![1200]]);
+        // A 4000-wide image is scaled to the sheet, keeping its aspect.
+        let laid = layout(&[Block::Row(vec![item(4000)])]);
+        let Block::Row(items) = &laid[0] else {
+            panic!("a row")
+        };
+        assert_eq!(
+            (items[0].0.width, items[0].0.height),
+            (ROOM, 40 * ROOM / 4000)
+        );
+        assert!(items[0].1.contains("scaled down"));
+    }
+
+    #[test]
+    fn crops_of_towers_and_scarabs_fit_the_sheet() {
+        // A 15 m tower at 46 m is ~330 px tall at 1440p: its 3x region is ~990 px, shown x2.
+        let tower = around([1000, 300, 1110, 630], 96);
+        assert_eq!(crop_factor(tower), 2);
+        assert!(tower[2] as u32 * crop_factor(tower) <= ROOM);
+        // A 0.6 m scarab is ~14 px: the 96 px minimum region, shown x4.
+        let scarab = around([1200, 700, 1214, 712], 96);
+        assert_eq!((scarab[2], crop_factor(scarab)), (96, 4));
+        // Larger than the sheet: x1, and the layout scales it down.
+        assert_eq!(crop_factor([0, 0, 3000, 3000]), 1);
     }
 }

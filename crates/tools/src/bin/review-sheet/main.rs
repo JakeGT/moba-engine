@@ -34,9 +34,12 @@ fn usage() -> ExitCode {
 }
 
 fn read_meta(path: &Path) -> Result<meta::Meta, String> {
-    let size = std::fs::metadata(path)
-        .map_err(|error| format!("{}: {error}", path.display()))?
-        .len();
+    let metadata =
+        std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{}: not a regular file", path.display()));
+    }
+    let size = metadata.len();
     if size > MAX_META_BYTES {
         return Err(format!(
             "{}: {size} B is over {MAX_META_BYTES} B",
@@ -195,7 +198,7 @@ mod tests {
             "sun": {"dir": [-0.885, 0.532, 0.465], "colour": [1.0, 0.80, 0.62], "intensity": 1.5,
                     "elevation_deg": meta::sun_elevation_deg()},
             "sky": {"ibl": 0.35, "zenith": [0.16, 0.22, 0.36], "horizon": [0.95, 0.62, 0.38],
-                    "ground": [0.18, 0.11, 0.07]},
+                    "ground": [0.18, 0.11, 0.07], "sun_color": [2.6, 1.55, 0.85], "sun_glow": 6.0},
             "ground_hex": "#6B6560", "lane_hex": "#906B58", "l_ref": meta::l_ref(), "post_m": 1.8,
             "view_transform": "AgX", "exposure_ev": 0.1, "ground_l_target": 0.5,
             "ground_l_calibrated": 0.4996, "id_colours": {}, "post_colour": [1, 1, 1],
@@ -224,6 +227,30 @@ mod tests {
         let mut far = sample_meta();
         far.frames.zoom[0].distance_m = 10.0;
         assert!(meta::check_constants(&far).is_err());
+        // A sky without the glow lobe, or with another one, is not Golden Crossing.
+        let mut dull = sample_meta();
+        dull.sky.sun_glow = None;
+        assert!(meta::check_constants(&dull).is_err());
+        let mut tight = sample_meta();
+        tight.sky.sun_glow = Some(8.0);
+        assert!(meta::check_constants(&tight).is_err());
+        let mut ember = sample_meta();
+        ember.sky.sun_color = Some([2.4, 0.9, 0.3]);
+        assert!(meta::check_constants(&ember).is_err());
+    }
+
+    #[test]
+    fn absurd_bboxes_are_refused() {
+        let mut inside_out = sample_meta();
+        inside_out.frames.gameplay_1440p.post_bbox = [10, 10, 5, 20];
+        assert!(meta::check_constants(&inside_out).is_err());
+        let mut far = sample_meta();
+        far.frames.zoom[0].post_bbox = [0, 0, 1, i64::MAX];
+        assert!(meta::check_constants(&far).is_err());
+        // Off the frame by less than a frame is a tall model at 8 m, not an error.
+        let mut tall = sample_meta();
+        tall.frames.zoom[0].post_bbox = [100, -300, 400, 1500];
+        assert!(meta::check_constants(&tall).is_ok());
     }
 
     #[test]

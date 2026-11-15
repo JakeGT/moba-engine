@@ -55,7 +55,28 @@ fn main() -> ExitCode {
 }
 
 /// Decodes a PNG to tightly packed RGBA8.
-fn read_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
+/// A decoded PNG as RGBA8, and whether the file had an alpha channel (or `tRNS`).
+struct Png {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    alpha: bool,
+}
+
+/// Below this level-0 PSNR a `weights` bake warns: hard splat junctions band in BC7.
+const WEIGHTS_PSNR_WARN_DB: f64 = 35.0;
+
+/// The warning for a `weights` bake at `psnr` dB, if it is low enough to show.
+fn weights_warning(psnr: f64) -> Option<String> {
+    (psnr < WEIGHTS_PSNR_WARN_DB).then(|| {
+        format!(
+            "warning: weights level 0 is {psnr:.2} dB (< {WEIGHTS_PSNR_WARN_DB} dB): hard splat \
+             junctions band in BC7; bake with --format rgba8 to keep them exact"
+        )
+    })
+}
+
+fn read_png(path: &Path) -> Result<Png, String> {
     let metadata =
         std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if metadata.len() > MAX_PNG_BYTES {
@@ -86,6 +107,10 @@ fn read_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
         .next_frame(&mut buffer)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     buffer.truncate(frame.buffer_size());
+    let alpha = matches!(
+        frame.color_type,
+        png::ColorType::Rgba | png::ColorType::GrayscaleAlpha
+    );
     let rgba = match frame.color_type {
         png::ColorType::Rgba => buffer,
         png::ColorType::Rgb => buffer
@@ -103,7 +128,12 @@ fn read_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
         png::ColorType::Grayscale => buffer.iter().flat_map(|&v| [v, v, v, 255]).collect(),
         png::ColorType::Indexed => return Err(format!("{}: unexpanded palette", path.display())),
     };
-    Ok((width, height, rgba))
+    Ok(Png {
+        width,
+        height,
+        rgba,
+        alpha,
+    })
 }
 
 fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
@@ -209,7 +239,18 @@ fn bake(args: &[String]) -> Result<(), String> {
             kind.default_format().uncompressed()
         ));
     }
-    let (width, height, rgba) = read_png(Path::new(input))?;
+    let Png {
+        width,
+        height,
+        rgba,
+        alpha,
+    } = read_png(Path::new(input))?;
+    if kind == Kind::Weights && !alpha {
+        return Err(format!(
+            "{input}: --kind weights needs four channels and the PNG has no alpha (the fourth \
+             weight would read 1.0 everywhere); save it as RGBA"
+        ));
+    }
     let texture = bake_texture(&rgba, width, height, kind, format, mips)?;
     let bytes = moba_assets::write_ktx2(&texture, WRITER);
     // Round-trip through the runtime loader before writing, so a shipped file always loads.
@@ -219,12 +260,16 @@ fn bake(args: &[String]) -> Result<(), String> {
         return Err(String::from("self-check: reloaded texture differs"));
     }
     std::fs::write(output, &bytes).map_err(|error| format!("{output}: {error}"))?;
-    let quality = if format.is_block_compressed() {
-        level0_psnr(&texture, &mips::extract(&rgba, kind))
-            .map_or_else(String::new, |psnr| format!(" psnr={psnr:.2}dB"))
-    } else {
-        String::new()
-    };
+    let psnr = format
+        .is_block_compressed()
+        .then(|| level0_psnr(&texture, &mips::extract(&rgba, kind)))
+        .flatten();
+    let quality = psnr.map_or_else(String::new, |psnr| format!(" psnr={psnr:.2}dB"));
+    if kind == Kind::Weights
+        && let Some(warning) = psnr.and_then(weights_warning)
+    {
+        eprintln!("texture-bake: {warning}");
+    }
     println!(
         "{output}: {format} {width}x{height} levels={} bytes={}{quality}",
         texture.level_count(),
@@ -317,6 +362,97 @@ fn info(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 64² splat. `hard`: four layers, one at 255 per texel, borders wavy (painted
+    /// junctions, where BC7 mode 6's single RGBA line cannot follow three or four weights);
+    /// else two layers ramping across the map (a single line, which mode 6 holds well).
+    fn splat(hard: bool) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(64 * 64 * 4);
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let mut weights = [0u8; 4];
+                if hard {
+                    let position =
+                        (f64::from(x) + (f64::from(y) * 0.4).sin() * 5.0).clamp(0.0, 63.0);
+                    weights[((position / 16.0) as usize).min(3)] = 255;
+                } else {
+                    let t = (x * 4).min(255) as u8;
+                    weights[0] = 255 - t;
+                    weights[1] = t;
+                }
+                rgba.extend_from_slice(&weights);
+            }
+        }
+        rgba
+    }
+
+    #[test]
+    fn splat_weights_round_trip_through_bc7_and_rgba8() {
+        for hard in [true, false] {
+            let source = splat(hard);
+            // rgba8 keeps every weight exactly.
+            let exact = bake_texture(
+                &source,
+                64,
+                64,
+                Kind::Weights,
+                TextureFormat::Rgba8Unorm,
+                true,
+            )
+            .expect("rgba8");
+            let decoded = exact.decode_to_uncompressed().expect("decode");
+            assert_eq!(decoded.level(0).expect("level 0").2, &source[..]);
+            let bc7 = bake_texture(
+                &source,
+                64,
+                64,
+                Kind::Weights,
+                TextureFormat::Bc7Unorm,
+                true,
+            )
+            .expect("bc7");
+            let psnr = level0_psnr(&bc7, &mips::extract(&source, Kind::Weights)).expect("decodes");
+            // Hard junctions band in BC7 and the bake warns (pointing at rgba8); a smooth
+            // two-layer blend keeps its quality and does not.
+            assert_eq!(
+                weights_warning(psnr).is_some(),
+                hard,
+                "hard {hard}: {psnr:.2} dB"
+            );
+        }
+        assert!(weights_warning(34.9).is_some_and(|text| text.contains("--format rgba8")));
+        assert!(weights_warning(35.0).is_none());
+    }
+
+    #[test]
+    fn weights_without_alpha_are_refused() {
+        let dir = std::env::temp_dir().join(format!("moba-bake-weights-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let input = dir.join("splat.png");
+        let file = std::fs::File::create(&input).expect("create");
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 4, 4);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .expect("header")
+            .write_image_data(&[128; 48])
+            .expect("data");
+        let output = dir.join("splat.ktx2");
+        let args: Vec<String> = [
+            input.to_str().expect("utf-8"),
+            output.to_str().expect("utf-8"),
+            "--kind",
+            "weights",
+        ]
+        .map(String::from)
+        .to_vec();
+        let error = bake(&args).expect_err("no alpha");
+        assert!(error.contains("no alpha"), "{error}");
+        assert!(!output.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sample_set_bakes_to_loadable_ktx2_at_good_quality() {

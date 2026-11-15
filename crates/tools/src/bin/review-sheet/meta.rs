@@ -26,6 +26,14 @@ pub(crate) const SUN_INTENSITY: f64 = 1.5;
 pub(crate) const IBL: f64 = 0.35;
 /// Golden Crossing analytic sky: zenith, horizon, ground.
 pub(crate) const SKY: [[f64; 3]; 3] = [[0.16, 0.22, 0.36], [0.95, 0.62, 0.38], [0.18, 0.11, 0.07]];
+/// Golden Crossing's environment-bake sun glow: the lobe's linear colour (`sun_color` of the
+/// env bake, not the `[lighting]` sun) and exponent (lighting-mood.md option A; env-bake's
+/// `sky.rs` adds `sun_color × max(dot(d, sun), 0)^sun_glow × smoothstep(-0.12, 0.04, y)`).
+pub(crate) const SKY_SUN_COLOR: [f64; 3] = [2.6, 1.55, 0.85];
+/// The glow lobe's exponent.
+pub(crate) const SKY_SUN_GLOW: f64 = 6.0;
+/// Largest frame side a bbox may name, in pixels (the 1080p4x silhouettes are 7680 wide).
+const MAX_FRAME_SIDE: i64 = 8192;
 /// The lane grit that defines `L_ref` (palette-and-value §6, material-vocabulary §1.1).
 pub(crate) const LANE_HEX: &str = "#906B58";
 /// The review ground: ash (palette-and-value §6).
@@ -83,6 +91,12 @@ pub(crate) struct SkyMeta {
     pub(crate) zenith: [f64; 3],
     pub(crate) horizon: [f64; 3],
     pub(crate) ground: [f64; 3],
+    /// The glow lobe's colour (absent in renders made before the lobe: refused).
+    #[serde(default)]
+    pub(crate) sun_color: Option<[f64; 3]>,
+    /// The glow lobe's exponent.
+    #[serde(default)]
+    pub(crate) sun_glow: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,6 +181,19 @@ pub(crate) struct Frames {
     pub(crate) silhouettes: Vec<Silhouettes>,
 }
 
+impl Meta {
+    /// Every single frame with a bbox list, and its key.
+    pub(crate) fn frame_list(&self) -> Vec<(&Frame, &'static str)> {
+        let mut frames = vec![
+            (&self.frames.gameplay_1440p, "46m_1440p"),
+            (&self.frames.gameplay_2160p, "46m_2160p"),
+            (&self.frames.lineup_1440p, "lineup_1440p"),
+        ];
+        frames.extend(self.frames.zoom.iter().map(|frame| (frame, "zoom")));
+        frames
+    }
+}
+
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9
 }
@@ -246,6 +273,16 @@ pub(crate) fn check_constants(meta: &Meta) -> Result<(), Vec<String>> {
         "sky is not Golden Crossing",
     );
     need(
+        meta.sky
+            .sun_color
+            .is_some_and(|colour| close3(colour, SKY_SUN_COLOR))
+            && meta
+                .sky
+                .sun_glow
+                .is_some_and(|glow| close(glow, SKY_SUN_GLOW)),
+        "sky has no Golden Crossing sun glow (sun_color 2.6, 1.55, 0.85; sun_glow 6)",
+    );
+    need(
         meta.lane_hex.eq_ignore_ascii_case(LANE_HEX) && (meta.l_ref - l_ref()).abs() < 1e-5,
         "L_ref is not the lane grit in Golden Crossing",
     );
@@ -281,6 +318,25 @@ pub(crate) fn check_constants(meta: &Meta) -> Result<(), Vec<String>> {
             ) == (3840, 2160),
         "46 m frames are not 2560x1440 and 3840x2160",
     );
+    for (frame, what) in meta.frame_list() {
+        // A projected bbox may run off the frame (a tall model at 8 m), but not by more than a
+        // frame, and never inside out.
+        let (w, h) = (i64::from(frame.width), i64::from(frame.height));
+        let sane = |bbox: [i64; 4]| {
+            let [x0, y0, x1, y1] = bbox;
+            x0 < x1 && y0 < y1 && -w <= x0 && x1 <= 2 * w && -h <= y0 && y1 <= 2 * h
+        };
+        need(
+            (1..=MAX_FRAME_SIDE).contains(&w)
+                && (1..=MAX_FRAME_SIDE).contains(&h)
+                && frame.models.iter().all(|model| sane(model.bbox))
+                && sane(frame.post_bbox),
+            &format!(
+                "{what} ({}): a bbox or the frame size is out of range",
+                frame.file
+            ),
+        );
+    }
     if errors.is_empty() {
         Ok(())
     } else {

@@ -344,7 +344,7 @@ pub(crate) fn run(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String> {
 }
 
 /// The rules the sheets leave to a person, or that are not built.
-const HUMAN_OR_NOT_BUILT: [(&str, &str); 7] = [
+const HUMAN_OR_NOT_BUILT: [(&str, &str); 10] = [
     (
         "SIL-4",
         "role tell in the top third (human, on the silhouette sheet)",
@@ -363,6 +363,18 @@ const HUMAN_OR_NOT_BUILT: [(&str, &str); 7] = [
     (
         "PBR-WEAR-1r",
         "dust on the lower body (rendered half not built)",
+    ),
+    (
+        "PBR-VOID-1r",
+        ">= 15 % of each Void hero's projected area in pewter, silver or bone (not built)",
+    ),
+    (
+        "SIL-2 (parts)",
+        "no capes, halos or orbiting parts on minions (human, on the turntable sheet)",
+    ),
+    (
+        "VFX-9",
+        "ability type coded by shape and motion, not colour (no VFX in these renders)",
     ),
 ];
 
@@ -390,25 +402,13 @@ pub(crate) fn frame_checks(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String
     let l_ref = meta.l_ref;
     let emissive_px = |index: usize| f64::from(imaging::luminance(emit.rgb(index))) > 0.25 * l_ref;
 
-    // VAL-2..4 on this review frame (the bible runs them on captures; see the amendment).
-    let mut ground_l: Vec<f32> = (0..beauty.len())
-        .filter(|&index| ground.bits[index])
-        .map(|index| display_l(&beauty, index))
-        .collect();
-    let mean = imaging::mean(&ground_l);
-    let p5 = imaging::percentile(&mut ground_l, 5.0).unwrap_or(0.0);
-    let p95 = imaging::percentile(&mut ground_l, 95.0).unwrap_or(0.0);
-    push(
-        &mut checks,
-        "VAL-2",
-        Some((0.30..=0.58).contains(&mean) && p95 - p5 <= 0.30),
-        format!("ground mean L {mean:.3}, p5-p95 {:.3}", p95 - p5),
-        "mean OKLab L 0.30-0.58, p5-p95 <= 0.30 (exposure is set to 0.50, so the spread is the test)",
-    );
     // Per model: contrast and rendered emission.
     let mut all_emissive = 0usize;
-    // Each model and its 3x ring: where VAL-3 and VAL-4 look (the bare ground is VAL-2's).
+    // Each model with its 3x box (VAL-4 looks here), and the ground inside those boxes, cast
+    // shadows included (VAL-3 looks here). The ground outside every box is the bare ground
+    // VAL-2 reads.
     let mut near = vec![false; beauty.len()];
+    let mut ring_ground = vec![false; beauty.len()];
     for model in &meta.models {
         let colour = *meta
             .id_colours
@@ -435,36 +435,49 @@ pub(crate) fn frame_checks(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String
                 .collect::<Vec<_>>(),
         );
         let (w, h) = (x1 - x0, y1 - y0);
+        let mut ring: Vec<f32> = Vec::new();
         for y in (y0 - h).max(0)..(y1 + h).min(1440) {
             for x in (x0 - w).max(0)..(x1 + w).min(2560) {
-                near[(y * 2560 + x) as usize] = true;
+                let index = (y * 2560 + x) as usize;
+                near[index] = true;
+                if ground.bits[index] {
+                    ring_ground[index] = true;
+                    if !(x >= x0 && x < x1 && y >= y0 && y < y1) {
+                        ring.push(display_l(&beauty, index));
+                    }
+                }
             }
         }
-        let ring: Vec<f32> = (y0 - h..y1 + h)
-            .flat_map(|y| (x0 - w..x1 + w).map(move |x| (x, y)))
-            .filter(|&(x, y)| !(x >= x0 && x < x1 && y >= y0 && y < y1) && ground.at(x, y))
-            .map(|(x, y)| display_l(&beauty, (y * 2560 + x) as usize))
-            .collect();
-        let delta = (model_l - imaging::mean(&ring)).abs();
         let (rule, need) = match model.role.as_str() {
             "hero" => ("CON-1", Some(0.10)),
             "minion" => ("CON-4", Some(0.08)),
             _ => ("CON", None),
         };
-        push(
-            &mut checks,
-            &format!("{rule} ({})", model.name),
-            need.map(|limit| delta >= limit),
-            format!(
-                "|dL| {delta:.3} (model {model_l:.3}, ring {:.3})",
-                imaging::mean(&ring)
-            ),
-            match need {
-                Some(_) if rule == "CON-1" => "hero vs ring 3x its bbox |dL| >= 0.10, no rims",
-                Some(_) => "minion vs ring 3x its bbox |dL| >= 0.08, no rims",
-                None => "no CON rule for this role (information)",
-            },
-        );
+        let limit = match need {
+            Some(_) if rule == "CON-1" => "hero vs ring 3x its bbox |dL| >= 0.10, no rims",
+            Some(_) => "minion vs ring 3x its bbox |dL| >= 0.08, no rims",
+            None => "no CON rule for this role (information)",
+        };
+        if ring.is_empty() {
+            // Nothing to contrast against is not a pass.
+            push(
+                &mut checks,
+                &format!("{rule} ({})", model.name),
+                need.map(|_| false),
+                "no ground ring (the 3x box holds no ground pixels)".into(),
+                limit,
+            );
+        } else {
+            let ring_l = imaging::mean(&ring);
+            let delta = (model_l - ring_l).abs();
+            push(
+                &mut checks,
+                &format!("{rule} ({})", model.name),
+                need.map(|limit| delta >= limit),
+                format!("|dL| {delta:.3} (model {model_l:.3}, ring {ring_l:.3})"),
+                limit,
+            );
+        }
         let lit_emissive: Vec<f64> = pixels
             .iter()
             .filter(|&&index| emissive_px(index))
@@ -508,25 +521,57 @@ pub(crate) fn frame_checks(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String
             );
         }
     }
-    let around: Vec<usize> = (0..beauty.len())
-        .filter(|&index| near[index] && !post.bits[index])
+    // VAL-2..4 on this review frame (the bible runs them on captures; see the amendment).
+    let mut bare: Vec<f32> = (0..beauty.len())
+        .filter(|&index| ground.bits[index] && !near[index])
+        .map(|index| display_l(&beauty, index))
         .collect();
-    let mut lit: Vec<f32> = around
-        .iter()
-        .map(|&index| display_l(&beauty, index))
+    if bare.is_empty() {
+        push(
+            &mut checks,
+            "VAL-2",
+            Some(false),
+            "no bare ground outside the models' 3x boxes".into(),
+            "mean OKLab L 0.30-0.58, p5-p95 <= 0.30",
+        );
+    } else {
+        let mean = imaging::mean(&bare);
+        bare.sort_unstable_by(f32::total_cmp);
+        let p5 = imaging::percentile_sorted(&bare, 5.0);
+        let p95 = imaging::percentile_sorted(&bare, 95.0);
+        push(
+            &mut checks,
+            "VAL-2",
+            Some((0.30..=0.58).contains(&mean) && p95 - p5 <= 0.30),
+            format!("bare ground mean L {mean:.3}, p5-p95 {:.3}", p95 - p5),
+            "mean OKLab L 0.30-0.58, p5-p95 <= 0.30 on the ground outside every model's 3x box \
+             (exposure is set to 0.50, so the spread is the test)",
+        );
+    }
+    let mut shaded: Vec<f32> = (0..beauty.len())
+        .filter(|&index| ring_ground[index])
+        .map(|index| display_l(&beauty, index))
         .collect();
-    let p1 = imaging::percentile(&mut lit, 1.0).unwrap_or(0.0);
-    push(
-        &mut checks,
-        "VAL-3",
-        Some(p1 >= 0.18),
-        format!("p1 L {p1:.3}"),
-        "shadow floor L >= 0.18 (p1 over the models and their 3x rings, shadows included)",
-    );
-    let mut plain: Vec<f32> = around
-        .iter()
-        .filter(|&&index| !emissive_px(index))
-        .map(|&index| display_l(&beauty, index))
+    match imaging::percentile(&mut shaded, 1.0) {
+        Some(p1) => push(
+            &mut checks,
+            "VAL-3",
+            Some(p1 >= 0.18),
+            format!("p1 L {p1:.3}"),
+            "shadow floor L >= 0.18 (p1 over the ground in the models' 3x boxes, cast shadows \
+             included)",
+        ),
+        None => push(
+            &mut checks,
+            "VAL-3",
+            Some(false),
+            "no ground in the models' 3x boxes".into(),
+            "shadow floor L >= 0.18",
+        ),
+    }
+    let mut plain: Vec<f32> = (0..beauty.len())
+        .filter(|&index| near[index] && !post.bits[index] && !emissive_px(index))
+        .map(|index| display_l(&beauty, index))
         .collect();
     let p99 = imaging::percentile(&mut plain, 99.0).unwrap_or(0.0);
     push(
@@ -534,7 +579,7 @@ pub(crate) fn frame_checks(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String
         "VAL-4",
         Some(p99 <= 0.85),
         format!("p99 L {p99:.3}"),
-        "non-emissive highlight ceiling L <= 0.85 (p99 over the models and their rings)",
+        "non-emissive highlight ceiling L <= 0.85 (p99 over the models and their 3x boxes)",
     );
     let screen = all_emissive as f64 / beauty.len() as f64;
     push(
@@ -553,8 +598,10 @@ fn silhouette_checks(meta: &Meta, dir: &Path, checks: &mut Vec<Check>) -> Result
     let mut heroes_1080: Vec<(String, SilhouetteSet)> = Vec::new();
     for model in &meta.models {
         let name = &model.name;
-        let mesh = moba_assets::load_glb_file_with(&model.glb, moba_assets::GlbTangents::FileOnly)
-            .map_err(|error| format!("{}: {error}", model.glb.display()))?;
+        // `glb` is relative to render_meta.json (older metas hold absolute paths; join keeps them).
+        let glb = dir.join(&model.glb);
+        let mesh = moba_assets::load_glb_file_with(&glb, moba_assets::GlbTangents::FileOnly)
+            .map_err(|error| format!("{}: {error}", glb.display()))?;
         let (low, high) = mesh.bounds();
         let height = f64::from(high[1] - low[1]);
         match SIZE_CLASSES
@@ -821,6 +868,33 @@ mod tests {
         writer.write_image_data(&bytes).expect("data");
     }
 
+    /// A `render_meta.json` for the frame tests: hero `h` (red ids), minion `m` (green ids).
+    fn test_meta() -> Meta {
+        let l_ref = crate::meta::l_ref();
+        let frame = |file: &str| {
+            serde_json::json!({"file": file, "width": 2560, "height": 1440, "distance_m": 46.0,
+                               "models": [], "post_bbox": [0, 0, 1, 1], "ids": "i.png", "emit": "e.png"})
+        };
+        let model = |name: &str, role: &str| {
+            serde_json::json!({"name": name, "glb": "unused.glb", "role": role, "faction": "forge",
+                               "pose": {"clip": "", "frame": 0, "applied": false}})
+        };
+        serde_json::from_value(serde_json::json!({
+            "schema": 1, "name": "t", "renderer": "Cycles", "device": "CPU", "blender": "5.2.3",
+            "samples": 1,
+            "camera": {"yaw": -0.7, "pitch": 0.95, "distance_m": 46.0, "zoom_distance_m": 8.0, "fov_y_deg": 60.0},
+            "sun": {"dir": [-0.885, 0.532, 0.465], "colour": [1.0, 0.8, 0.62], "intensity": 1.5, "elevation_deg": 28.0},
+            "sky": {"ibl": 0.35, "zenith": [0.0, 0.0, 0.0], "horizon": [0.0, 0.0, 0.0], "ground": [0.0, 0.0, 0.0]},
+            "ground_hex": "#6B6560", "lane_hex": "#906B58", "l_ref": l_ref, "post_m": 1.8,
+            "view_transform": "AgX", "exposure_ev": 0.0, "ground_l_target": 0.5, "ground_l_calibrated": 0.5,
+            "id_colours": {"h": [1, 0, 0], "m": [0, 1, 0]}, "post_colour": [1, 1, 1],
+            "models": [model("h", "hero"), model("m", "minion")],
+            "frames": {"46m_1440p": frame("b.png"), "46m_2160p": frame("b.png"), "zoom": [],
+                       "lineup_1440p": frame("b.png"), "turntable": [], "silhouettes": []},
+        }))
+        .expect("meta")
+    }
+
     #[test]
     fn frame_checks_measure_contrast_and_emission() {
         let dir = std::env::temp_dir().join(format!("moba-review-sheet-{}", std::process::id()));
@@ -858,28 +932,7 @@ mod tests {
                 [0; 3]
             }
         });
-        let frame = |file: &str| {
-            serde_json::json!({"file": file, "width": 2560, "height": 1440, "distance_m": 46.0,
-                               "models": [], "post_bbox": [0, 0, 1, 1], "ids": "i.png", "emit": "e.png"})
-        };
-        let model = |name: &str, role: &str| {
-            serde_json::json!({"name": name, "glb": "unused.glb", "role": role, "faction": "forge",
-                               "pose": {"clip": "", "frame": 0, "applied": false}})
-        };
-        let meta: Meta = serde_json::from_value(serde_json::json!({
-            "schema": 1, "name": "t", "renderer": "Cycles", "device": "CPU", "blender": "5.2.3",
-            "samples": 1,
-            "camera": {"yaw": -0.7, "pitch": 0.95, "distance_m": 46.0, "zoom_distance_m": 8.0, "fov_y_deg": 60.0},
-            "sun": {"dir": [-0.885, 0.532, 0.465], "colour": [1.0, 0.8, 0.62], "intensity": 1.5, "elevation_deg": 28.0},
-            "sky": {"ibl": 0.35, "zenith": [0.0, 0.0, 0.0], "horizon": [0.0, 0.0, 0.0], "ground": [0.0, 0.0, 0.0]},
-            "ground_hex": "#6B6560", "lane_hex": "#906B58", "l_ref": l_ref, "post_m": 1.8,
-            "view_transform": "AgX", "exposure_ev": 0.0, "ground_l_target": 0.5, "ground_l_calibrated": 0.5,
-            "id_colours": {"h": [1, 0, 0], "m": [0, 1, 0]}, "post_colour": [1, 1, 1],
-            "models": [model("h", "hero"), model("m", "minion")],
-            "frames": {"46m_1440p": frame("b.png"), "46m_2160p": frame("b.png"), "zoom": [],
-                       "lineup_1440p": frame("b.png"), "turntable": [], "silhouettes": []},
-        }))
-        .expect("meta");
+        let meta = test_meta();
         let checks = frame_checks(&meta, &dir).expect("frame checks");
         let _ = std::fs::remove_dir_all(&dir);
         let outcome = |rule: &str| {
@@ -905,6 +958,30 @@ mod tests {
             .find(|check| check.rule == "PBR-EMIT-2r (h)")
             .expect("EMIT-2r");
         assert!(area.value.starts_with("1.00 %"), "{}", area.value);
+    }
+
+    #[test]
+    fn a_model_with_no_ground_around_it_fails_contrast_and_value() {
+        let dir =
+            std::env::temp_dir().join(format!("moba-review-sheet-ring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        // The hero fills the frame: no ring, no bare ground, no ground in its box.
+        write_rgb(&dir.join("b.png"), 2560, 1440, false, |_, _| [60; 3]);
+        write_rgb(&dir.join("i.png"), 2560, 1440, false, |_, _| [255, 0, 0]);
+        write_rgb(&dir.join("e.png"), 2560, 1440, true, |_, _| [0; 3]);
+        let checks = frame_checks(&test_meta(), &dir).expect("frame checks");
+        let _ = std::fs::remove_dir_all(&dir);
+        let find = |rule: &str| {
+            checks
+                .iter()
+                .find(|check| check.rule == rule)
+                .unwrap_or_else(|| panic!("no {rule}"))
+        };
+        assert_eq!(find("CON-1 (h)").pass, Some(false));
+        assert!(find("CON-1 (h)").value.contains("no ground ring"));
+        assert_eq!(find("VAL-2").pass, Some(false));
+        assert_eq!(find("VAL-3").pass, Some(false));
     }
 
     #[test]
