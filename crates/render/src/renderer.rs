@@ -44,6 +44,7 @@ use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::memory::MemoryStats;
 use crate::passes::contact::ContactPass;
+use crate::passes::deferred::{DeferredPass, DeferredTargets};
 use crate::passes::fog::FogPass;
 use crate::passes::gameplay_overlay::{GameplayOverlay, OverlayBlock, OverlayImages};
 use crate::passes::gbuffer_debug::{GBufferDebugPass, GBufferDebugTargets};
@@ -52,8 +53,8 @@ use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
     CullSettings, MainFrame, MainViewSpec, OutlineIdTarget, OverlayPrepassTarget, PrepassTarget,
-    ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget, TcMaskTarget,
-    ViewBudget, WaterTargets,
+    ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget, SkyTargets,
+    TcMaskTarget, ViewBudget, WaterTargets,
 };
 use crate::passes::vfx::{
     DistortionTargets, VfxFrameExtras, VfxOverlayTargets, VfxPass, VfxTargets,
@@ -219,6 +220,11 @@ pub struct RenderConfig {
     /// probe can read them back (ADR-0021 gate 2). Off for every normal run, so production
     /// frames keep their usage minimal (some drivers drop compression for copy sources).
     pub readback: bool,
+    /// The deferred lighting on the tiered path with temporal AA (ADR-0023 §2, N2b): the
+    /// G-buffer pass's surfaces are lit in compute and the forward `scene` pass is not
+    /// recorded. `false` (`MOBA_DEFERRED=off`) keeps N1's tiered forward frame, the
+    /// reference the deferred–forward parity gate compares against. Default `true`.
+    pub deferred: bool,
     /// Reflex or Anti-Lag (ADR-0021 §6), when the device enables one: default
     /// [`LatencySetting::On`]. A device without either ignores it.
     pub latency: LatencySetting,
@@ -262,6 +268,7 @@ impl Default for RenderConfig {
             tiered_cpu_devices: false,
             debug_view: TemporalDebugView::Off,
             readback: false,
+            deferred: true,
             latency: LatencySetting::On,
             frame_rate_limit: 240,
         }
@@ -385,6 +392,13 @@ impl RenderConfig {
     #[must_use]
     pub const fn with_debug_view(mut self, view: TemporalDebugView) -> Self {
         self.debug_view = view;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::deferred`] set.
+    #[must_use]
+    pub const fn with_deferred(mut self, deferred: bool) -> Self {
+        self.deferred = deferred;
         self
     }
 
@@ -602,6 +616,8 @@ pub struct Renderer {
     exposure_linear: Option<ExposureLinearPass>,
     /// A G-buffer debug view (ADR-0023 §1f); `None` unless one is selected with temporal AA.
     gbuffer_debug: Option<GBufferDebugPass>,
+    /// The deferred lighting (ADR-0023 §2, N2b): with [`FrameSpec::has_deferred`].
+    deferred: Option<DeferredPass>,
     /// The frame being recorded's temporal state.
     temporal_frame: Option<TemporalFrame>,
     /// [`Renderer::warm_up_temporal`] ran: the next capture keeps the history it built.
@@ -808,7 +824,7 @@ impl Renderer {
         )?;
         latency.swapchain_created(swapchain.handle());
 
-        let hdr_format = targets::choose_hdr_format(&device, config.quality_tier);
+        let mut hdr_format = targets::choose_hdr_format(&device, config.quality_tier);
         let (depth_format, depth_aspect) = targets::choose_depth_format(&device)?;
         let mut lighting_config = config.effective_lighting();
         let shadow_format = targets::choose_shadow_format(&device);
@@ -854,6 +870,13 @@ impl Renderer {
             post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
         }
         let temporal = post_config.anti_aliasing == AntiAliasing::Temporal;
+        // ADR-0023 §2 (N2b): the deferred lighting reads the G-buffer, which exists only with
+        // temporal AA (amendment 1 item 8), and stores into `hdr` as a storage image, which
+        // `R16G16B16A16_SFLOAT` always supports (the packed format need not).
+        let deferred = tiered && temporal && config.deferred;
+        if deferred && hdr_format != vk::Format::R16G16B16A16_SFLOAT {
+            hdr_format = vk::Format::R16G16B16A16_SFLOAT;
+        }
         // ADR-0021 §4b, §4c: the preset mode's scale is the render-scale ceiling (the
         // setting can lower it) and the allocation's.
         let upscale_mode = post_config
@@ -991,6 +1014,7 @@ impl Renderer {
             overlay: tiered,
             depth: DepthConvention::of(path),
             gbuffer_debug: temporal && config.debug_view.gbuffer_view().is_some(),
+            deferred,
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
         // that run them; see `plan_index`.
@@ -1110,6 +1134,7 @@ impl Renderer {
                 temporal,
                 overlay: tiered,
                 depth: frame_spec.depth,
+                deferred: frame_spec.has_deferred(),
             },
             config.skinning,
             CullSettings {
@@ -1120,6 +1145,37 @@ impl Renderer {
             environment_config,
         )?;
         config.max_bones = scene.max_bones();
+        let deferred_pass = frame_spec
+            .has_deferred()
+            .then(|| {
+                DeferredPass::new(
+                    &device,
+                    &shaders,
+                    scene.camera_set_layout(),
+                    lighting.set_layout(),
+                    swapchain.extent,
+                    config.debug_view.deferred_view(),
+                )
+            })
+            .transpose()?;
+        if tiered {
+            // The parity gate (scripts/deferred-parity.sh) checks which frame ran.
+            eprintln!(
+                "[render] lighting: {}",
+                if deferred_pass.is_some() {
+                    "deferred"
+                } else {
+                    "forward"
+                }
+            );
+        }
+        if config.debug_view.deferred_view() != 0 && deferred_pass.is_none() {
+            eprintln!(
+                "[render] debug view {}: the deferred lighting needs the tiered path with \
+                 temporal AA; drawing the frame",
+                config.debug_view.name()
+            );
+        }
         let contact = frame_spec
             .contact_shadows
             .then(|| {
@@ -1284,6 +1340,7 @@ impl Renderer {
             temporal: temporal_state,
             exposure_linear,
             gbuffer_debug,
+            deferred: deferred_pass,
             temporal_frame: None,
             capture_warmed: false,
             overlay,
@@ -2220,6 +2277,11 @@ impl Renderer {
             .as_ref()
             .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
             .transpose()?;
+        let deferred = self
+            .deferred
+            .as_ref()
+            .map(|pass| pass.build_pipelines(&self.device, &self.shaders))
+            .transpose()?;
         // Last of the builds: the back end replaces its own pipeline only on success.
         if let Some(temporal) = self.temporal.as_mut() {
             temporal
@@ -2232,6 +2294,9 @@ impl Renderer {
         }
         if let (Some(pass), Some(pipeline)) = (self.gbuffer_debug.as_mut(), gbuffer_debug) {
             pass.install_pipeline(pipeline);
+        }
+        if let (Some(pass), Some(pipelines)) = (self.deferred.as_mut(), deferred) {
+            pass.install_pipelines(pipelines);
         }
         if let (Some(pass), Some(pipeline)) = (self.overlay.as_mut(), overlay) {
             pass.install_pipeline(pipeline);
@@ -2963,6 +3028,20 @@ impl Renderer {
         });
         let hull_outlines = self.lighting_config.outlines == OutlineMode::Hull;
         let prepass = self.frame_spec.has_prepass();
+        // N2b: the frame graph has the deferred passes (and the tile buffer) only then.
+        let deferred = resources.tiles.is_some() && self.deferred.is_some();
+        let deferred_targets =
+            resources
+                .temporal
+                .filter(|_| deferred)
+                .map(|temporal| DeferredTargets {
+                    gbuffer: temporal.gbuffer.map(|id| self.transient(id).view()),
+                    depth: depth_view,
+                    hdr: hdr_view,
+                    camera: self.scene.camera_set(frame_index),
+                    lighting: self.lighting.set(frame_index),
+                    render_size: render_extent,
+                });
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
         self.profiler.begin_frame(command_buffers[0], frame_index);
@@ -3008,7 +3087,10 @@ impl Renderer {
                         gbuffer: resources
                             .temporal
                             .map(|temporal| temporal.gbuffer.map(|id| self.transient(id).view())),
-                        gbuffer_store: self.frame_spec.gbuffer_debug || self.frame_spec.readback,
+                        gbuffer_store: deferred
+                            || self.frame_spec.gbuffer_debug
+                            || self.frame_spec.readback,
+                        hdr: deferred.then_some((hdr_view, self.config.clear_color)),
                         lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                     },
@@ -3086,6 +3168,28 @@ impl Renderer {
                         store_depth: (resources.vfx.is_some() || resources.refraction.is_some())
                             && msaa_color.is_none(),
                         hull_outlines,
+                    },
+                ),
+                PassKind::LightClassify => {
+                    if let (Some(pass), Some(targets)) = (&self.deferred, &deferred_targets) {
+                        pass.record_classify(command_buffer, frame_index, targets);
+                    }
+                }
+                PassKind::DeferredLight => {
+                    if let (Some(pass), Some(targets)) = (&self.deferred, &deferred_targets) {
+                        pass.record_light(command_buffer, frame_index, targets);
+                    }
+                }
+                PassKind::Sky => self.scene.record_sky_pass(
+                    &self.device,
+                    command_buffer,
+                    frame_index,
+                    &SkyTargets {
+                        hdr: hdr_view,
+                        depth: depth_view,
+                        extent: render_extent,
+                        sky: self.world_config.sky,
+                        lighting: self.lighting.set(frame_index),
                     },
                 ),
                 PassKind::WaterCopy => {
@@ -3320,6 +3424,9 @@ impl Renderer {
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
                             .level_count(1)
                             .layer_count(1)];
+                        if let (true, Some(pass)) = (deferred, &self.deferred) {
+                            pass.record_reset(command_buffer);
+                        }
                         for mask in [temporal.reactive, temporal.tc_mask] {
                             // SAFETY: the graph moved the mask to TRANSFER_DST_OPTIMAL; the
                             // whole single-level image is cleared.
@@ -3611,6 +3718,9 @@ impl Renderer {
         if let (Some(resource), Some(buffer)) = (resources.capture, capture_buffer) {
             bindings.set(resource, Binding::Buffer(buffer));
         }
+        if let (Some(resource), Some(deferred)) = (resources.tiles, &self.deferred) {
+            bindings.set(resource, Binding::Buffer(deferred.tile_buffer_handle()));
+        }
         if let Some(refraction) = resources.refraction {
             bindings.set(refraction, image(refraction));
         }
@@ -3679,6 +3789,9 @@ impl Renderer {
                     .resize(&self.device, swapchain.extent, extents.render)?;
             }
             temporal.invalidate();
+        }
+        if let Some(deferred) = self.deferred.as_mut() {
+            deferred.resize(&self.device, swapchain.extent)?;
         }
         self.transients
             .resize(&self.device, self.plans[0].graph.slots(), extents)?;

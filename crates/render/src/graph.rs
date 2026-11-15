@@ -25,8 +25,10 @@ use ash::vk;
 /// post chain (ADR-0015), R2b's contact shadows and outlines (ADR-0016), R3a's two
 /// fog-of-war passes, R3b's two full-water passes (ADR-0017) and the heat haze's two passes
 /// (ADR-0019) bring a frame with everything on (both offscreen passes and the capture
-/// included) to 33.
-pub(crate) const MAX_PASSES: usize = 40;
+/// included) to 33. The tiered frame's temporal, overlay and G-buffer passes (ADR-0021,
+/// ADR-0023) and N2b's deferred lighting (`light_classify`, `deferred_light` and `sky` in
+/// place of `scene`) bring its largest variant, with a G-buffer debug view, to 40.
+pub(crate) const MAX_PASSES: usize = 48;
 /// Most resources (imported + transient) one graph may declare (at most 64: a pass's
 /// resource set is a `u64` bit mask).
 pub(crate) const MAX_RESOURCES: usize = 48;
@@ -96,6 +98,9 @@ pub(crate) enum Access {
     /// Storage image written by a compute shader, previous contents discarded (`GENERAL`;
     /// the temporal pass's `hdr_out`, the one-texel exposure multiplier).
     StorageImageWrite,
+    /// A buffer that is both the indirect arguments of `vkCmdDispatchIndirect` and a storage
+    /// buffer the dispatched shader reads (the deferred lighting's tile lists, ADR-0023 §2a).
+    IndirectComputeStorageRead,
     /// Storage image read and written by a compute shader, previous contents kept (`GENERAL`;
     /// a G-buffer debug view over the temporal pass's `hdr_out`, ADR-0023 §1f, which keeps
     /// the upscaler live so its history and timings are the frame's).
@@ -285,6 +290,14 @@ impl Access {
                 true,
                 U::SAMPLED,
             ),
+            Self::IndirectComputeStorageRead => (
+                S::DRAW_INDIRECT | S::COMPUTE_SHADER,
+                A::INDIRECT_COMMAND_READ | A::SHADER_STORAGE_READ,
+                A::NONE,
+                L::UNDEFINED,
+                true,
+                U::empty(),
+            ),
             Self::StorageImageWrite => (
                 S::COMPUTE_SHADER,
                 A::SHADER_STORAGE_WRITE,
@@ -319,6 +332,7 @@ impl Access {
                 | Self::ComputeStorageRead
                 | Self::ComputeStorageReadWrite
                 | Self::IndirectRead
+                | Self::IndirectComputeStorageRead
                 | Self::HostRead
         )
     }
@@ -332,6 +346,7 @@ impl Access {
                 | Self::ComputeStorageRead
                 | Self::ComputeStorageReadWrite
                 | Self::IndirectRead
+                | Self::IndirectComputeStorageRead
                 | Self::HostRead
         )
     }

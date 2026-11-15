@@ -21,6 +21,15 @@
 
 #include "camera.glsl"
 
+// The shaded pixel's centre in render pixels: `gl_FragCoord.xy` in the fragment stages. The
+// deferred lighting pass (`deferred_light.comp`, ADR-0023 §2) is a compute shader and defines
+// it as its own pixel before including this file, so both paths read the AO and the contact
+// shadows at the same texel. The expansion is the original expression, so every fragment
+// shader's SPIR-V is unchanged.
+#ifndef MOBA_PIXEL_CENTER
+#define MOBA_PIXEL_CENTER gl_FragCoord.xy
+#endif
+
 // Shadow map with hardware depth comparison (LESS_OR_EQUAL: 1 = lit) and bilinear PCF.
 layout(set = 3, binding = 0) uniform sampler2DShadow shadow_map;
 // The same depth image without comparison, for the PCSS blocker search.
@@ -119,7 +128,7 @@ float ambient_occlusion_here() {
     if (strength <= 0.0) {
         return 1.0;
     }
-    vec2 uv = min(gl_FragCoord.xy * camera.post_params.yz, camera.post_clamp.xy);
+    vec2 uv = min(MOBA_PIXEL_CENTER * camera.post_params.yz, camera.post_clamp.xy);
     return mix(1.0, textureLod(ambient_occlusion, uv, 0.0).r, strength);
 }
 
@@ -237,7 +246,7 @@ float contact_visibility() {
     if (camera.occlusion.y < 0.5) {
         return 1.0;
     }
-    return texelFetch(contact_map, ivec2(gl_FragCoord.xy), 0).r;
+    return texelFetch(contact_map, ivec2(MOBA_PIXEL_CENTER), 0).r;
 }
 
 // Readability limits of the dynamic lights (ADR-0016, ADR-0011 rule 1). The inverse-square

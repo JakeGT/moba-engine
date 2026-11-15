@@ -22,6 +22,16 @@ layout(location = 3) out vec4 out_gb2;
 #ifdef PREPASS_IDS
 layout(location = 4) out uint out_id;
 #endif
+#ifdef GBUFFER_HDR
+// N2b (ADR-0023 §1a, §2): the light-accumulation target, after the outline IDs when they are
+// attached. The sky pipeline blends it
+// (ZERO, ONE), so the target keeps its clear colour where the sky pass draws nothing.
+#ifdef PREPASS_IDS
+layout(location = 5) out vec4 out_hdr;
+#else
+layout(location = 4) out vec4 out_hdr;
+#endif
+#endif
 
 void main() {
     vec4 current = camera.view_proj_unjittered * vec4(in_ray, 0.0);
@@ -36,5 +46,8 @@ void main() {
     out_gb2 = vec4(0.0);
 #ifdef PREPASS_IDS
     out_id = 0u;
+#endif
+#ifdef GBUFFER_HDR
+    out_hdr = vec4(0.0);
 #endif
 }

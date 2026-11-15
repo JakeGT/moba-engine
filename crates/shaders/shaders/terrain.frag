@@ -49,6 +49,15 @@ layout(location = 3) out vec4 out_gb2;
 // over an unwritten output is not honoured on lavapipe (ADR-0023 amendment 1 item 16).
 layout(location = 4) out uint out_id;
 #endif
+#ifdef GBUFFER_HDR
+// N2b (ADR-0023 §1a, §2): the light-accumulation target, after the outline IDs when they are
+// attached. The deferred lighting adds the lit surface to it.
+#ifdef PREPASS_IDS
+layout(location = 5) out vec4 out_hdr;
+#else
+layout(location = 4) out vec4 out_hdr;
+#endif
+#endif
 // The surface `flat_terrain` or `splat_terrain` built, instead of its shading.
 Surface gbuffer_surface;
 #define TERRAIN_SHADE(s) (gbuffer_surface = (s), vec3(0.0))
@@ -203,6 +212,9 @@ void main() {
     encode_gbuffer(params, out_gb0, out_gb1, out_gb2);
 #ifdef PREPASS_IDS
     out_id = 0u;
+#endif
+#ifdef GBUFFER_HDR
+    out_hdr = vec4(0.0, 0.0, 0.0, 1.0); // The ground emits nothing.
 #endif
 #else
 

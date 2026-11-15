@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+// `gbuffer_smoke` (ADR-0023 verification gate 1, N2b): `decode_gbuffer` (include/gbuffer.glsl,
+// what `deferred_light.comp` calls) on the texels the raster half wrote. The smoke compares
+// every surface with the Rust twin's decode (crates/render/src/smoke/gbuffer.rs), as it does
+// the Slang decode.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#include "gbuffer.glsl"
+
+// `SmokeSurface` in crates/render/src/smoke/gbuffer.rs (64 bytes).
+struct SmokeSurface {
+    vec4 base_metallic;      // rgb linear base colour, a metallic
+    vec4 normal_roughness;   // xyz normal, w perceptual roughness
+    vec4 model_data_ao;      // xyz model data (physical units), w material AO
+    uvec4 model_flags_rim;   // x model, y flags, z rim slot, w unused
+};
+
+layout(set = 0, binding = 0) uniform texture2D gb0;
+layout(set = 0, binding = 1) uniform texture2D gb1;
+layout(set = 0, binding = 2) uniform texture2D gb2;
+layout(std430, set = 0, binding = 3) writeonly buffer DecodedBlock {
+    SmokeSurface decoded[];
+} smoke;
+
+layout(push_constant) uniform SmokePush {
+    uint width;
+    uint height;
+} push;
+
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x >= push.width || pixel.y >= push.height) {
+        return;
+    }
+    ivec2 texel = ivec2(pixel);
+    SurfaceParams d = decode_gbuffer(
+        texelFetch(gb0, texel, 0), texelFetch(gb1, texel, 0), texelFetch(gb2, texel, 0));
+    SmokeSurface result;
+    result.base_metallic = vec4(d.base_color, d.metallic);
+    result.normal_roughness = vec4(d.normal, d.roughness);
+    result.model_data_ao = vec4(d.model_data, d.ao);
+    result.model_flags_rim = uvec4(d.model, d.flags, d.rim_slot, 0u);
+    smoke.decoded[pixel.y * push.width + pixel.x] = result;
+}

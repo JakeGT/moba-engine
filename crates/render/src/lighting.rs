@@ -966,7 +966,8 @@ const LIGHT_GRID_WORDS: usize =
 /// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6, binding 10 in
 /// ADR-0015 §5, 11–14 in ADR-0016 §6, 20 in ADR-0017 §6): combined image samplers
 /// `0..IMAGE_BINDINGS`, the terrain block, the AO image, the two light buffers, the baked AO
-/// and contact images and the decal storage buffer, all fragment-only. Also counted by the
+/// and contact images and the decal storage buffer, for the fragment stages and (N2b) the
+/// deferred lighting's compute stage. Also counted by the
 /// scene layout's descriptor budget (`descriptor_budget`).
 pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] {
     core::array::from_fn(|index| {
@@ -987,7 +988,7 @@ pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>;
             .binding(binding)
             .descriptor_type(kind)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE)
     })
 }
 

@@ -252,6 +252,74 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "sky_motion_ids.frag",
         defines: &["PREPASS_IDS"],
     },
+    // N2b (ADR-0023 §2): with the deferred lighting the G-buffer pass also writes `hdr`
+    // (emissive, `GBUFFER_HDR`; attachment 4, or 5 after the outline IDs), and the lighting
+    // pass has a full permutation for the extended tiles.
+    Permutation {
+        source: "unit.frag",
+        output: "unit_gbuffer_hdr.frag",
+        defines: &["GBUFFER", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_gbuffer_ids_hdr.frag",
+        defines: &["GBUFFER", "PREPASS_IDS", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_textured_gbuffer_hdr.frag",
+        defines: &["MATERIAL_TEXTURED", "GBUFFER", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_textured_gbuffer_ids_hdr.frag",
+        defines: &["MATERIAL_TEXTURED", "GBUFFER", "PREPASS_IDS", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_gbuffer_hdr.frag",
+        defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_gbuffer_ids_hdr.frag",
+        defines: &[
+            "GBUFFER",
+            "MOBA_NO_GLOW_DECALS",
+            "PREPASS_IDS",
+            "GBUFFER_HDR",
+        ],
+    },
+    Permutation {
+        source: "foliage.frag",
+        output: "foliage_gbuffer_hdr.frag",
+        defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "foliage.frag",
+        output: "foliage_gbuffer_ids_hdr.frag",
+        defines: &[
+            "GBUFFER",
+            "MOBA_NO_GLOW_DECALS",
+            "PREPASS_IDS",
+            "GBUFFER_HDR",
+        ],
+    },
+    Permutation {
+        source: "sky_motion.frag",
+        output: "sky_motion_hdr.frag",
+        defines: &["GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "sky_motion.frag",
+        output: "sky_motion_ids_hdr.frag",
+        defines: &["PREPASS_IDS", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "deferred_light.comp",
+        output: "deferred_light_extended.comp",
+        defines: &["DEFERRED_EXTENDED"],
+    },
     // Reversed-Z depth consumers on Tiered (ADR-0023 §1c); Compat keeps the default builds.
     Permutation {
         source: "sky.vert",

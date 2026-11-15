@@ -1,0 +1,156 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+// Deferred lighting on Tiered (ADR-0023 §2, N2b): one 16 x 16 tile per workgroup, dispatched
+// indirectly per tile class from `light_classify`'s lists. Each pixel decodes the thin
+// G-buffer, reconstructs its world position from the reversed-Z depth and is shaded by the
+// forward path's own `shade()` (include/lighting.glsl): the same BRDF, sun shadow, contact
+// shadows, clustered point lights, ambient, AO and map stylisation, so a deferred pixel and a
+// forward one at the same point evaluate the same lights with the same caps (§2b, §5b). Then
+// fog of war (unless `NO_FOG_OF_WAR`) and height fog, as the forward fragment stages apply
+// them. The G-buffer pass wrote emissive into `hdr`; it is added before the fog, as the
+// forward `shade()` adds it, and the result replaces it.
+//
+// Permutations (crates/shaders/build.rs): the default build is the standard tiles' fast path
+// (`STANDARD` and `UNLIT` only); `DEFERRED_EXTENDED` adds the other models (N2b: `FOLIAGE`,
+// whose back light reproduces `foliage.frag`'s; the rest shade as `STANDARD` until N2c).
+//
+// Bindings: set 0 the camera block, set 1 this pass's inputs (below), set 3 the scene
+// lighting set. `DeferredPush` mirrors `DeferredPush` in crates/render/src/passes/deferred.rs
+// (a SPIR-V layout test checks the offsets).
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// This pixel's centre, which lighting.glsl reads where a fragment shader reads gl_FragCoord.
+vec2 moba_pixel_center;
+#define MOBA_PIXEL_CENTER moba_pixel_center
+
+#include "camera.glsl"
+#include "lighting.glsl"
+#include "atmosphere.glsl"
+#include "gbuffer.glsl"
+#define MOBA_REVERSED_Z
+#include "depth.glsl"
+
+layout(set = 1, binding = 0) uniform texture2D gbuffer0;
+layout(set = 1, binding = 1) uniform texture2D gbuffer1;
+layout(set = 1, binding = 2) uniform texture2D gbuffer2;
+layout(set = 1, binding = 3) uniform texture2D scene_depth;
+layout(set = 1, binding = 4, rgba16f) uniform image2D hdr;
+// `light_classify`'s output (`TileBuffer` in crates/render/src/passes/deferred.rs): the
+// indirect arguments, then the tile lists of packed `x | y << 16` tile coordinates.
+layout(std430, set = 1, binding = 5) readonly buffer Tiles {
+    uint words[];
+} tiles;
+
+layout(push_constant) uniform DeferredPush {
+    uvec2 render_size;  // this frame's rendered sub-rectangle
+    uint list_offset;   // word offset of this dispatch's tile list in `tiles`
+    uint debug;         // 0 off, 1 lit-only, 2 light-count, 3 tiles (MOBA_DEBUG_VIEW)
+    float inv_exposure; // 1 / the composite's exposure, for the debug views' colours
+    uint tile_class;    // 1 standard, 2 extended (the tiles view's colour)
+    uint reserved0;
+    uint reserved1;
+} push;
+
+const uint DEBUG_LIT_ONLY = 1u;
+const uint DEBUG_LIGHT_COUNT = 2u;
+const uint DEBUG_TILES = 3u;
+
+// The light grid column's light count at `p` (the `light-count` view).
+uint column_lights(vec3 p) {
+    uint stride = camera.light_info.z;
+    if (camera.light_info.w == 0u || stride < 2u) {
+        return 0u;
+    }
+    uvec2 dims = max(camera.light_info.xy, uvec2(1u));
+    vec2 cell_f = (p.xz - camera.light_grid.xy) * camera.light_grid.zw;
+    ivec2 cell = clamp(ivec2(floor(cell_f)), ivec2(0), ivec2(dims) - 1);
+    uint base = (uint(cell.y) * dims.x + uint(cell.x)) * stride;
+    return min(light_grid.cells[base], stride - 1u);
+}
+
+// Cold-to-hot ramp over 0..16 lights (0 dark blue).
+vec3 heat(uint count) {
+    float t = clamp(float(count) / 16.0, 0.0, 1.0);
+    return count == 0u ? vec3(0.02, 0.02, 0.1)
+                       : mix(mix(vec3(0.1, 0.3, 1.0), vec3(0.1, 1.0, 0.2), min(t * 2.0, 1.0)),
+                             vec3(1.0, 0.1, 0.05), max(t * 2.0 - 1.0, 0.0));
+}
+
+void main() {
+    uint packed_tile = tiles.words[push.list_offset + gl_WorkGroupID.x];
+    uvec2 tile = uvec2(packed_tile & 0xFFFFu, packed_tile >> 16);
+    ivec2 pixel = ivec2(tile * 16u + gl_LocalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(pixel), push.render_size))) {
+        return;
+    }
+    float depth = texelFetch(scene_depth, pixel, 0).r;
+    if (DEPTH_IS_FAR(depth)) {
+        return; // The sky pass draws it.
+    }
+    SurfaceParams s = decode_gbuffer(
+        texelFetch(gbuffer0, pixel, 0), texelFetch(gbuffer1, pixel, 0),
+        texelFetch(gbuffer2, pixel, 0));
+    if (s.model == GBUFFER_MODEL_UNLIT) {
+        return; // Emissive only: the G-buffer pass wrote it.
+    }
+    moba_pixel_center = vec2(pixel) + 0.5;
+    // The scene renders with a flipped viewport: NDC +Y is the top of the image. The camera's
+    // inverse view-projection is the jittered, reversed one the G-buffer pass drew with.
+    vec2 uv = moba_pixel_center * camera.viewport.zw;
+    vec4 world_h = camera.inv_view_proj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    vec3 world_pos = world_h.xyz / world_h.w;
+
+    bool unit = (s.flags & GBUFFER_FLAG_UNIT) != 0u;
+    vec3 albedo = push.debug == DEBUG_LIT_ONLY ? vec3(1.0) : s.base_color;
+    Surface surface = default_surface(albedo, s.normal, world_pos, s.roughness);
+    surface.metallic = push.debug == DEBUG_LIT_ONLY ? 0.0 : s.metallic;
+    surface.occlusion = s.ao;
+    // Today's map rim on units only, as the forward unit, skinned and VAT draws have it
+    // (the terrain and foliage zero it). Per-material rim, wrap, ramp and specular overrides
+    // are not in the thin G-buffer (ADR-0023 amendment 2).
+    surface.rim = unit ? 1.0 : 0.0;
+    // The shadow lookup's normal offset: the G-buffer has only the shading normal; foliage
+    // offsets along +y, as `foliage.frag` does.
+    surface.geometric_normal = s.normal;
+#ifdef DEFERRED_EXTENDED
+    if (s.model == GBUFFER_MODEL_FOLIAGE) {
+        surface.geometric_normal = vec3(0.0, 1.0, 0.0);
+    }
+#endif
+    vec4 prior = imageLoad(hdr, pixel);
+    surface.emissive = push.debug == DEBUG_LIT_ONLY ? vec3(0.0) : prior.rgb;
+    vec3 lit = shade(surface);
+#ifdef DEFERRED_EXTENDED
+    if (s.model == GBUFFER_MODEL_FOLIAGE) {
+        // `foliage.frag`'s translucency: sunlight through the blade when looking towards the
+        // sun. The G-buffer holds its `0.35 * height` as the model's translucency.
+        vec3 view = normalize(camera.camera_pos.xyz - world_pos);
+        vec3 light = normalize(camera.light_direction.xyz);
+        float through = pow(clamp(dot(-view, light), 0.0, 1.0), 3.0);
+        lit += albedo * camera.sun_color.rgb * (s.model_data.x * through);
+    }
+#endif
+    if ((s.flags & GBUFFER_FLAG_NO_FOG_OF_WAR) == 0u) {
+        lit = apply_fog_of_war(lit, world_pos);
+    }
+    if (!unit && camera.haze_params.w > 0.5) {
+        // Without height fog the ground keeps the R2a distance fade (terrain.frag,
+        // foliage.frag); units never had it (unit.frag).
+        float distance_to_eye = length(camera.camera_pos.xyz - world_pos);
+        lit = mix(lit, camera.ambient.rgb * 1.2, smoothstep(240.0, 520.0, distance_to_eye));
+    } else {
+        lit = apply_height_fog(lit, world_pos);
+    }
+    if (push.debug == DEBUG_LIGHT_COUNT) {
+        lit = heat(column_lights(world_pos)) * push.inv_exposure;
+    } else if (push.debug == DEBUG_TILES) {
+        // Standard tiles green, extended orange, over the lit frame; tile edges darker.
+        vec3 tint = push.tile_class == 2u ? vec3(1.0, 0.55, 0.1) : vec3(0.2, 1.0, 0.3);
+        bool edge = any(equal(gl_LocalInvocationID.xy, uvec2(0u)));
+        lit = mix(lit, tint * push.inv_exposure, edge ? 0.8 : 0.35);
+    }
+    imageStore(hdr, pixel, vec4(lit, 1.0));
+}

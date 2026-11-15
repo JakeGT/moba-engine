@@ -309,6 +309,60 @@ pub const GBUFFER_SMOKE_FRAG: &[u8] =
 /// `gbuffer_smoke`'s Slang half: `encode_gbuffer` and `decode_gbuffer` (lib/gbuffer.slang).
 pub const GBUFFER_SMOKE_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_smoke.slang.spv"));
+/// `gbuffer_smoke`'s GLSL decode (N2b): `decode_gbuffer` (include/gbuffer.glsl), what the
+/// deferred lighting decodes with.
+pub const GBUFFER_SMOKE_DECODE_COMP: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer_smoke_decode.comp.spv"));
+
+/// Units into the G-buffer, motion and their emissive into `hdr` (N2b, ADR-0023 §2).
+pub const UNIT_GBUFFER_HDR_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer_hdr.frag.spv"));
+/// As [`UNIT_GBUFFER_HDR_FRAG`], with the outline slot.
+pub const UNIT_GBUFFER_IDS_HDR_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer_ids_hdr.frag.spv"));
+/// Textured units into the G-buffer, motion and `hdr` (N2b).
+pub const UNIT_TEXTURED_GBUFFER_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_textured_gbuffer_hdr.frag.spv"
+));
+/// As [`UNIT_TEXTURED_GBUFFER_HDR_FRAG`], with the outline slot.
+pub const UNIT_TEXTURED_GBUFFER_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_textured_gbuffer_ids_hdr.frag.spv"
+));
+/// The terrain into the G-buffer, motion and `hdr` (N2b).
+pub const TERRAIN_GBUFFER_HDR_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer_hdr.frag.spv"));
+/// As [`TERRAIN_GBUFFER_HDR_FRAG`], with the ID 0.
+pub const TERRAIN_GBUFFER_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/terrain_gbuffer_ids_hdr.frag.spv"
+));
+/// Foliage into the G-buffer, motion and `hdr` (N2b).
+pub const FOLIAGE_GBUFFER_HDR_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/foliage_gbuffer_hdr.frag.spv"));
+/// As [`FOLIAGE_GBUFFER_HDR_FRAG`], with `hdr` after the (unwritten) ID attachment.
+pub const FOLIAGE_GBUFFER_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/foliage_gbuffer_ids_hdr.frag.spv"
+));
+/// The background motion with the `hdr` attachment (N2b).
+pub const SKY_MOTION_HDR_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion_hdr.frag.spv"));
+/// As [`SKY_MOTION_HDR_FRAG`], with the ID 0.
+pub const SKY_MOTION_IDS_HDR_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion_ids_hdr.frag.spv"));
+/// Deferred lighting of the standard tiles (N2b, ADR-0023 §2).
+pub const DEFERRED_LIGHT_COMP: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/deferred_light.comp.spv"));
+/// Deferred lighting of the extended tiles (N2b, ADR-0023 §2).
+pub const DEFERRED_LIGHT_EXTENDED_COMP: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/deferred_light_extended.comp.spv"
+));
+/// The deferred lighting's tile classification (N2b, ADR-0023 §2a).
+pub const LIGHT_CLASSIFY_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/light_classify.slang.spv"));
 
 include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
 
@@ -720,6 +774,62 @@ pub const MODULES: &[ShaderModule] = &[
         name: "gbuffer_smoke.slang",
         spirv: GBUFFER_SMOKE_SLANG,
     },
+    ShaderModule {
+        name: "gbuffer_smoke_decode.comp",
+        spirv: GBUFFER_SMOKE_DECODE_COMP,
+    },
+    ShaderModule {
+        name: "unit_gbuffer_hdr.frag",
+        spirv: UNIT_GBUFFER_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "unit_gbuffer_ids_hdr.frag",
+        spirv: UNIT_GBUFFER_IDS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "unit_textured_gbuffer_hdr.frag",
+        spirv: UNIT_TEXTURED_GBUFFER_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "unit_textured_gbuffer_ids_hdr.frag",
+        spirv: UNIT_TEXTURED_GBUFFER_IDS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_hdr.frag",
+        spirv: TERRAIN_GBUFFER_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_ids_hdr.frag",
+        spirv: TERRAIN_GBUFFER_IDS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "foliage_gbuffer_hdr.frag",
+        spirv: FOLIAGE_GBUFFER_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "foliage_gbuffer_ids_hdr.frag",
+        spirv: FOLIAGE_GBUFFER_IDS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "sky_motion_hdr.frag",
+        spirv: SKY_MOTION_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "sky_motion_ids_hdr.frag",
+        spirv: SKY_MOTION_IDS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "deferred_light.comp",
+        spirv: DEFERRED_LIGHT_COMP,
+    },
+    ShaderModule {
+        name: "deferred_light_extended.comp",
+        spirv: DEFERRED_LIGHT_EXTENDED_COMP,
+    },
+    ShaderModule {
+        name: "light_classify.slang",
+        spirv: LIGHT_CLASSIFY_SLANG,
+    },
 ];
 
 /// The module called `name` (for example `"unit_textured.frag"`), if it exists.
@@ -1057,6 +1167,36 @@ mod tests {
                     Slot::Descriptor {
                         set: 0,
                         binding: 5,
+                        ty: Cow::Borrowed("structuredBuffer:readWrite"),
+                    },
+                ),
+                ("push", Slot::PushConstants),
+            ],
+        ),
+        (
+            "light_classify.slang",
+            &[
+                (
+                    "scene_depth",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 0,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "gb2",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 1,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "tiles",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 2,
                         ty: Cow::Borrowed("structuredBuffer:readWrite"),
                     },
                 ),

@@ -245,6 +245,13 @@ pub enum TemporalDebugView {
     RimSlot,
     /// The G-buffer's flags: red `UNIT`, green `NO_FOG_OF_WAR`, blue reserved.
     Flags,
+    /// The deferred lighting's tile classes over the lit frame: standard green, extended
+    /// orange, sky untinted (ADR-0023 amendment 1 item 12; N2b).
+    Tiles,
+    /// The light-grid column's point-light count per pixel, cold to hot over 0–16 (N2b).
+    LightCount,
+    /// The deferred lighting on a white, non-metallic surface without emissive (N2b).
+    LitOnly,
 }
 
 impl TemporalDebugView {
@@ -264,6 +271,9 @@ impl TemporalDebugView {
         Self::Model,
         Self::RimSlot,
         Self::Flags,
+        Self::Tiles,
+        Self::LightCount,
+        Self::LitOnly,
     ];
 
     /// The `MOBA_DEBUG_VIEW` name.
@@ -284,6 +294,21 @@ impl TemporalDebugView {
             Self::Model => "model",
             Self::RimSlot => "rim-slot",
             Self::Flags => "flags",
+            Self::Tiles => "tiles",
+            Self::LightCount => "light-count",
+            Self::LitOnly => "lit-only",
+        }
+    }
+
+    /// The deferred lighting's debug mode (`deferred_light.comp`'s `push.debug`: 1 lit-only,
+    /// 2 light-count, 3 tiles), or 0 for a view the lighting does not draw.
+    #[must_use]
+    pub(crate) const fn deferred_view(self) -> u32 {
+        match self {
+            Self::LitOnly => 1,
+            Self::LightCount => 2,
+            Self::Tiles => 3,
+            _ => 0,
         }
     }
 
@@ -305,7 +330,10 @@ impl TemporalDebugView {
             | Self::TcMask
             | Self::Disocclusion
             | Self::Confidence
-            | Self::OverlayIds => None,
+            | Self::OverlayIds
+            | Self::Tiles
+            | Self::LightCount
+            | Self::LitOnly => None,
         }
     }
 

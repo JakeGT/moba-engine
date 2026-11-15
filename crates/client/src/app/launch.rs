@@ -544,6 +544,28 @@ pub(crate) fn debug_view() -> moba_render::TemporalDebugView {
     })
 }
 
+/// `MOBA_DEFERRED=off` keeps N1's tiered forward frame instead of the deferred lighting
+/// (ADR-0023 §2, N2b): the reference of the deferred–forward parity gate. Anything else, or
+/// unset, lights deferred. Read once at startup.
+pub(crate) fn deferred_lighting() -> bool {
+    deferred_lighting_from(std::env::var("MOBA_DEFERRED").ok().as_deref())
+}
+
+fn deferred_lighting_from(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| value.trim().eq_ignore_ascii_case("off"))
+}
+
+/// `MOBA_STYLISATION=off`: the map's stylisation (wrap, rim, ramp and painted specular) set
+/// to its neutral values, so a frame shows the plain BRDF (the deferred–forward parity gate,
+/// ADR-0023 gate 2, compares with stylisation off on both paths). Read once.
+pub(crate) fn stylisation_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("MOBA_STYLISATION")
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("off"))
+    })
+}
+
 /// Dynamic resolution's defaults on the tiered path (ADR-0020 §5c).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TieredScale {
@@ -1666,6 +1688,16 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_deferred_lighting_is_on_unless_switched_off() {
+        use super::deferred_lighting_from;
+        assert!(deferred_lighting_from(None));
+        assert!(deferred_lighting_from(Some("on")));
+        assert!(deferred_lighting_from(Some("")));
+        assert!(!deferred_lighting_from(Some("off")));
+        assert!(!deferred_lighting_from(Some(" OFF ")));
+    }
 
     #[test]
     fn the_frame_rate_limit_defaults_to_240_and_zero_uncaps() {

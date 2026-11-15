@@ -18,6 +18,9 @@
 //!    [`crate::gbuffer::decode`]: model, flags and rim slot exactly, every float within
 //!    [`DECODE_TOLERANCE`] or [`DECODE_ULPS`] (`pow`, `sqrt` and division differ by an ulp or
 //!    two between devices; thin-film thicknesses are hundreds of nanometres).
+//! 3. **Compute (GLSL, N2b):** `gbuffer_smoke_decode.comp` runs `include/gbuffer.glsl`'s
+//!    `decode_gbuffer`, the deferred lighting's decode, on the same texels, held to the same
+//!    bounds against [`crate::gbuffer::decode`].
 //!
 //! **No texel is ambiguous.** A shader and the twin agree on a stored integer unless the value
 //! before rounding, `x · (2^b − 1) + 0.5`, lies within a device's float error of an integer
@@ -496,6 +499,13 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         storage,
         MemoryLocation::GpuToCpu,
     )?;
+    let glsl_decoded = buffer(
+        gpu,
+        "gbuffer-smoke-glsl-decoded",
+        COUNT * size_of::<SmokeSurface>(),
+        storage,
+        MemoryLocation::GpuToCpu,
+    )?;
     let readbacks = [
         buffer(
             gpu,
@@ -569,29 +579,49 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
             binding(5, storage_ty, compute_stage),
         ],
     )?;
+    let decode_layout = DescriptorSetLayout::new(
+        d.clone(),
+        &[
+            binding(0, sampled_ty, compute_stage),
+            binding(1, sampled_ty, compute_stage),
+            binding(2, sampled_ty, compute_stage),
+            binding(3, storage_ty, compute_stage),
+        ],
+    )?;
     let pool = DescriptorPool::new(
         d.clone(),
         &[
             vk::DescriptorPoolSize {
                 ty: storage_ty,
-                descriptor_count: 4,
+                descriptor_count: 5,
             },
             vk::DescriptorPoolSize {
                 ty: sampled_ty,
-                descriptor_count: 3,
+                descriptor_count: 6,
             },
         ],
-        2,
+        3,
     )?;
-    let sets = pool.allocate(d, &[raster_layout.handle(), compute_layout.handle()])?;
-    let (raster_set, compute_set) = (sets[0], sets[1]);
+    let sets = pool.allocate(
+        d,
+        &[
+            raster_layout.handle(),
+            compute_layout.handle(),
+            decode_layout.handle(),
+        ],
+    )?;
+    let (raster_set, compute_set, decode_set) = (sets[0], sets[1], sets[2]);
     let whole = |buffer: &GpuBuffer| {
         [vk::DescriptorBufferInfo::default()
             .buffer(buffer.handle())
             .range(vk::WHOLE_SIZE)]
     };
-    let (input_info, encoded_info, decoded_info) =
-        (whole(&input), whole(&encoded), whole(&decoded));
+    let (input_info, encoded_info, decoded_info, glsl_decoded_info) = (
+        whole(&input),
+        whole(&encoded),
+        whole(&decoded),
+        whole(&glsl_decoded),
+    );
     let image_infos = targets.each_ref().map(|image| {
         [vk::DescriptorImageInfo::default()
             .image_view(image.view())
@@ -605,6 +635,10 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         image_write(compute_set, 3, &image_infos[1]),
         image_write(compute_set, 4, &image_infos[2]),
         buffer_write(compute_set, 5, &decoded_info),
+        image_write(decode_set, 0, &image_infos[0]),
+        image_write(decode_set, 1, &image_infos[1]),
+        image_write(decode_set, 2, &image_infos[2]),
+        buffer_write(decode_set, 3, &glsl_decoded_info),
     ];
     // SAFETY: both sets are live and unused; every write names a live buffer or view.
     unsafe { d.update_descriptor_sets(&writes, &[]) };
@@ -635,9 +669,15 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         &[compute_layout.handle()],
         core::slice::from_ref(&compute_push),
     )?;
+    let decode_pipeline_layout = PipelineLayout::with_push_constants(
+        d.clone(),
+        &[decode_layout.handle()],
+        core::slice::from_ref(&compute_push),
+    )?;
     let vertex = ShaderModule::new(d.clone(), moba_shaders::FULLSCREEN_VERT)?;
     let fragment = ShaderModule::new(d.clone(), moba_shaders::GBUFFER_SMOKE_FRAG)?;
     let compute = ShaderModule::new(d.clone(), moba_shaders::GBUFFER_SMOKE_SLANG)?;
+    let glsl_decode = ShaderModule::new(d.clone(), moba_shaders::GBUFFER_SMOKE_DECODE_COMP)?;
     let raster = raster_pipeline(
         gpu,
         raster_pipeline_layout.handle(),
@@ -654,6 +694,18 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
             &vk::ComputePipelineCreateInfo::default()
                 .stage(stage)
                 .layout(compute_pipeline_layout.handle()),
+        )?,
+    );
+    let decode_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(compute_stage)
+        .module(glsl_decode.handle())
+        .name(c"main");
+    let decode_pipeline = GraphicsPipeline::from_raw(
+        d.clone(),
+        device.create_compute_pipeline(
+            &vk::ComputePipelineCreateInfo::default()
+                .stage(decode_stage)
+                .layout(decode_pipeline_layout.handle()),
         )?,
     );
 
@@ -784,6 +836,32 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         }
         // SAFETY: the dispatch covers the 64×64 surfaces in 8×8 groups.
         unsafe { d.cmd_dispatch(command, SIZE / 8, SIZE / 8, 1) };
+        // The GLSL decode reads the same sampled targets and writes its own buffer.
+        // SAFETY: as above, with `decode_pipeline`, `decode_set` (set 0 of its layout, written)
+        // and the 8-byte push range of its layout; 8×8 groups cover the surfaces.
+        unsafe {
+            d.cmd_bind_pipeline(
+                command,
+                vk::PipelineBindPoint::COMPUTE,
+                decode_pipeline.handle(),
+            );
+            d.cmd_bind_descriptor_sets(
+                command,
+                vk::PipelineBindPoint::COMPUTE,
+                decode_pipeline_layout.handle(),
+                0,
+                &[decode_set],
+                &[],
+            );
+            d.cmd_push_constants(
+                command,
+                decode_pipeline_layout.handle(),
+                compute_stage,
+                0,
+                bytemuck::bytes_of(&push),
+            );
+            d.cmd_dispatch(command, SIZE / 8, SIZE / 8, 1);
+        }
         let to_copy = targets.each_ref().map(|image| {
             color_barrier(
                 image.image(),
@@ -846,8 +924,11 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         );
     }
     let slang_decoded: Vec<SmokeSurface> = read(&decoded, COUNT)?;
+    // 3. The GLSL decode (the deferred lighting's) of the same texels.
+    let glsl_decoded: Vec<SmokeSurface> = read(&glsl_decoded, COUNT)?;
     let mut worst = 0.0f32;
-    for (index, (actual, texels)) in slang_decoded.iter().zip(&stored).enumerate() {
+    let mut glsl_worst = 0.0f32;
+    for (index, texels) in stored.iter().enumerate() {
         let Some(want) = decode(*texels) else {
             report.check(
                 || format!("surface {index} stored a reserved model"),
@@ -857,13 +938,18 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
             continue;
         };
         let want = SmokeSurface::from_params(&want);
-        let (difference, floats_close, integers) = decode_difference(actual, &want);
-        worst = worst.max(difference);
-        report.check(
-            || format!("Slang decode, surface {index}: {actual:?} vs {want:?}"),
-            integers && floats_close,
-            true,
-        );
+        for (language, actual, largest) in [
+            ("Slang", &slang_decoded[index], &mut worst),
+            ("GLSL", &glsl_decoded[index], &mut glsl_worst),
+        ] {
+            let (difference, floats_close, integers) = decode_difference(actual, &want);
+            *largest = largest.max(difference);
+            report.check(
+                || format!("{language} decode, surface {index}: {actual:?} vs {want:?}"),
+                integers && floats_close,
+                true,
+            );
+        }
     }
 
     let models = ShadingModel::ALL.len();
@@ -874,7 +960,8 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
     report.notes.push(format!(
         "GLSL raster encode ({GB0_FORMAT:?}, {GB1_FORMAT:?}, {GB2_FORMAT:?}) and Slang encode \
          compared byte for byte; Slang decode within {DECODE_TOLERANCE} or {DECODE_ULPS} ulps \
-         (largest absolute difference {worst:e})"
+         (largest absolute difference {worst:e}); GLSL decode (the deferred lighting's) \
+         likewise (largest absolute difference {glsl_worst:e})"
     ));
     Ok(())
 }
