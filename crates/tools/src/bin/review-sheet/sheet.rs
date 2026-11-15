@@ -10,8 +10,8 @@ use crate::font5x7::FONT_5X7;
 use crate::imaging::{self, Canvas};
 use crate::meta::Meta;
 
-/// Every sheet is this wide.
-pub(crate) const SHEET_WIDTH: u32 = 2560;
+/// Every sheet is wide enough for a 2560-wide frame 1:1 between the margins.
+pub(crate) const SHEET_WIDTH: u32 = 2560 + 2 * MARGIN;
 const BACKGROUND: [u8; 3] = [24, 24, 26];
 const TEXT: [u8; 3] = [230, 230, 230];
 const DIM: [u8; 3] = [150, 150, 150];
@@ -321,13 +321,18 @@ pub(crate) fn write_sheets(
             .zip(&loaded.whole)
             .zip(&set.yaws_deg)
             .map(|((image, whole), yaw)| {
-                let (parts, _) = checks::hair_parts(whole);
+                let (parts, _) = if set.res == "1080p4x" {
+                    checks::hair_parts(whole, checks::SIL8_SAMPLES)
+                } else {
+                    (0, 0)
+                };
                 let caption = if parts > 0 {
                     format!("{yaw:.0} deg, {parts} thin")
                 } else {
                     format!("{yaw:.0} deg")
                 };
-                (outlined(image, whole).enlarge(factor), caption)
+                let block = (set.res == "1080p4x").then_some(checks::SIL8_SAMPLES);
+                (outlined(image, whole, block).enlarge(factor), caption)
             })
             .collect();
         blocks.push(Block::Text(
@@ -340,10 +345,13 @@ pub(crate) fn write_sheets(
     Ok(written)
 }
 
-/// The silhouette with SIL-8's thin pixels marked in yellow.
-fn outlined(image: &imaging::Image, whole: &Mask) -> Canvas {
+/// The silhouette, with SIL-8's thin samples marked in yellow on the 4x set.
+fn outlined(image: &imaging::Image, whole: &Mask, block: Option<i64>) -> Canvas {
     let mut canvas = Canvas::from_image(image);
-    let thin = whole.thin();
+    let Some(block) = block else {
+        return canvas;
+    };
+    let thin = whole.thin(block);
     for (index, bit) in thin.bits.iter().enumerate() {
         if *bit {
             let (x, y) = (

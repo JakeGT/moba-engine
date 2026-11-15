@@ -21,9 +21,11 @@ pub(crate) struct Check {
     pub(crate) limit: String,
 }
 
-/// Rules over eight yaws pass when this many yaws pass (SIL-7's own ranged quorum, applied to
-/// SIL-5, SIL-6 and melee SIL-7; SIL-3 and SIL-8 hold at every yaw).
-pub(crate) const YAW_QUORUM: usize = 6;
+/// SIL-7's ranged quorum: the weapon is visible from this many of the 8 yaws. Every other
+/// silhouette rule is read literally, at every yaw ("tested ... at eight yaw angles").
+pub(crate) const RANGED_YAWS: usize = 6;
+/// Samples per 1080p pixel side in the `1080p4x` silhouettes (SIL-8).
+pub(crate) const SIL8_SAMPLES: i64 = 4;
 /// Silhouette-and-scale size classes (height in metres).
 pub(crate) const SIZE_CLASSES: [(&str, f64, f64); 9] = [
     ("minion-ranged", 1.2, 1.4),
@@ -157,22 +159,25 @@ impl Mask {
         })
     }
 
-    /// Pixels in no all-set 2×2 block: thinner than 2 px (the 2×2 opening removes them).
-    pub(crate) fn thin(&self) -> Self {
+    /// Pixels in no all-set `block`×`block` square: thinner than `block` pixels (the
+    /// `block`×`block` morphological opening removes them).
+    pub(crate) fn thin(&self, block: i64) -> Self {
+        let (width, height) = (i64::from(self.width), i64::from(self.height));
+        // `full[y][x]`: the square with its top-left corner at (x, y) is all set.
+        let full: Vec<bool> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|(x, y)| (0..block).all(|dy| (0..block).all(|dx| self.at(x + dx, y + dy))))
+            .collect();
+        let is_full = |x: i64, y: i64| {
+            x >= 0 && y >= 0 && x < width && y < height && full[(y * width + x) as usize]
+        };
         let mut bits = vec![false; self.bits.len()];
-        for y in 0..i64::from(self.height) {
-            for x in 0..i64::from(self.width) {
-                if !self.at(x, y) {
-                    continue;
+        for y in 0..height {
+            for x in 0..width {
+                if self.at(x, y) {
+                    let covered = (0..block).any(|dy| (0..block).any(|dx| is_full(x - dx, y - dy)));
+                    bits[(y * width + x) as usize] = !covered;
                 }
-                let covered = [(-1, -1), (0, -1), (-1, 0), (0, 0)].iter().any(|(dx, dy)| {
-                    let (bx, by) = (x + dx, y + dy);
-                    self.at(bx, by)
-                        && self.at(bx + 1, by)
-                        && self.at(bx, by + 1)
-                        && self.at(bx + 1, by + 1)
-                });
-                bits[y as usize * self.width as usize + x as usize] = !covered;
             }
         }
         Self {
@@ -248,13 +253,22 @@ pub(crate) fn best_iou(a: &Mask, b: &Mask, search: i64) -> f64 {
     best
 }
 
-/// SIL-8: (hair-thin parts of ≥ 3 connected thin pixels, thin pixels in all).
-pub(crate) fn hair_parts(mask: &Mask) -> (usize, usize) {
-    let thin = mask.thin();
+/// SIL-8 on a silhouette rendered at `block`× the checked resolution: (hair-thin parts, thin
+/// pixels). A thin pixel is narrower than one checked pixel (`block` samples); a part is a
+/// connected run of them at least two checked pixels long (shorter runs are tapering tips).
+pub(crate) fn hair_parts(mask: &Mask, block: i64) -> (usize, usize) {
+    let thin = mask.thin(block);
+    let width = thin.width as usize;
     let parts = thin
         .components(true, true)
         .iter()
-        .filter(|component| component.len() >= 3)
+        .filter(|component| {
+            let xs = component.iter().map(|index| index % width);
+            let ys = component.iter().map(|index| index / width);
+            let span_x = xs.clone().max().unwrap_or(0) - xs.min().unwrap_or(0) + 1;
+            let span_y = ys.clone().max().unwrap_or(0) - ys.min().unwrap_or(0) + 1;
+            span_x.max(span_y) as i64 >= 2 * block
+        })
         .count();
     (parts, thin.count())
 }
@@ -319,9 +333,42 @@ pub(crate) fn id_mask(ids: &Image, colour: [u8; 3]) -> Mask {
     })
 }
 
-/// Every numeric check; the silhouette sets are returned for the sheet.
-#[allow(clippy::too_many_lines)] // One rule after another, in the bible's order.
+/// Every numeric check, in the bible's order.
 pub(crate) fn run(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String> {
+    let mut checks = frame_checks(meta, dir)?;
+    silhouette_checks(meta, dir, &mut checks)?;
+    for (rule, what) in HUMAN_OR_NOT_BUILT {
+        push(&mut checks, rule, None, "-".into(), what);
+    }
+    Ok(checks)
+}
+
+/// The rules the sheets leave to a person, or that are not built.
+const HUMAN_OR_NOT_BUILT: [(&str, &str); 7] = [
+    (
+        "SIL-4",
+        "role tell in the top third (human, on the silhouette sheet)",
+    ),
+    (
+        "SIL-9",
+        "idle, run and cast key poses each pass SIL-3 (human; one pose per render)",
+    ),
+    ("PAL-3", "accent area and chroma (not built)"),
+    (
+        "VOID-1",
+        "bone or silver >= 10 % of projected area (not built)",
+    ),
+    ("EMB-1", "ember crystal hue and facet rim (not built)"),
+    ("PBR-HEAT-1", "temper colours and patina (not built)"),
+    (
+        "PBR-WEAR-1r",
+        "dust on the lower body (rendered half not built)",
+    ),
+];
+
+/// CON, VAL and rendered EMIT on the 46 m 1440p frame, its ids and its emission frame.
+#[allow(clippy::too_many_lines)] // One rule after another, in the bible's order.
+pub(crate) fn frame_checks(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String> {
     let mut checks = Vec::new();
     let frame = &meta.frames.gameplay_1440p;
     let beauty = imaging::read_png(&dir.join(&frame.file))?;
@@ -358,33 +405,10 @@ pub(crate) fn run(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String> {
         format!("ground mean L {mean:.3}, p5-p95 {:.3}", p95 - p5),
         "mean OKLab L 0.30-0.58, p5-p95 <= 0.30 (exposure is set to 0.50, so the spread is the test)",
     );
-    let mut lit: Vec<f32> = (0..beauty.len())
-        .filter(|&index| !post.bits[index])
-        .map(|index| display_l(&beauty, index))
-        .collect();
-    let p1 = imaging::percentile(&mut lit, 1.0).unwrap_or(0.0);
-    push(
-        &mut checks,
-        "VAL-3",
-        Some(p1 >= 0.18),
-        format!("p1 L {p1:.3}"),
-        "shadow floor L >= 0.18 (read at p1 of the frame)",
-    );
-    let mut plain: Vec<f32> = (0..beauty.len())
-        .filter(|&index| !post.bits[index] && !emissive_px(index))
-        .map(|index| display_l(&beauty, index))
-        .collect();
-    let p99 = imaging::percentile(&mut plain, 99.0).unwrap_or(0.0);
-    push(
-        &mut checks,
-        "VAL-4",
-        Some(p99 <= 0.85),
-        format!("p99 L {p99:.3}"),
-        "non-emissive highlight ceiling L <= 0.85 (read at p99)",
-    );
-
     // Per model: contrast and rendered emission.
     let mut all_emissive = 0usize;
+    // Each model and its 3x ring: where VAL-3 and VAL-4 look (the bare ground is VAL-2's).
+    let mut near = vec![false; beauty.len()];
     for model in &meta.models {
         let colour = *meta
             .id_colours
@@ -411,6 +435,11 @@ pub(crate) fn run(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String> {
                 .collect::<Vec<_>>(),
         );
         let (w, h) = (x1 - x0, y1 - y0);
+        for y in (y0 - h).max(0)..(y1 + h).min(1440) {
+            for x in (x0 - w).max(0)..(x1 + w).min(2560) {
+                near[(y * 2560 + x) as usize] = true;
+            }
+        }
         let ring: Vec<f32> = (y0 - h..y1 + h)
             .flat_map(|y| (x0 - w..x1 + w).map(move |x| (x, y)))
             .filter(|&(x, y)| !(x >= x0 && x < x1 && y >= y0 && y < y1) && ground.at(x, y))
@@ -479,6 +508,34 @@ pub(crate) fn run(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String> {
             );
         }
     }
+    let around: Vec<usize> = (0..beauty.len())
+        .filter(|&index| near[index] && !post.bits[index])
+        .collect();
+    let mut lit: Vec<f32> = around
+        .iter()
+        .map(|&index| display_l(&beauty, index))
+        .collect();
+    let p1 = imaging::percentile(&mut lit, 1.0).unwrap_or(0.0);
+    push(
+        &mut checks,
+        "VAL-3",
+        Some(p1 >= 0.18),
+        format!("p1 L {p1:.3}"),
+        "shadow floor L >= 0.18 (p1 over the models and their 3x rings, shadows included)",
+    );
+    let mut plain: Vec<f32> = around
+        .iter()
+        .filter(|&&index| !emissive_px(index))
+        .map(|&index| display_l(&beauty, index))
+        .collect();
+    let p99 = imaging::percentile(&mut plain, 99.0).unwrap_or(0.0);
+    push(
+        &mut checks,
+        "VAL-4",
+        Some(p99 <= 0.85),
+        format!("p99 L {p99:.3}"),
+        "non-emissive highlight ceiling L <= 0.85 (p99 over the models and their rings)",
+    );
     let screen = all_emissive as f64 / beauty.len() as f64;
     push(
         &mut checks,
@@ -488,30 +545,6 @@ pub(crate) fn run(meta: &Meta, dir: &Path) -> Result<Vec<Check>, String> {
         "static emissive screen share <= 2 % at 46 m (this lineup, not a map capture)",
     );
 
-    silhouette_checks(meta, dir, &mut checks)?;
-    for (rule, what) in [
-        (
-            "SIL-4",
-            "role tell in the top third (human, on the silhouette sheet)",
-        ),
-        (
-            "SIL-9",
-            "idle, run and cast key poses each pass SIL-3 (human; one pose per render)",
-        ),
-        ("PAL-3", "accent area and chroma (not built)"),
-        (
-            "VOID-1",
-            "bone or silver >= 10 % of projected area (not built)",
-        ),
-        ("EMB-1", "ember crystal hue and facet rim (not built)"),
-        ("PBR-HEAT-1", "temper colours and patina (not built)"),
-        (
-            "PBR-WEAR-1r",
-            "dust on the lower body (rendered half not built)",
-        ),
-    ] {
-        push(&mut checks, rule, None, "-".into(), what);
-    }
     Ok(checks)
 }
 
@@ -561,11 +594,13 @@ fn silhouette_checks(meta: &Meta, dir: &Path, checks: &mut Vec<Check>) -> Result
         };
         let s1080 = find("1080p")?;
         let s1440 = find("1440p")?;
-        if s1080.files.len() != 8 || s1440.files.len() != 8 {
+        let s4x = find("1080p4x")?;
+        if s1080.files.len() != 8 || s1440.files.len() != 8 || s4x.files.len() != 8 {
             return Err(format!("{name}: silhouettes need 8 yaws"));
         }
         let set1080 = load_silhouettes(dir, &s1080.files)?;
         let set1440 = load_silhouettes(dir, &s1440.files)?;
+        let set4x = load_silhouettes(dir, &s4x.files)?;
         let yaws = set1080.whole.len();
 
         // SIL-5 / SIL-6: faction tells on units.
@@ -589,9 +624,9 @@ fn silhouette_checks(meta: &Meta, dir: &Path, checks: &mut Vec<Check>) -> Result
                 push(
                     checks,
                     &format!("SIL-5 ({name})"),
-                    Some(good >= YAW_QUORUM),
+                    Some(good == yaws),
                     format!("{good}/8 yaws, min {:.1} %", low * 100.0),
-                    "radial tell >= 8 % of the silhouette at 1440p, from >= 6 of 8 yaws",
+                    "radial tell >= 8 % of the silhouette at 1440p, every yaw",
                 );
             }
         }
@@ -601,9 +636,9 @@ fn silhouette_checks(meta: &Meta, dir: &Path, checks: &mut Vec<Check>) -> Result
             push(
                 checks,
                 &format!("SIL-6 ({name})"),
-                Some(good >= YAW_QUORUM),
+                Some(good == yaws),
                 format!("{good}/8 yaws, counts {counts:?}"),
-                ">= 2 enclosed gaps or floating parts, each >= 2 px, at 1440p, from >= 6 of 8 yaws",
+                ">= 2 enclosed gaps or floating parts, each >= 2 px, at 1440p, every yaw",
             );
         }
         // SIL-7: weapons.
@@ -617,7 +652,7 @@ fn silhouette_checks(meta: &Meta, dir: &Path, checks: &mut Vec<Check>) -> Result
                 push(
                     checks,
                     &format!("SIL-7 ({name})"),
-                    Some(seen >= YAW_QUORUM),
+                    Some(seen >= RANGED_YAWS),
                     format!("visible from {seen}/8 yaws"),
                     "ranged weapon visible from >= 6 of 8 yaws",
                 );
@@ -649,25 +684,28 @@ fn silhouette_checks(meta: &Meta, dir: &Path, checks: &mut Vec<Check>) -> Result
                 push(
                     checks,
                     &format!("SIL-7 ({name})"),
-                    Some(good >= YAW_QUORUM),
+                    Some(good == yaws),
                     format!(
                         "{good}/8 yaws, max +{:.0} %",
                         growth.iter().copied().fold(0.0, f64::max) * 100.0
                     ),
-                    "melee weapon extends the bbox >= 15 % (width or height), from >= 6 of 8 yaws",
+                    "melee weapon extends the bbox >= 15 % (width or height) at 1440p, every yaw",
                 );
             }
         }
-        // SIL-8: hair-thin parts at 1080p.
-        let hair: Vec<(usize, usize)> = set1080.whole.iter().map(hair_parts).collect();
-        let worst = hair.iter().map(|(parts, _)| *parts).max().unwrap_or(0);
-        let thin_px: usize = hair.iter().map(|(_, thin)| *thin).max().unwrap_or(0);
+        // SIL-8: parts under 1 px at 1080p, measured at 4x4 samples per pixel.
+        let hair: Vec<usize> = set4x
+            .whole
+            .iter()
+            .map(|mask| hair_parts(mask, SIL8_SAMPLES).0)
+            .collect();
+        let clean = hair.iter().filter(|parts| **parts == 0).count();
         push(
             checks,
             &format!("SIL-8 ({name})"),
-            Some(worst == 0),
-            format!("{worst} thin parts, <= {thin_px} thin px per yaw"),
-            "no part under 2 px wide (a run of >= 3 pixels the 2x2 opening removes) at 1080p, every yaw",
+            Some(clean == yaws),
+            format!("{clean}/8 yaws clean, parts per yaw {hair:?}"),
+            "no part under 1 px wide at 1080p (>= 2 px long; 4x4 samples per pixel), every yaw",
         );
         if model.role == "hero" {
             heroes_1080.push((name.clone(), set1080));
@@ -708,16 +746,25 @@ mod tests {
     fn thin_lines_are_found_and_staircases_are_not() {
         let mask = Mask::from_rows(&[
             "..........",
-            ".####.....",
             ".####.#...",
             ".####.#...",
             ".####.#...",
+            ".####.#..#",
             "..........",
         ]);
-        let (parts, thin) = hair_parts(&mask);
-        assert_eq!((parts, thin), (1, 3), "the 1 px antenna is a hair part");
+        let (parts, thin) = hair_parts(&mask, 2);
+        assert_eq!(
+            (parts, thin),
+            (1, 5),
+            "the 4 px antenna is a part; the lone pixel a tip"
+        );
         let stairs = Mask::from_rows(&["#.....", "##....", "###...", "####..", "#####.", "######"]);
-        assert_eq!(hair_parts(&stairs).0, 0, "a 45 deg edge is not thin");
+        assert_eq!(hair_parts(&stairs, 2).0, 0, "a 45 deg edge is not thin");
+        // At 4 samples per checked pixel: a 3-sample-wide strut is under 1 px, a 4-wide is not.
+        let narrow = Mask::from_rows(&[".###."; 12]);
+        let wide = Mask::from_rows(&[".####."; 12]);
+        assert_eq!(hair_parts(&narrow, 4).0, 1);
+        assert_eq!(hair_parts(&wide, 4), (0, 0));
     }
 
     #[test]
@@ -741,6 +788,123 @@ mod tests {
         assert!((best_iou(&a, &b, 0) - 1.0).abs() < 1e-9);
         let c = Mask::from_rows(&["......", "...#..", "...#..", "......"]);
         assert!((best_iou(&a, &c, 1) - 0.5).abs() < 1e-9);
+    }
+
+    fn write_rgb(
+        path: &Path,
+        width: u32,
+        height: u32,
+        sixteen: bool,
+        pixel: impl Fn(u32, u32) -> [u16; 3],
+    ) {
+        let file = std::fs::File::create(path).expect("create");
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(if sixteen {
+            png::BitDepth::Sixteen
+        } else {
+            png::BitDepth::Eight
+        });
+        let mut writer = encoder.write_header().expect("header");
+        let mut bytes = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                for value in pixel(x, y) {
+                    if sixteen {
+                        bytes.extend_from_slice(&value.to_be_bytes());
+                    } else {
+                        bytes.push(value as u8);
+                    }
+                }
+            }
+        }
+        writer.write_image_data(&bytes).expect("data");
+    }
+
+    #[test]
+    fn frame_checks_measure_contrast_and_emission() {
+        let dir = std::env::temp_dir().join(format!("moba-review-sheet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let hero = |x: u32, y: u32| (1000..1040).contains(&x) && (600..680).contains(&y);
+        let minion = |x: u32, y: u32| (1400..1430).contains(&x) && (620..680).contains(&y);
+        // Ground sRGB 120; the hero 60 (dark: CON-1 passes); the minion 118 (CON-4 fails).
+        write_rgb(&dir.join("b.png"), 2560, 1440, false, |x, y| {
+            let v = if hero(x, y) {
+                60
+            } else if minion(x, y) {
+                118
+            } else {
+                120
+            };
+            [v; 3]
+        });
+        write_rgb(&dir.join("i.png"), 2560, 1440, false, |x, y| {
+            if hero(x, y) {
+                [255, 0, 0]
+            } else if minion(x, y) {
+                [0, 255, 0]
+            } else {
+                [0; 3]
+            }
+        });
+        // 32 of the hero's 3200 pixels glow at 1.5 L_ref (+0.58 EV): 1 % of its area.
+        let l_ref = crate::meta::l_ref();
+        let glow = (1.5 * l_ref * 65535.0).round() as u16;
+        write_rgb(&dir.join("e.png"), 2560, 1440, true, |x, y| {
+            if hero(x, y) && y == 600 && x < 1032 {
+                [glow; 3]
+            } else {
+                [0; 3]
+            }
+        });
+        let frame = |file: &str| {
+            serde_json::json!({"file": file, "width": 2560, "height": 1440, "distance_m": 46.0,
+                               "models": [], "post_bbox": [0, 0, 1, 1], "ids": "i.png", "emit": "e.png"})
+        };
+        let model = |name: &str, role: &str| {
+            serde_json::json!({"name": name, "glb": "unused.glb", "role": role, "faction": "forge",
+                               "pose": {"clip": "", "frame": 0, "applied": false}})
+        };
+        let meta: Meta = serde_json::from_value(serde_json::json!({
+            "schema": 1, "name": "t", "renderer": "Cycles", "device": "CPU", "blender": "5.2.3",
+            "samples": 1,
+            "camera": {"yaw": -0.7, "pitch": 0.95, "distance_m": 46.0, "zoom_distance_m": 8.0, "fov_y_deg": 60.0},
+            "sun": {"dir": [-0.885, 0.532, 0.465], "colour": [1.0, 0.8, 0.62], "intensity": 1.5, "elevation_deg": 28.0},
+            "sky": {"ibl": 0.35, "zenith": [0.0, 0.0, 0.0], "horizon": [0.0, 0.0, 0.0], "ground": [0.0, 0.0, 0.0]},
+            "ground_hex": "#6B6560", "lane_hex": "#906B58", "l_ref": l_ref, "post_m": 1.8,
+            "view_transform": "AgX", "exposure_ev": 0.0, "ground_l_target": 0.5, "ground_l_calibrated": 0.5,
+            "id_colours": {"h": [1, 0, 0], "m": [0, 1, 0]}, "post_colour": [1, 1, 1],
+            "models": [model("h", "hero"), model("m", "minion")],
+            "frames": {"46m_1440p": frame("b.png"), "46m_2160p": frame("b.png"), "zoom": [],
+                       "lineup_1440p": frame("b.png"), "turntable": [], "silhouettes": []},
+        }))
+        .expect("meta");
+        let checks = frame_checks(&meta, &dir).expect("frame checks");
+        let _ = std::fs::remove_dir_all(&dir);
+        let outcome = |rule: &str| {
+            checks
+                .iter()
+                .find(|check| check.rule == rule)
+                .map(|check| check.pass)
+        };
+        assert_eq!(outcome("CON-1 (h)"), Some(Some(true)));
+        assert_eq!(outcome("CON-4 (m)"), Some(Some(false)));
+        assert_eq!(outcome("PBR-EMIT-2r (h)"), Some(Some(true)));
+        assert_eq!(outcome("PBR-EMIT-1r (h)"), Some(Some(true)));
+        assert_eq!(outcome("PBR-EMIT-1r (m)"), Some(None));
+        assert_eq!(outcome("VAL-2"), Some(Some(true)));
+        assert_eq!(outcome("VAL-3"), Some(Some(true)));
+        let emit = checks
+            .iter()
+            .find(|check| check.rule == "PBR-EMIT-1r (h)")
+            .expect("EMIT-1r");
+        assert!(emit.value.contains("+0.58"), "{}", emit.value);
+        let area = checks
+            .iter()
+            .find(|check| check.rule == "PBR-EMIT-2r (h)")
+            .expect("EMIT-2r");
+        assert!(area.value.starts_with("1.00 %"), "{}", area.value);
     }
 
     #[test]

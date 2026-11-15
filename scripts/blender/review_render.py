@@ -30,9 +30,10 @@ The review file (TOML; paths relative to it):
     tell = ["crest"]                      # optional: joints of the faction tell (SIL-5, SIL-6)
     weapon = ["blade"]                    # optional: joints of the weapon (SIL-7)
     weapon_kind = "melee"                 # melee | ranged, with `weapon`
-    [models.textures]                     # source PNGs (glTF conventions)
+    [models.textures]                     # source PNGs, the engine's channel packing
     base = "..."; normal = "..."          # required
-    mr = "..."                            # or metallic = "..." and roughness = "..."
+    mr = "..."                            # R metallic, G roughness (as texture-bake --kind
+                                          # data); or metallic = "..." and roughness = "..."
     emissive = "..."                      # optional mask (x colour x strength)
     [models.emissive]
     colour = "#FFE6BE"; strength = 0.19
@@ -45,8 +46,8 @@ Frames written to `out` (8-bit sRGB AgX unless noted):
 - `zoom_<model>.png`: 2560x1440 at 8 m on the model;
 - `turn_<model>_<k>.png`: 640x640, model yawed by k x 45 deg, the default camera framing it;
 - `lineup_1440p.png`, `lineup_1440p_ids.png`: every model and the post, framed;
-- `sil/<model>/<res>_<k>.png`: flat silhouettes alone at 1080p and 1440p (cropped), body red,
-  tell green, weapon blue, yaw k x 45 deg.
+- `sil/<model>/<res>_<k>.png`: flat silhouettes alone at 1080p, 1440p and 1080p x4 (cropped),
+  body red, tell green, weapon blue, yaw k x 45 deg.
 """
 import json
 import math
@@ -69,7 +70,8 @@ SIZE_CLASSES = {"minion-ranged", "minion-melee", "minion-siege", "hero-s", "hero
 ID_COLOURS = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0), (1, 0, 1), (0, 1, 1)]
 POST_COLOUR = (1, 1, 1)
 YAWS = 8
-SIL_RES = {"1080p": (1920, 1080), "1440p": (2560, 1440)}
+# `1080p4x` is 1080p at 4x4 samples per pixel: SIL-8 measures parts under 1 px at 1080p on it.
+SIL_RES = {"1080p": (1920, 1080), "1440p": (2560, 1440), "1080p4x": (7680, 4320)}
 CALIBRATION_RES = (640, 360)
 
 
@@ -152,11 +154,11 @@ def textured_material(model):
     bsdf = nt.nodes["Principled BSDF"]
     base = image_node(nt, tex["base"], False)
     nt.links.new(base.outputs["Color"], bsdf.inputs["Base Color"])
-    if "mr" in tex:  # glTF packing: G roughness, B metallic
+    if "mr" in tex:  # the engine's packing (content-authoring.md): R metallic, G roughness
         sep = nt.nodes.new("ShaderNodeSeparateColor")
         nt.links.new(image_node(nt, tex["mr"], True).outputs["Color"], sep.inputs["Color"])
+        nt.links.new(sep.outputs["Red"], bsdf.inputs["Metallic"])
         nt.links.new(sep.outputs["Green"], bsdf.inputs["Roughness"])
-        nt.links.new(sep.outputs["Blue"], bsdf.inputs["Metallic"])
     else:
         nt.links.new(image_node(nt, tex["roughness"], True).outputs["Color"], bsdf.inputs["Roughness"])
         nt.links.new(image_node(nt, tex["metallic"], True).outputs["Color"], bsdf.inputs["Metallic"])
@@ -626,7 +628,7 @@ def main():
                 place(m, (0, 0, 0), k * 360.0 / YAWS)
                 pts = world_points(m)
                 r.aim((0, 0, 0), mb.CAMERA_DISTANCE, res)
-                crop = r.crop(r.project(pts), 6)
+                crop = r.crop(r.project(pts), 6 * res[1] // 1080)
                 name = f"sil/{m['name']}/{res_name}_{k}.png"
                 r.shoot(os.path.join(out, name))
                 files.append(name)
