@@ -126,6 +126,8 @@ content-check FILE:
 ci-tools:
     cargo run --release -p moba-tools --bin content-check -- content/example-pack.toml
     cargo run --release -p moba-tools --bin content-check -- content/map-pack.toml
+    # Asset licences and provenance (A0): the gate passes and the generated notices are current.
+    cargo run --release -p moba-tools --bin content-check -- --provenance --check
     cargo run --release -p moba-tools --bin match-soak -- --matches 10 --ticks 12000
     cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 30
     cargo run --release -p moba-tools --bin load-test -- --matches 8 --clients 10 --seconds 60

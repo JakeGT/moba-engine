@@ -17,7 +17,7 @@
 //! dominant axis at [`UV_PER_METRE`], `v` running down, so a tiling material (the sentinel's
 //! `materials/sentinel.toml`) wraps them without a UV-unwrapping tool. They also carry
 //! `TANGENT` (R2a): `moba_assets::MeshData::generate_tangents` on those UVs (glTF convention,
-//! MikkTSpace-style), so the normal map needs no tangents generated at load. The skinned sample keeps
+//! `MikkTSpace` since A0), so the normal map needs no tangents generated at load. The skinned sample keeps
 //! its R4a layout (no UVs) so the networked golden's model is unchanged.
 
 use std::fmt::Write as _;

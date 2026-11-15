@@ -639,7 +639,8 @@ pub const AMBIENT_MIN_PERIOD: f32 = 0.25;
 ///   full-alpha telegraph); one whose plays outlast [`AMBIENT_PLAYS`] restart periods is a
 ///   warning (the client caps its live plays, so it pulses);
 /// - every other `vfx/*.toml` is loaded too, but a failure there is a warning: nothing
-///   references it.
+///   references it (except `vfx/provenance.toml`, the A0 provenance manifest, which is
+///   skipped).
 ///
 /// A missing `vfx` directory is fine (no effects) unless something references an effect.
 #[must_use]
@@ -661,7 +662,10 @@ pub fn check_vfx_dir(root: &Path, ambient: &[(&str, &str)]) -> VfxDirReport {
             let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if stem == "bindings" {
+            // The bindings and the provenance manifest (A0) are not effects.
+            if stem == "bindings"
+                || path.file_name() == Some(crate::provenance::PROVENANCE_FILE.as_ref())
+            {
                 continue;
             }
             if !valid_vfx_name(stem) {

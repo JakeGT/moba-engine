@@ -23,8 +23,10 @@
 //! flipped by a mirroring transform). Missing normals are replaced by flat face normals, as
 //! the glTF specification requires. When any primitive has `TEXCOORD_0`, primitives without it
 //! get `(0, 0)`. Tangents are kept only when *every* primitive supplied them (flat-normal
-//! primitives never do); otherwise the mesh carries none and consumers generate them
-//! ([`MeshData::with_generated_tangents`]). Sparse accessors, external buffers and any `extensionsRequired` entry are
+//! primitives never do); otherwise, when the mesh has UVs, the loader generates `MikkTSpace`
+//! tangents once ([`MeshData::with_generated_tangents`]). A mirroring node transform
+//! (negative determinant) reverses each triangle's corner order, so front faces stay
+//! counter-clockwise about their normals, as `MikkTSpace` and flat normals assume. Sparse accessors, external buffers and any `extensionsRequired` entry are
 //! rejected; glTF materials, images and morph targets are ignored (materials come from a
 //! client-local descriptor, ADR-0010).
 //!
@@ -147,12 +149,34 @@ impl From<SkinError> for GlbError {
     }
 }
 
+/// What the loader does for a mesh whose file has no `TANGENT` (see the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GlbTangents {
+    /// Generate `MikkTSpace` tangents from the UVs, once ([`MeshData::with_generated_tangents`]).
+    #[default]
+    Generate,
+    /// Keep only the file's own `TANGENT`s: without them [`MeshData::tangents`] is `None`.
+    /// For consumers that never read tangents (the bakers, bounds and budget checks), which
+    /// then skip `MikkTSpace`, and for checking that a shipped file carries its own
+    /// (`content-check --provenance`, ADR-0022 amendment 1).
+    FileOnly,
+}
+
 /// Reads and parses a `.glb` file, refusing files larger than [`MAX_GLB_BYTES`] without
 /// reading them.
 ///
 /// # Errors
 /// Returns [`GlbError::Io`] for file errors, otherwise as [`load_glb`].
 pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
+    load_glb_file_with(path, GlbTangents::Generate)
+}
+
+/// [`load_glb_file`] with a choice of what happens to a mesh without `TANGENT`.
+///
+/// # Errors
+/// As [`load_glb_file`].
+pub fn load_glb_file_with(path: &Path, tangents: GlbTangents) -> Result<MeshData, GlbError> {
     let file = std::fs::File::open(path).map_err(|error| GlbError::Io(error.kind()))?;
     let length = file
         .metadata()
@@ -166,7 +190,36 @@ pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
     file.take(MAX_GLB_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| GlbError::Io(error.kind()))?;
-    load_glb(&bytes)
+    load_glb_with(&bytes, tangents)
+}
+
+/// The rule for shipped meshes (ADR-0022 amendment 1): a `.glb` with `TEXCOORD_0` carries
+/// `TANGENT` on every primitive, so the game never generates tangents for it at load.
+/// Loads with [`GlbTangents::FileOnly`]; a mesh without UVs needs no tangents.
+///
+/// # Errors
+/// Why the file breaks the rule, or why it does not load.
+pub fn check_baked_tangents(bytes: &[u8]) -> Result<(), String> {
+    baked_tangents(load_glb_with(bytes, GlbTangents::FileOnly))
+}
+
+/// [`check_baked_tangents`] on the file at `path` (read as [`load_glb_file`] does).
+///
+/// # Errors
+/// As [`check_baked_tangents`].
+pub fn check_baked_tangents_file(path: &Path) -> Result<(), String> {
+    baked_tangents(load_glb_file_with(path, GlbTangents::FileOnly))
+}
+
+fn baked_tangents(mesh: Result<MeshData, GlbError>) -> Result<(), String> {
+    match mesh {
+        Ok(mesh) if mesh.uvs().is_some() && mesh.tangents().is_none() => Err(String::from(
+            "has TEXCOORD_0 but no TANGENT on every primitive; export it with MikkTSpace \
+             tangents (shipped meshes carry baked tangents, ADR-0022 amendment 1)",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("does not load: {error}")),
+    }
 }
 
 /// Parses a binary glTF file into one merged, validated mesh, skinned if it uses a skin.
@@ -179,6 +232,14 @@ pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
 /// # Errors
 /// Returns a [`GlbError`] describing the first problem found.
 pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
+    load_glb_with(bytes, GlbTangents::Generate)
+}
+
+/// [`load_glb`] with a choice of what happens to a mesh without `TANGENT`.
+///
+/// # Errors
+/// As [`load_glb`].
+pub fn load_glb_with(bytes: &[u8], generate: GlbTangents) -> Result<MeshData, GlbError> {
     if bytes.len() > MAX_GLB_BYTES {
         return Err(GlbError::TooLarge);
     }
@@ -237,9 +298,13 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
     if let Some(uvs) = uvs {
         mesh = mesh.with_uvs(uvs)?;
     }
-    if let Some(tangents) = tangents {
-        mesh = mesh.with_tangents(tangents)?;
-    }
+    mesh = match (tangents, generate) {
+        (Some(tangents), _) => mesh.with_tangents(tangents)?,
+        // Generated once here (MikkTSpace, A0), so every consumer, bone-LOD skins included,
+        // shares them instead of regenerating; a no-op without UVs.
+        (None, GlbTangents::Generate) => mesh.with_generated_tangents(),
+        (None, GlbTangents::FileOnly) => mesh,
+    };
     let SkinMode::Skinned(skin) = skin else {
         return Ok(mesh);
     };
@@ -1109,15 +1174,26 @@ impl Builder {
             self.push_streams(streams, element)?;
         }
         let vertex_count = positions.count as u32; // <= MAX_VERTICES, checked by `reserve`.
-        for element in 0..index_count {
-            let index = match indices {
-                Some(data) => data.index(element).ok_or(GlbError::BadAccessor)?,
-                None => element as u32,
-            };
-            if index >= vertex_count {
-                return Err(MeshError::IndexOutOfRange.into());
+        // glTF: a negative determinant makes the node's front faces clockwise; reverse each
+        // triangle so they are counter-clockwise again in the baked (world) space.
+        let mirrored = linear.determinant() < 0.0;
+        for triangle in 0..index_count / 3 {
+            let mut corners = [0u32; 3];
+            for (corner, slot) in corners.iter_mut().enumerate() {
+                let element = triangle * 3 + corner;
+                let index = match indices {
+                    Some(data) => data.index(element).ok_or(GlbError::BadAccessor)?,
+                    None => element as u32,
+                };
+                if index >= vertex_count {
+                    return Err(MeshError::IndexOutOfRange.into());
+                }
+                *slot = base + index;
             }
-            self.indices.push(base + index);
+            if mirrored {
+                corners.swap(1, 2);
+            }
+            self.indices.extend_from_slice(&corners);
         }
         Ok(())
     }
@@ -1133,6 +1209,9 @@ impl Builder {
     ) -> Result<(), GlbError> {
         self.reserve(index_count, index_count)?;
         let base = u32::try_from(self.positions.len()).map_err(|_| MeshError::TooManyVertices)?;
+        // See `append_indexed`: a mirroring transform reverses the corner order, before the
+        // face normal is taken from the corners, so it points out of the front face.
+        let mirrored = Mat3::from_mat4(world).determinant() < 0.0;
         let mut corners = [Vec3::ZERO; 3];
         let mut sources = [0usize; 3];
         for triangle in 0..index_count / 3 {
@@ -1148,6 +1227,10 @@ impl Builder {
                 let position = positions.f32_vec3(index).ok_or(GlbError::BadAccessor)?;
                 *slot = world.transform_point3(Vec3::from_array(position));
                 sources[corner] = index;
+            }
+            if mirrored {
+                corners.swap(1, 2);
+                sources.swap(1, 2);
             }
             let normal = (corners[1] - corners[0])
                 .cross(corners[2] - corners[0])
@@ -1240,29 +1323,67 @@ mod tests {
         assert_eq!(mesh.normals()[0], [0.0, 0.0, 1.0]);
     }
 
+    /// The test triangle with `TEXCOORD_0` of glTF component type `component` (normalised
+    /// when an integer), from the 24 bytes of `data`, and no `TANGENT`.
+    fn uv_glb(component: u32, data: Vec<u8>) -> Vec<u8> {
+        let json = triangle_json("", POSITION_ACCESSOR)
+            .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TEXCOORD_0":3}"#)
+            .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
+            .replace(
+                r#""byteLength":6}],"#,
+                r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":24}],"#,
+            )
+            .replace(
+                r#""type":"SCALAR"}]"#,
+                &format!(
+                    r#""type":"SCALAR"}},{{"bufferView":3,"componentType":{component},"normalized":true,"count":3,"type":"VEC2"}}]"#
+                ),
+            );
+        let mut bin = triangle_bin();
+        bin.extend([0, 0]); // pad the u16 indices to 80 bytes
+        bin.extend(data);
+        glb(&json, Some(&bin))
+    }
+
+    /// Shipped meshes with UVs carry baked tangents (ADR-0022 amendment 1); the rule that
+    /// `content-check --provenance` and the shipped-content test apply, on every platform.
+    #[test]
+    fn shipped_meshes_with_uvs_need_baked_tangents() {
+        let sentinel = include_bytes!("../../../content/models/sentinel.glb");
+        assert!(
+            load_glb_with(sentinel, GlbTangents::FileOnly)
+                .expect("sentinel")
+                .uvs()
+                .is_some()
+        );
+        assert_eq!(
+            check_baked_tangents(sentinel),
+            Ok(()),
+            "UVs and baked tangents"
+        );
+        assert_eq!(
+            check_baked_tangents(SKINNED),
+            Ok(()),
+            "no UVs, so no tangents needed"
+        );
+        let missing = check_baked_tangents(&uv_glb(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0])))
+            .expect_err("UVs without TANGENT");
+        assert!(missing.contains("no TANGENT"), "{missing}");
+        let broken = check_baked_tangents(b"glTF").expect_err("not a mesh");
+        assert!(broken.starts_with("does not load"), "{broken}");
+    }
+
     #[test]
     fn texcoords_are_read_as_float_or_normalised_ints() {
-        let with_uvs = |component: u32, data: Vec<u8>| {
-            let json = triangle_json("", POSITION_ACCESSOR)
-                .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TEXCOORD_0":3}"#)
-                .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
-                .replace(
-                    r#""byteLength":6}],"#,
-                    r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":24}],"#,
-                )
-                .replace(
-                    r#""type":"SCALAR"}]"#,
-                    &format!(
-                        r#""type":"SCALAR"}},{{"bufferView":3,"componentType":{component},"normalized":true,"count":3,"type":"VEC2"}}]"#
-                    ),
-                );
-            let mut bin = triangle_bin();
-            bin.extend([0, 0]); // pad the u16 indices to 80 bytes
-            bin.extend(data);
-            load_glb(&glb(&json, Some(&bin)))
-        };
+        let with_uvs = |component: u32, data: Vec<u8>| load_glb(&uv_glb(component, data));
         let mesh = with_uvs(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0])).expect("f32 uvs");
         assert_eq!(mesh.uvs(), Some(&[[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]][..]));
+        assert!(mesh.tangents().is_some(), "generated at load");
+        // `FileOnly` reads the same mesh without generating tangents.
+        let bytes = uv_glb(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0]));
+        let file_only = load_glb_with(&bytes, GlbTangents::FileOnly).expect("f32 uvs");
+        assert_eq!(file_only.uvs(), mesh.uvs());
+        assert!(file_only.tangents().is_none(), "no TANGENT in the file");
         let mut bytes = vec![0, 0, 255, 0, 0, 255];
         bytes.resize(24, 0); // the buffer view is 24 bytes long
         let mesh = with_uvs(5121, bytes).expect("u8 uvs");
@@ -1276,6 +1397,54 @@ mod tests {
                 .uvs()
                 .is_none()
         );
+    }
+
+    /// A mirroring node keeps front faces counter-clockwise (it reverses the corners), so
+    /// generated `MikkTSpace` tangents flip handedness under the mirror, as file tangents do,
+    /// and missing normals still point out of the front face.
+    #[test]
+    fn a_mirroring_node_reverses_the_winding() {
+        let uv_mesh = |extra_node: &str, attributes: &str| {
+            let json = triangle_json(extra_node, POSITION_ACCESSOR)
+                .replace(r#""NORMAL":1}"#, attributes)
+                .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
+                .replace(
+                    r#""byteLength":6}],"#,
+                    r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":24}],"#,
+                )
+                .replace(
+                    r#""type":"SCALAR"}]"#,
+                    r#""type":"SCALAR"},{"bufferView":3,"componentType":5126,"count":3,"type":"VEC2"}]"#,
+                );
+            let mut bin = triangle_bin();
+            bin.extend([0, 0]);
+            bin.extend(floats(&[0.0, 1.0, 1.0, 1.0, 0.0, 0.0]));
+            load_glb(&glb(&json, Some(&bin))).expect("loads")
+        };
+        let smooth = r#""NORMAL":1,"TEXCOORD_0":3}"#;
+        let plain = uv_mesh("", smooth);
+        let mirrored = uv_mesh(r#","scale":[-1,1,1]"#, smooth);
+        assert_eq!(plain.indices(), &[0, 1, 2]);
+        assert_eq!(mirrored.indices(), &[0, 2, 1]);
+        let (plain, mirrored) = (
+            plain.tangents().expect("generated at load"),
+            mirrored.tangents().expect("generated at load"),
+        );
+        for (a, b) in plain.iter().zip(mirrored) {
+            assert_eq!(a[3], 1.0);
+            assert_eq!(b[3], -1.0, "mirrored handedness");
+            assert_eq!([-a[0], a[1], a[2]], [b[0], b[1], b[2]], "mirrored xyz");
+        }
+        // Without NORMAL: the flat normal of the mirrored triangle still faces +Z (the
+        // mirror keeps the triangle in the XY plane and its front towards +Z).
+        let flat = uv_mesh(r#","scale":[-1,1,1]"#, r#""TEXCOORD_0":3}"#);
+        assert_eq!(flat.normals(), &[[0.0, 0.0, 1.0]; 3]);
+        assert_eq!(
+            flat.positions()[1],
+            [0.0, 1.0, 0.0],
+            "corners 1 and 2 swapped"
+        );
+        assert!(flat.tangents().expect("generated")[0][3] < 0.0);
     }
 
     /// The triangle with a `TANGENT` accessor (bufferView 3, at byte 80) of `data`.
