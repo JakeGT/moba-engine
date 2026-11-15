@@ -646,6 +646,7 @@ jobs:
           echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           echo "Using $ICD"
       - name: Build client and tools
+        id: build
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
       # ADR-0023 verification gate 1 (N2a): 4096 fixed surfaces through the G-buffer encoding
@@ -682,9 +683,10 @@ jobs:
       # ADR-0023 verification gate 2 (N2b): the deferred frame against N1's tiered forward
       # frame (`MOBA_DEFERRED=off`) with the stylisation off, for the default scene, the R3b
       # river and the R3b teamfight: within 2/255 on at least 99.5 % of pixels and 6/255
-      # everywhere, with validation + sync validation clean.
+      # everywhere, with validation + sync validation clean. It runs whenever the build did,
+      # so a golden or probe failure above does not hide its result.
       - name: Deferred–forward parity (ADR-0023 gate 2)
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           scripts/deferred-parity.sh ./target/release/moba-client ./target/release/image-check \
             deferred-parity
