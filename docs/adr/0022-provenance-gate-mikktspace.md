@@ -682,9 +682,8 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
     `normals_split_custom_set` stores a lossy 16-bit encoding and ignores flat faces, which is
     probably why an earlier pre-rounding test left 53 split groups on the Monolith.
   - Blender's weld then sees the normals the file holds, so it merges the same corners as the
-    engine's, up to two effects outside this fix: the exporter writes `v` as `1 − v` in
-    float32, so UVs less than about 6e-8 apart can still merge in the file; and transforms
-    the exporter applies to positions can merge positions that close.
+    engine's, up to one effect outside this fix: the exporter writes `v` as `1 − v` in
+    float32, so UVs less than about 6e-8 apart can still merge in the file.
   - On exit, each mesh's previous custom normals are restored (type and domain), each mesh on
     its own, also after an exception.
   - `main` exports inside it; `--no-quantise` exports as before (with a warning), for an asset
@@ -738,8 +737,8 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
     their files are unchanged.
 - **Check script.** `scripts/blender/check_export_glb.py` (run by hand; CI has no Blender) checks
   the repro (6 → 4 vertices, GLB-MIKK 0.3333 → 1.0000 with `--content-check`), exact restore
-  (none, free normals on the corner and point domains, INT16 tangent-space normals, shared mesh
-  data, an exception inside the block) and the guard (Edge Split, Mirror, Subdivision +
+  (none, free normals on the corner, point and face domains, INT16 tangent-space normals,
+  shared mesh data, an exception inside the block) and the guard (Edge Split, Mirror, Subdivision +
   Triangulate, Weighted Normal and a keyed Armature raise; an Armature alone passes).
 
 **GLB-MIKK keeps the exact weld.** Amendment 2 defines GLB-MIKK as the agreement of the file's

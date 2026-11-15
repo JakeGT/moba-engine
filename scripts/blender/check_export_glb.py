@@ -11,9 +11,9 @@ on any failure. Checks:
 - the minimal repro (one flat quad 1e-5 m out of plane, skewed UVs; art-source
   `checks/results/2026-11-15-followup/mikk_repro.py`): 6 vertices and 4 tangent-split vertices
   exported without `quantised_normals` (GLB-MIKK 0.3333), 4 and 0 inside it (GLB-MIKK 1.0000);
-- the block restores each mesh's custom normals exactly: none, FLOAT_VECTOR on the corner and
-  point domains, INT16_2D (tangent space), mesh data shared by two objects, and after an
-  exception inside the block;
+- the block restores each mesh's custom normals exactly: none, FLOAT_VECTOR on the corner,
+  point and face domains, INT16_2D (tangent space), mesh data shared by two objects, and
+  after an exception inside the block;
 - the guard raises, naming the cause, for an Edge Split modifier, a Mirror modifier and
   Subdivision + Triangulate (corner count), a Weighted Normal modifier and a shape key under an
   Armature modifier, and passes an Armature modifier alone.
@@ -158,6 +158,11 @@ def check_restore():
     ob.data.attributes.new("custom_normal", "FLOAT_VECTOR", "POINT").data.foreach_set(
         "vector", vn.ravel())
     cases["FLOAT_VECTOR point"] = ob
+    ob = sphere("float-face")
+    fn = np.array([f.normal[:] for f in ob.data.polygons], dtype=np.float32) * np.float32(0.97)
+    ob.data.attributes.new("custom_normal", "FLOAT_VECTOR", "FACE").data.foreach_set(
+        "vector", fn.ravel())
+    cases["FLOAT_VECTOR face"] = ob
     ob = sphere("int16")
     rng = np.random.default_rng(1)
     custom = rng.normal(size=(len(ob.data.loops), 3)) * 0.2 + np.array([0.0, 0.0, 1.0])
