@@ -1248,12 +1248,17 @@ clarifications:
     `forward`, which the parity script checks. The forward `scene` pipelines are still built
     on a deferred frame (the sky and simple water draw from them); the tiered pipeline count
     is in perf/0036.
-16. **Gate 2 is not met on the R3b river as written; the maintainer decides.**
+16. **Gate 2 is not met as written on the R3b river (and on CI's lavapipe, by one pixel, on
+    the teamfight); the maintainer decides.**
     `scripts/deferred-parity.sh` (CI `tiered-temporal`) runs the gate as written: High (the
     default tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness
-    0.25), 1280×720, stylisation and foliage off. The default scene and the teamfight pass;
-    the river has 99.966 % of pixels within 2/255 (the bound is 99.5 %) but **7 of 921,600
-    pixels past 6/255, the worst at 15**. perf/0036 has the full measurement. In short:
+    0.25), 1280×720, stylisation and foliage off. Locally (Mesa 26.2.5) the default scene and
+    the teamfight pass; the river has 99.966 % of pixels within 2/255 (the bound is 99.5 %)
+    but **7 of 921,600 pixels past 6/255, the worst at 15**. On CI's lavapipe (Mesa 26.0.8,
+    LLVM 21.1.8, AMD) the default scene passes (max 6), the river has **11 pixels past 6, the
+    worst at 9**, and the teamfight **1 pixel at 7**; every one of those pixels, on both
+    machines, is on the river's shoreline foam line. perf/0036 has the full measurement. In
+    short:
     - **The lighting is exact.** A forward build that sends its terrain surface through the
       G-buffer's encode and decode before `shade()` matches the deferred frame within 2/255
       everywhere: the whole difference is the thin G-buffer's quantisation, the case gate 2's
@@ -1268,8 +1273,8 @@ clarifications:
     - **At native scale** (`MOBA_UPSCALE_MODE=native`, sharpness 0) the river's worst pixel is
       6/255, at the bound, with no margin for CI's different Mesa and CPU class.
 
-    The gate is left as written and its CI step reports the river's failure. The choices for
-    the maintainer: keep "6/255 everywhere" and accept the red river case until the frame is
+    The gate is left as written and its CI step reports the failures. The choices for
+    the maintainer: keep "6/255 everywhere" and accept the red shoreline cases until the frame is
     made stable; measure parity at native scale; or bound the outliers by count relative to a
     forward-against-perturbed-forward control (the frame's own instability), which this PR
     measured at 14/255.

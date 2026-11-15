@@ -155,9 +155,9 @@ the semver check):
     `MOBA_STYLISATION=off` turns the map's wrap, rim, ramp and painted specular off on both.
   - **`MOBA_DEBUG_VIEW`** gains `tiles`, `light-count` and `lit-only`.
   - **Gates:** `scripts/deferred-parity.sh` (CI `tiered-temporal`) compares the two frames
-    (`image-check --parity`); the default scene and the teamfight pass, and the river does
-    not (max 15/255 at 7 shoreline pixels, from the frame's own instability: amendment 2
-    item 16). `gbuffer-smoke` also checks the GLSL decode. A CPU test holds that the forward
+    (`image-check --parity`); the default scene passes, and the river does not (max 15/255
+    at 7 shoreline pixels locally, 9/255 at 11 on CI), nor on CI the teamfight (one shoreline
+    pixel at 7/255), from the frame's own instability at the foam line: amendment 2 item 16. `gbuffer-smoke` also checks the GLSL decode. A CPU test holds that the forward
     and deferred light loops visit the same lights under every cap. On the RTX 5070 Ti the
     frame is 1.061–1.087× N1's forward frame (gate ≤ 1.10×) and 0.990–1.001× N2a's.
   - **Frame log:** `gpu_light_classify`, `gpu_deferred_light` and `gpu_sky` lanes.

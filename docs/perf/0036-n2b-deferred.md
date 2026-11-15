@@ -21,7 +21,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | Gate | Result |
 |---|---|
 | 1. Encoding and interfaces | **Met.** `gbuffer-smoke` adds the GLSL decode; push blocks pinned by SPIR-V and reflection tests |
-| 2. Deferred–forward parity | **Not met on the river** (max 15/255 at 7 of 921,600 pixels; 99.966 % within 2/255). Default scene and teamfight met. See [below](#gate-2-deferredforward-parity) |
+| 2. Deferred–forward parity | **Not met on the river** (locally max 15/255 at 7 of 921,600 pixels, 99.966 % within 2/255; on CI max 9 at 11 pixels) **nor, on CI's lavapipe, the teamfight** (1 pixel at 7/255). Default scene met on both. Every outlier is on the shoreline foam line. See [below](#gate-2-deferredforward-parity) |
 | 3. Light-set consistency | **Met** under all five caps |
 | 7. Performance (≤ 1.10× N1) | **Met**: 1.061–1.087× against `ab42718`, 0.990–1.001× against `790d9be` |
 
@@ -57,6 +57,19 @@ tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness 0.2
 
 With the foliage (`PARITY_FOLIAGE=1`, the extended tiles; outside the gate): default 99.999 %
 max 5, river 99.964 % max 15, teamfight 99.989 % max 6.
+
+**On CI's lavapipe** (`tiered-temporal` on the PR, run 43693581282: Mesa 26.0.8, LLVM 21.1.8,
+an AMD EPYC runner), same script and settings:
+
+| Scene | Within 2/255 | Max | Pixels past 6/255 | Result |
+|---|---|---|---|---|
+| Default | 99.998 % | 6 | 0 | met, at the bound |
+| R3b river | 99.959 % | **9** | 11 | **not met** |
+| R3b teamfight | 99.991 % | **7** | 1 | **not met** |
+
+Every CI outlier is also on the shoreline foam line (the teamfight's one at (402, 282), where
+the replay's camera sees the river's edge); the pixels differ from the local ones, as the two
+lavapipes round differently.
 
 **Where the river's outliers are.** All seven sit on the shoreline foam line, where the
 river bed is seen through the refracting water, in single pixels that appear in either
@@ -126,7 +139,14 @@ lists the options for the maintainer.
   fragment stages). The 15 new modules are `deferred_light`, `deferred_light_extended`,
   `light_classify`, `gbuffer_smoke_decode` and the ten `_hdr` G-buffer permutations.
 - **Tiered goldens move**, deliberately: the tiered frame is now deferred. Their fingerprints
-  and hashes are regenerated from CI per ADR-0021 amendment 6; the PR lists them.
+  and hashes follow ADR-0021 amendment 6. The 64×36 fingerprints pass unchanged on CI's
+  lavapipe and locally (max_diff ≤ 5), so they are not rewritten. All 16 exact hashes (8
+  captures × the AMD and Intel sections) moved and were taken from CI only: the
+  `cpu_sample=true` dispatch run 43697497468 at `e4d139b` (three AMD and three Intel CPU
+  models; the legs agreed per class), cross-checked by the PR's own `renderer-gate` and
+  `tiered-temporal` (run 43693581282, AMD), which printed the same AMD hashes. Locally all
+  eight cases are two-run byte-identical with 0 validation messages, and both mid-stream
+  resets are clean.
 
 ## Gate 7: performance
 
