@@ -1,7 +1,7 @@
 //! Offline texture baker: PNG → KTX2 with a mip chain (ADR-0010).
 //!
 //! ```text
-//! texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|mask [--format F] [--no-mips]
+//! texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|weights|mask [--format F] [--no-mips]
 //! texture-bake generate sentinel <dir>     # the self-generated sample set, as PNG sources
 //! texture-bake generate vfx <dir>          # the procedural particle atlas (ADR-0013)
 //! texture-bake generate terrain <dir>      # self-generated terrain layers, as PNG sources
@@ -9,9 +9,10 @@
 //! ```
 //!
 //! `--kind` fixes the colour space and the default format: `color` (sRGB, `bc7-srgb`),
-//! `normal` (tangent XY in RG, `bc5`), `data` (linear RG such as metallic/roughness, `bc5`)
-//! and `mask` (linear R, `bc4`). `--format` may pick the kind's 8-bit fallback instead
-//! (`rgba8-srgb`, `rg8`, `r8`). Mips are filtered per kind (linear-light colour,
+//! `normal` (tangent XY in RG, `bc5`), `data` (linear RG such as metallic/roughness, `bc5`),
+//! `weights` (four linear channels such as a terrain splat, `bc7`) and `mask` (linear R,
+//! `bc4`). `--format` may pick the kind's 8-bit fallback instead
+//! (`rgba8-srgb`, `rg8`, `rgba8`, `r8`). Mips are filtered per kind (linear-light colour,
 //! renormalised normals); see `mips.rs`. A baked BC file reports its level-0 PSNR against
 //! the source, decoded with the same decoder the runtime fallback uses.
 #![allow(clippy::print_stdout)]
@@ -27,7 +28,7 @@ use mips::Kind;
 use moba_assets::{TextureData, TextureFormat};
 
 const USAGE: &str = "usage:
-  texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|mask [--format F] [--no-mips]
+  texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|weights|mask [--format F] [--no-mips]
   texture-bake generate sentinel|terrain|vfx <dir>
   texture-bake info <file.ktx2>";
 
@@ -199,7 +200,7 @@ fn bake(args: &[String]) -> Result<(), String> {
     let [input, output] = positional[..] else {
         return Err(String::from(USAGE));
     };
-    let kind = kind.ok_or("--kind is required (color, normal, data or mask)")?;
+    let kind = kind.ok_or("--kind is required (color, normal, data, weights or mask)")?;
     let format = format.unwrap_or(kind.default_format());
     if !kind.allows(format) {
         return Err(format!(

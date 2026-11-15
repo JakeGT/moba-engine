@@ -1540,6 +1540,7 @@ name = "moba-tools"
 version = "0.4.0"
 dependencies = [
  "bcdec_rs",
+ "glam",
  "meshopt",
  "moba-assets",
  "moba-core",
@@ -1549,7 +1550,9 @@ dependencies = [
  "moba-render",
  "moba-sim",
  "png",
+ "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
