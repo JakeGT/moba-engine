@@ -18,6 +18,7 @@ use crate::resources::{
 };
 use crate::upscale::{
     Extent, TemporalUpscaler, UpscaleInputs, UpscaleMode, UpscaleOutput, UpscalerKind,
+    expect_depth_convention,
 };
 
 /// Frame-in-flight slots: each pass keeps a descriptor set per slot and history parity, and
@@ -299,9 +300,10 @@ impl Drop for MipView {
 }
 
 /// The reconstructed depth's far plane: the SDK's Vulkan back end clears this `R32_UINT`
-/// image with the bits of the float 1.0 (non-inverted depth).
+/// image with the bits of the far depth, 0.0 for an inverted (reversed-Z, ADR-0023 §1c) depth,
+/// whose reconstruction stores with `InterlockedMax` (1.0 for a non-inverted one).
 const FAR_DEPTH_BITS: vk::ClearColorValue = vk::ClearColorValue {
-    uint32: [0x3F80_0000; 4],
+    uint32: [super::DEPTH_CONVENTION.far().to_bits(); 4],
 };
 const ZERO: vk::ClearColorValue = vk::ClearColorValue { float32: [0.0; 4] };
 const ZERO_UINT: vk::ClearColorValue = vk::ClearColorValue { uint32: [0; 4] };
@@ -1249,6 +1251,10 @@ impl TemporalUpscaler for Fsr3 {
         true
     }
 
+    fn depth_convention(&self) -> crate::depth::DepthConvention {
+        super::DEPTH_CONVENTION
+    }
+
     /// See [`Fsr3::record_frame`].
     ///
     /// # Panics
@@ -1259,6 +1265,7 @@ impl TemporalUpscaler for Fsr3 {
         inputs: &UpscaleInputs,
         out: &UpscaleOutput,
     ) {
+        expect_depth_convention(UpscalerKind::Fsr3, self.depth_convention(), inputs);
         // SAFETY: the trait's contract gives `record_frame`'s: each recorded buffer submitted
         // once, in order, on one queue, and at most FRAMES_IN_FLIGHT pending with
         // `inputs.frame_slot`'s last submission finished. `record_frame` needs at most
@@ -1534,10 +1541,31 @@ mod tests {
         }
     }
 
-    /// The far plane's bits are the float 1.0's.
+    /// FSR 3.1's inverted-depth handling matches its convention (ADR-0023 amendment 1 item
+    /// 4): the shaders' `INVERTED_DEPTH` define, the reconstructed depth's far value (the
+    /// float 0.0's bits for reversed-Z) and the refusal of the other convention.
     #[test]
-    fn far_depth_is_one() {
+    fn depth_handling_matches_the_convention() {
+        let build = include_str!("../../../shaders/build.rs");
+        assert_eq!(
+            build.contains("\"FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1\""),
+            super::super::DEPTH_CONVENTION.is_reversed()
+        );
+        assert_eq!(
+            build.contains("\"FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0\""),
+            !super::super::DEPTH_CONVENTION.is_reversed()
+        );
         // SAFETY: reading the `uint32` member of a value written through it.
-        assert_eq!(unsafe { FAR_DEPTH_BITS.uint32 }[0], 1.0f32.to_bits());
+        let far = unsafe { FAR_DEPTH_BITS.uint32 }[0];
+        assert_eq!(far, super::super::DEPTH_CONVENTION.far().to_bits());
+        assert_eq!(far, 0.0f32.to_bits());
+        let mut inputs = crate::upscale::tests::inputs();
+        inputs.depth_convention = super::super::DEPTH_CONVENTION;
+        expect_depth_convention(UpscalerKind::Fsr3, super::super::DEPTH_CONVENTION, &inputs);
+        inputs.depth_convention = crate::depth::DepthConvention::Forward;
+        let refused = std::panic::catch_unwind(|| {
+            expect_depth_convention(UpscalerKind::Fsr3, super::super::DEPTH_CONVENTION, &inputs);
+        });
+        assert!(refused.is_err(), "FSR 3.1 must refuse forward depth");
     }
 }

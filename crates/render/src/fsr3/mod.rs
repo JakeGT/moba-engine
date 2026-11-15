@@ -13,8 +13,8 @@
 //! [`UpscaleInputs`](crate::upscale::UpscaleInputs): render-resolution images in the top-left
 //! sub-rectangle, moved to `SHADER_READ_ONLY_OPTIMAL` by the caller, and an `RGBA16F` storage
 //! output in `GENERAL`. Motion vectors are render pixels to the previous position (scale
-//! (1, 1)), depth is `D32_SFLOAT` with 0 near and a finite far plane, and the exposure is a
-//! 1×1 linear multiplier.
+//! (1, 1)), depth is `D32_SFLOAT`, reversed-Z (1 near, 0 far, the `INVERTED_DEPTH` permutation,
+//! ADR-0023 §1c) with a finite far plane, and the exposure is a 1×1 linear multiplier.
 //!
 //! **Render sizes (ADR-0021 §4c).** One context accepts any render size from 1×1 up to the
 //! maximum it was created with, changing from frame to frame without a reset: every pass reads
@@ -29,7 +29,13 @@ use ash::vk;
 
 pub(crate) use context::{Fsr3, SET_RING};
 
+use crate::depth::DepthConvention;
 use crate::upscale::UpscaleMode;
+
+/// The depth convention the FSR 3.1 passes are built for: `moba-shaders` compiles them with
+/// `FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1` (ADR-0023 §1c). [`Fsr3`] refuses inputs in
+/// another convention, and its constants and reconstructed-depth clear follow this one.
+pub(crate) const DEPTH_CONVENTION: DepthConvention = DepthConvention::Reversed;
 
 /// The FSR 3.1 quality modes by ratio (output ÷ render per axis), ADR-0021 §4b.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -96,6 +96,10 @@ pub(crate) enum Access {
     /// Storage image written by a compute shader, previous contents discarded (`GENERAL`;
     /// the temporal pass's `hdr_out`, the one-texel exposure multiplier).
     StorageImageWrite,
+    /// Storage image read and written by a compute shader, previous contents kept (`GENERAL`;
+    /// a G-buffer debug view over the temporal pass's `hdr_out`, ADR-0023 §1f, which keeps
+    /// the upscaler live so its history and timings are the frame's).
+    StorageImageReadWrite,
 }
 
 /// Synchronisation facts for one [`Access`].
@@ -287,6 +291,14 @@ impl Access {
                 A::SHADER_STORAGE_WRITE,
                 L::GENERAL,
                 false,
+                U::STORAGE,
+            ),
+            Self::StorageImageReadWrite => (
+                S::COMPUTE_SHADER,
+                A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
+                A::SHADER_STORAGE_WRITE,
+                L::GENERAL,
+                true,
                 U::STORAGE,
             ),
         };

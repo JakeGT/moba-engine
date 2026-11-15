@@ -4,6 +4,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::depth::DepthConvention;
 use crate::upscale::UpscaleInputs;
 
 /// `cbFSR3Upscaler` (HLSL packing; the field offsets are checked against the `slangc`
@@ -120,16 +121,22 @@ impl UpscalerConstants {
     }
 }
 
-/// `setupDeviceDepthToViewSpaceDepthParams` for a non-inverted depth with a finite far plane
-/// (ADR-0021 §2a).
+/// `setupDeviceDepthToViewSpaceDepthParams` for the inputs' depth convention with a finite far
+/// plane (ADR-0021 §2a): the SDK swaps the planes for an inverted (reversed-Z, ADR-0023 §1c)
+/// depth.
 fn device_to_view_depth(inputs: &UpscaleInputs, aspect: f32) -> [f32; 4] {
-    let near = inputs.near.min(inputs.far);
-    let far = inputs.near.max(inputs.far);
-    let q = far / (near - far);
+    let (near, far) = (inputs.near.min(inputs.far), inputs.near.max(inputs.far));
+    // The SDK's `fMin` and `fMax`: the far and the near plane after its inverted-depth swap,
+    // the near and the far plane otherwise.
+    let (min, max) = match inputs.depth_convention {
+        DepthConvention::Reversed => (far, near),
+        DepthConvention::Forward => (near, far),
+    };
+    let q = max / (min - max);
     let cot_half_fov_y = (0.5 * inputs.fov_y).cos() / (0.5 * inputs.fov_y).sin();
     let a = cot_half_fov_y / aspect;
     let b = cot_half_fov_y;
-    [-q, q * near, 1.0 / a, 1.0 / b]
+    [-q, q * min, 1.0 / a, 1.0 / b]
 }
 
 impl SpdConstants {
@@ -340,6 +347,7 @@ mod tests {
         UpscaleInputs {
             color: image,
             depth: image,
+            depth_convention: DepthConvention::Reversed,
             motion: image,
             reactive: image,
             transparency: image,
@@ -370,9 +378,23 @@ mod tests {
         assert_eq!(constants.frame_index, 0.0);
         assert_eq!(constants.delta_time, 0.016);
         assert_eq!(constants.motion_vector_scale, [1.0 / 1280.0, 1.0 / 720.0]);
-        let q = 100.0f32 / (0.1 - 100.0);
+        // Inverted depth (ADR-0023 §1c): the SDK swaps the planes.
+        let q = 0.1f32 / (100.0 - 0.1);
         assert_eq!(constants.device_to_view_depth[0], -q);
-        assert_eq!(constants.device_to_view_depth[1], q * 0.1);
+        assert_eq!(constants.device_to_view_depth[1], q * 100.0);
+        // View depth `[1] / (d - [0])`: the near plane at depth 1, the far plane at 0.
+        let view =
+            |d: f32| constants.device_to_view_depth[1] / (d - constants.device_to_view_depth[0]);
+        assert!((view(1.0) - 0.1).abs() < 1e-5);
+        assert!((view(0.0) - 100.0).abs() < 1e-2);
+        // A forward depth takes the SDK's other branch: the near plane at 0, the far at 1.
+        let mut forward = UpscalerConstants::new([1280, 720], [1920, 1080]);
+        let mut forward_inputs = inputs((1280, 720));
+        forward_inputs.depth_convention = DepthConvention::Forward;
+        forward.advance(&forward_inputs, [1920, 1080], true, 18);
+        let view = |d: f32| forward.device_to_view_depth[1] / (d - forward.device_to_view_depth[0]);
+        assert!((view(0.0) - 0.1).abs() < 1e-5);
+        assert!((view(1.0) - 100.0).abs() < 1e-1);
         // tan(30°) × aspect and its inverse.
         let tan = (core::f32::consts::FRAC_PI_6).tan();
         assert!((constants.device_to_view_depth[3] - tan).abs() < 1e-6);

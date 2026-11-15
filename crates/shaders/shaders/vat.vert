@@ -28,7 +28,7 @@ invariant gl_Position;
 #include "outline.glsl"
 #endif
 #ifdef MOTION_VECTORS
-// ADR-0021 §2b: the temporal prepass's motion (with DEPTH_PREPASS).
+// ADR-0021 §2b: the G-buffer prepass's motion (with GBUFFER, ADR-0023 §1e).
 #define MOTION_VECTORS_VERTEX
 #define MOTION_PREV_INSTANCES
 #include "motion.glsl"
@@ -62,6 +62,11 @@ layout(location = 0) flat out vec4 out_outline_color;
 layout(location = 0) out vec3 out_world_normal;
 layout(location = 1) out vec3 out_color;
 layout(location = 2) out vec3 out_world_pos;
+#endif
+#ifdef GBUFFER
+// ADR-0023 §1e: the G-buffer prepass takes the scene's varyings, the outline slot (the unit
+// mask) and the motion (with MOTION_VECTORS).
+layout(location = 13) flat out uint out_outline_slot;
 #endif
 
 vec4 fetch(uint texel) {
@@ -133,9 +138,21 @@ void main() {
 #elif defined(DEPTH_PREPASS)
     gl_Position = camera.view_proj * world;
     out_outline = instance.params.x;
+#elif defined(OUTLINE_HULL)
+    // VAT meshes are smooth-shaded skins: extrude along the animated normal.
+    gl_Position = outline_hull_position(world.xyz, mat3(transpose(inverse(instance.model))) * normal,
+        instance.params.x);
+    out_outline_color = outline_color(instance.params.x);
+#else
+    gl_Position = camera.view_proj * world;
+    out_world_normal = normalize(mat3(transpose(inverse(instance.model))) * normal);
+    out_color = instance.color.rgb;
+    out_world_pos = world.xyz;
+#ifdef GBUFFER
+    out_outline_slot = instance.params.x;
 #ifdef MOTION_VECTORS
-    // ADR-0021 §2b: the previous pose is sampled a second time here (the scene's VAT shader
-    // does not).
+    // ADR-0021 §2b: the previous pose is sampled a second time here (the forward scene's VAT
+    // shader does not).
     uint index = uint(gl_InstanceIndex);
     vec3 previous = world.xyz;
     if (prev_valid(index)) {
@@ -153,15 +170,6 @@ void main() {
     }
     write_motion(world.xyz, previous);
 #endif
-#elif defined(OUTLINE_HULL)
-    // VAT meshes are smooth-shaded skins: extrude along the animated normal.
-    gl_Position = outline_hull_position(world.xyz, mat3(transpose(inverse(instance.model))) * normal,
-        instance.params.x);
-    out_outline_color = outline_color(instance.params.x);
-#else
-    gl_Position = camera.view_proj * world;
-    out_world_normal = normalize(mat3(transpose(inverse(instance.model))) * normal);
-    out_color = instance.color.rgb;
-    out_world_pos = world.xyz;
+#endif
 #endif
 }

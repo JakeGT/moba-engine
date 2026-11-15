@@ -159,6 +159,41 @@ the semver check):
     vertices that differ only in `TANGENT` (`tangent_splits`). The normal-map bake must run
     inside the same `quantised_normals` block, or be redone, because the exported tangents
     change where groups merge. GLB-MIKK keeps the exact weld.
+- **Reversed-Z and the thin G-buffer on Tiered (ADR-0023 N2a and amendment 1;
+  [perf/0035](docs/perf/0035-n2a-gbuffer.md)). Compat is byte-identical, SPIR-V included:**
+  - **Reversed-Z:** depth is cleared to 0 and tested `GREATER_OR_EQUAL`, with a finite far
+    plane. It covers the prepass, the scene, the overlay prepass, the sky, water depth fade,
+    particles and distortion, GTAO, contact shadows and TAAU. FSR 3.1 builds its
+    inverted-depth permutation. The CPU keeps forward matrices (`DepthConvention`), and shadow
+    maps stay forward.
+  - **G-buffer:** the temporal prepass also writes `gb0` (sRGB base colour, metallic), `gb1`
+    (octahedral normal, roughness, `UNIT` flag) and `gb2` (model data, shading model,
+    `NO_FOG_OF_WAR`, rim slot). The encoding has twins in GLSL, Slang and Rust, checked
+    against each other byte for byte by the new `gbuffer-smoke` tool. The forward `scene`
+    still shades.
+  - `MOBA_DEBUG_VIEW` gains `albedo`, `normal`, `roughness`, `metallic`, `model`, `rim-slot`
+    and `flags` (`TemporalDebugView`), drawn by a `gbuffer_debug` compute pass after
+    `temporal`. The tiered path now requires `maxColorAttachments ≥ 8`.
+  - **The upscalers' depth contract is explicit:** `UpscaleInputs::depth_convention`, read by
+    every back end. TAAU and FSR 3.1 derive their depth maths from it and refuse a convention
+    their shaders were not built for. `TemporalUpscaler::depth_convention` is a required
+    method (no default), so every back end must declare its convention.
+  - **The G-buffer is stored only for a reader:** a debug view or the motion probe. Otherwise
+    the prepass stores it `DONT_CARE`.
+  - **Fix: the G-buffer on lavapipe.** The prepass's motion write mask is now RGBA, which is
+    still exactly R and G on its two-channel format. Lavapipe applied attachment 0's mask to
+    every attachment, which dropped the G-buffer's blue and alpha. The terrain and the sky now
+    write their outline ID (0) and the sky its G-buffer (zero) explicitly, rather than
+    relying on empty masks; only the foliage keeps one on the ID target, so a unit under brush
+    keeps its slot (undefined on lavapipe only). New modules `terrain_gbuffer_ids.frag` and
+    `sky_motion_ids.frag` (`TERRAIN_GBUFFER_IDS_FRAG`, `SKY_MOTION_IDS_FRAG`).
+  - **The motion probe checks the G-buffer.** It reads `gb0`, `gb1` and `gb2` back and checks
+    the model, flags, F0, metallic, rim slot and the units' base colour per draw class, and
+    zero on the sky.
+  - **`moba-shaders` drops the N1a motion prepass modules**, unused since the G-buffer
+    prepass replaced them: `UNIT_MOTION_VERT`, `SKINNED_MOTION_VERT`, `VAT_MOTION_VERT`,
+    `PREPASS_MOTION_FRAG` and `PREPASS_MOTION_IDS_FRAG`, and their `MODULES` entries. None was
+    in a release (v0.4.1 has none of them).
 - **A1 ingest tools (next-gen roadmap §9.4,
   [ADR-0022 amendment 2](docs/adr/0022-provenance-gate-mikktspace.md#amendment-2-2026-11-15-a1-ingest-tools)):**
   - `content-check --source <asset>.source.toml` checks an asset's source maps and exported

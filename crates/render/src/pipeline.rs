@@ -126,6 +126,10 @@ pub(crate) struct PipelineSpec {
     /// Write depth (scene surfaces); `false` for the inverted-hull outlines, which are
     /// tested against the scene but never occlude it (R2b, ADR-0016).
     pub(crate) depth_write: bool,
+    /// The depth test: the main view's convention
+    /// ([`DepthConvention::compare`](crate::depth::DepthConvention::compare),
+    /// `GREATER_OR_EQUAL` on Tiered's reversed-Z).
+    pub(crate) depth_compare: vk::CompareOp,
 }
 
 pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResult<vk::Pipeline> {
@@ -137,7 +141,7 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
 pub(crate) enum SceneBlend {
     /// No blending; depth tested and written (every opaque scene pipeline).
     Opaque,
-    /// No blending; depth tested `LESS_OR_EQUAL`, not written (the full water, R3b).
+    /// No blending; depth tested, not written (the full water, R3b).
     OpaqueTestOnly,
     /// Premultiplied alpha (`ONE`, `ONE_MINUS_SRC_ALPHA`); depth tested, not written (the
     /// simple water, R3b).
@@ -193,7 +197,7 @@ pub(crate) fn create_blended(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
         .depth_write_enable(spec.depth_write && blend == SceneBlend::Opaque)
-        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+        .depth_compare_op(spec.depth_compare)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
 
@@ -337,9 +341,10 @@ pub(crate) fn create_depth_only(
     device.create_graphics_pipeline(&create_info)
 }
 
-/// Creates a depth pre-pass pipeline (R2b, ADR-0016): depth test/write `LESS_OR_EQUAL`, no
-/// depth bias. The scene vertex shaders' positions are `invariant`, so the scene pass, which
-/// loads this depth and tests `LESS_OR_EQUAL`, reproduces it exactly where the pre-pass drew. With
+/// Creates a depth pre-pass pipeline (R2b, ADR-0016): depth test (`depth_compare`, the main
+/// view's convention) and write, no depth bias. The scene vertex shaders' positions are
+/// `invariant`, so the scene pass, which loads this depth and tests it the same way,
+/// reproduces it exactly where the pre-pass drew. With
 /// `id_format` the pass also has the outline ID colour attachment: `fragment` writes it, and
 /// without a fragment shader (the terrain) its write mask is empty. No culling, like the
 /// scene pipelines. `samples` is the main view's (4 under MSAA, ADR-0015).
@@ -353,6 +358,7 @@ pub(crate) fn create_prepass(
     id_format: Option<vk::Format>,
     depth_format: vk::Format,
     samples: vk::SampleCountFlags,
+    depth_compare: vk::CompareOp,
 ) -> RenderResult<vk::Pipeline> {
     let vertex_stage = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::VERTEX)
@@ -395,7 +401,7 @@ pub(crate) fn create_prepass(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
         .depth_write_enable(true)
-        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+        .depth_compare_op(depth_compare)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
     let write_mask = if fragment.is_some() {
@@ -461,24 +467,26 @@ pub(crate) struct TargetsSpec<'a> {
     pub(crate) vertex: vk::ShaderModule,
     /// `None`: depth only (every colour attachment then needs an empty write mask).
     pub(crate) fragment: Option<vk::ShaderModule>,
-    /// At most four.
+    /// At most five (the G-buffer prepass: motion, `gb0`–`gb2` and the unit IDs).
     pub(crate) colors: &'a [ColorTarget],
     pub(crate) depth_format: vk::Format,
-    /// Test `LESS_OR_EQUAL` and write; otherwise test only.
+    /// Test and write; otherwise test only.
     pub(crate) depth_write: bool,
     pub(crate) samples: vk::SampleCountFlags,
+    /// The depth test: the main view's convention, like the scene pipelines.
+    pub(crate) depth_compare: vk::CompareOp,
 }
 
-/// Creates a [`TargetsSpec`] pipeline: no culling, no depth bias, depth tested
-/// `LESS_OR_EQUAL`, like the scene pipelines.
+/// Creates a [`TargetsSpec`] pipeline: no culling, no depth bias, depth tested with
+/// `spec.depth_compare`, like the scene pipelines.
 pub(crate) fn create_targets(
     device: &DeviceContext,
     spec: &TargetsSpec<'_>,
 ) -> RenderResult<vk::Pipeline> {
-    const MAX_TARGETS: usize = 4;
+    const MAX_TARGETS: usize = 5;
     assert!(
         spec.colors.len() <= MAX_TARGETS,
-        "at most four colour targets"
+        "at most five colour targets"
     );
     let vertex_stage = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::VERTEX)
@@ -525,7 +533,7 @@ pub(crate) fn create_targets(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
         .depth_write_enable(spec.depth_write)
-        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+        .depth_compare_op(spec.depth_compare)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
     let mut attachments = [vk::PipelineColorBlendAttachmentState::default(); MAX_TARGETS];
@@ -804,12 +812,13 @@ pub(crate) fn create_fullscreen(
 pub(crate) enum VertexlessDepth {
     /// No depth attachment.
     None,
-    /// Test `LESS_OR_EQUAL` against `format` without writing (the R3a sky on the far plane),
-    /// rasterising with the given samples (the main view's MSAA set has its own sky, R6).
-    TestOnly(vk::Format, vk::SampleCountFlags),
-    /// Test `LESS_OR_EQUAL` against `format` and write, with the given samples (the R3b
+    /// Test against `format` with the compare op without writing (the R3a sky on the far
+    /// plane), rasterising with the given samples (the main view's MSAA set has its own sky,
+    /// R6).
+    TestOnly(vk::Format, vk::SampleCountFlags, vk::CompareOp),
+    /// Test against `format` with the compare op and write, with the given samples (the R3b
     /// foliage).
-    ReadWrite(vk::Format, vk::SampleCountFlags),
+    ReadWrite(vk::Format, vk::SampleCountFlags, vk::CompareOp),
 }
 
 /// Creates a pipeline with no vertex input (the vertex shader builds its own geometry from
@@ -850,7 +859,9 @@ pub(crate) fn create_vertexless(
         .line_width(1.0);
     let samples = match depth {
         VertexlessDepth::None => vk::SampleCountFlags::TYPE_1,
-        VertexlessDepth::TestOnly(_, samples) | VertexlessDepth::ReadWrite(_, samples) => samples,
+        VertexlessDepth::TestOnly(_, samples, _) | VertexlessDepth::ReadWrite(_, samples, _) => {
+            samples
+        }
     };
     let multisample =
         vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
@@ -862,12 +873,13 @@ pub(crate) fn create_vertexless(
                 .depth_write_enable(false)
                 .depth_compare_op(vk::CompareOp::ALWAYS),
         ),
-        VertexlessDepth::TestOnly(format, _) | VertexlessDepth::ReadWrite(format, _) => (
+        VertexlessDepth::TestOnly(format, _, compare)
+        | VertexlessDepth::ReadWrite(format, _, compare) => (
             format,
             vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
-                .depth_write_enable(matches!(depth, VertexlessDepth::ReadWrite(_, _)))
-                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+                .depth_write_enable(matches!(depth, VertexlessDepth::ReadWrite(..)))
+                .depth_compare_op(compare)
                 .depth_bounds_test_enable(false)
                 .stencil_test_enable(false),
         ),
