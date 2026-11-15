@@ -126,6 +126,12 @@ limit, validation off, the pipeline cache off, 3000 frames per run (the log cove
 under the shared GPU lock with no other GPU client running. Medians of the three rounds, in ms.
 A first A/B overlapped another agent's measurement on the same GPU and was discarded.
 
+This A/B was taken on 2026-11-03 against `657a7ab` and was not re-measured after the branch
+merged main (`9325ea3`, 2026-11-15). Between those two commits the only crate changes are
+#373's iterator rewrites in `moba-net` and `moba-sim`, which the renderer does not run; #347
+and #374 change docs, scripts, the workflow and the hash file only. So the baseline still
+stands for the merged branch. The raw frame logs of these rounds were not kept.
+
 | Configuration | GPU total p50 | GPU total p95 | `prepass` p50 | `scene` p50 | `temporal` p50 | Frame p95 |
 |---|---|---|---|---|---|---|
 | Tiered Low, main | 0.539 | 0.547 | 0.022 | 0.083 | 0.144 | 4.239 |
