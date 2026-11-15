@@ -1653,10 +1653,31 @@ mod tests {
             Err(GlbError::BadAccessor)
         ));
         assert!(tangent_defects(b"glTF").is_err());
-        // The committed sample meshes' tangents are all unit (A0, sample-mesh).
-        let sentinel = include_bytes!("../../../content/models/sentinel.glb");
-        let shipped = tangent_defects(sentinel).expect("sentinel");
-        assert!(shipped.tangents > 0 && shipped.is_clean(), "{shipped:?}");
+        // Every committed sample mesh's tangents are unit (A0, sample-mesh); the skinned
+        // sentinel has no UVs and no TANGENT.
+        let samples: [(&str, &[u8], bool); 4] = [
+            (
+                "sentinel",
+                include_bytes!("../../../content/models/sentinel.glb"),
+                true,
+            ),
+            (
+                "crystal",
+                include_bytes!("../../../content/models/crystal.glb"),
+                true,
+            ),
+            (
+                "rampart",
+                include_bytes!("../../../content/models/rampart.glb"),
+                true,
+            ),
+            ("sentinel-skinned", SKINNED, false),
+        ];
+        for (name, bytes, has_tangents) in samples {
+            let shipped = tangent_defects(bytes).expect(name);
+            assert_eq!(shipped.tangents > 0, has_tangents, "{name}: {shipped:?}");
+            assert!(shipped.is_clean(), "{name}: {shipped:?}");
+        }
     }
 
     #[test]

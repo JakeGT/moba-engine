@@ -1,7 +1,7 @@
 """Export a Blender asset to the engine's runtime glTF, headless, by the export convention.
 
     blender --background --python-exit-code 1 <asset>.blend --python scripts/blender/export_glb.py -- \
-        --out <dir> [--asset NAME] [--collection NAME] [--hover METRES] [--notes TEXT]
+        --out <dir> [--asset NAME] [--collection NAME] [--hover METRES] [--notes TEXT] [--no-quantise]
 
 The convention is in docs/content-authoring.md, "Blender export (A1)": metres, Z up in Blender
 (+Y up in the file), the model faces -Y in Blender (+Z in the engine), feet on z = 0; triangulated
@@ -37,6 +37,8 @@ try:
     from io_scene_gltf2.io.com.constants import ROUNDING_DIGIT
 except ImportError:  # the exporter's own value (4) in every Blender this convention supports
     ROUNDING_DIGIT = 4
+    print("export_glb: warning: io_scene_gltf2's ROUNDING_DIGIT not found; assuming 4 (check "
+          "that the glTF exporter still rounds normals to 4 decimals)", flush=True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from moba_blender import argv_after_dashdash, valid_name  # noqa: E402
@@ -52,11 +54,15 @@ MAX_JSON_BYTES = 1 << 20
 
 
 def parse_args(argv):
-    opts = {"out": None, "asset": None, "collection": None, "hover": 0.0, "notes": None}
+    opts = {"out": None, "asset": None, "collection": None, "hover": 0.0, "notes": None,
+            "no_quantise": False}
     i = 0
     while i < len(argv):
         key = argv[i]
-        if key in ("--out", "--asset", "--collection", "--hover", "--notes") and i + 1 < len(argv):
+        if key == "--no-quantise":
+            opts["no_quantise"] = True
+            i += 1
+        elif key in ("--out", "--asset", "--collection", "--hover", "--notes") and i + 1 < len(argv):
             opts[key[2:]] = argv[i + 1]
             i += 2
         else:
@@ -190,11 +196,102 @@ def quantise(normals, rounds=8):
     raise RuntimeError("corner normals did not settle under the exporter's rounding")
 
 
-# The corner attribute types a mesh's `custom_normal` can have: foreach key, width, numpy type.
+# The `custom_normal` attribute types a mesh can carry: foreach key, width, numpy type. Free
+# normals are FLOAT_VECTOR (on the corner, point or face domain), tangent-space ones INT16_2D.
 _CUSTOM_NORMAL_TYPES = {
     "FLOAT_VECTOR": ("vector", 3, np.float32),
     "INT16_2D": ("value", 2, np.int32),
 }
+
+# The guard's tolerance between the normals the exporter would read without and with the block:
+# about 0.01 degrees, above quantisation's own change (at most about 0.005 degrees).
+_GUARD_DEGREES = 0.01
+
+
+def _corner_normals(me):
+    corners = len(me.loops)
+    out = np.empty(corners * 3, dtype=np.float32)
+    me.corner_normals.foreach_get("vector", out)
+    return out.reshape(corners, 3)
+
+
+def exported_normals(obj):
+    """The corner normals the glTF exporter reads for `obj` (io_scene_gltf2 `nodes.py`, with
+    `export_apply` and skins on): the mesh data itself when the object has no modifiers, else
+    the evaluated mesh with its Armature modifiers hidden, shape keys and other modifiers
+    applied."""
+    if not obj.modifiers:
+        return _corner_normals(obj.data)
+    hidden = [(m, m.show_viewport) for m in obj.modifiers if m.type == "ARMATURE"]
+    for m, _ in hidden:
+        m.show_viewport = False
+    try:
+        evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        me = evaluated.to_mesh()
+        try:
+            return _corner_normals(me)
+        finally:
+            evaluated.to_mesh_clear()
+    finally:
+        for m, shown in hidden:
+            m.show_viewport = shown
+
+
+def _normal_changers(obj):
+    """What on `obj` can change its exported normals: enabled non-Armature modifiers and shape
+    keys with a non-zero value."""
+    names = [f"modifier {m.name!r} ({m.type})" for m in obj.modifiers
+             if m.type != "ARMATURE" and m.show_viewport]
+    keys = obj.data.shape_keys
+    if keys is not None:
+        names += [f"shape key {k.name!r} = {k.value:g}" for k in keys.key_blocks
+                  if k != keys.reference_key and k.value != 0.0]
+    return ", ".join(names) or "its modifier stack"
+
+
+def _merged_corners(me, raw, q):
+    """Corners whose normal the rounding made equal to another corner's at the same vertex and
+    UV: where Blender's tangent groups merge, and the tangents change from an unquantised
+    export."""
+    vertex = np.empty(len(me.loops), dtype=np.int32)
+    me.loops.foreach_get("vertex_index", vertex)
+    columns = [vertex.view(np.uint32)[:, None]]
+    if me.uv_layers:
+        uv = np.empty(len(me.loops) * 2, dtype=np.float32)
+        me.uv_layers[0].data.foreach_get("uv", uv)
+        columns.append(uv.reshape(-1, 2).view(np.uint32))
+
+    def distinct(normals):
+        keys = np.hstack(columns + [np.ascontiguousarray(normals).view(np.uint32)])
+        return len(np.unique(keys, axis=0))
+
+    return distinct(raw) - distinct(q)
+
+
+def _check_exported(obj, before):
+    """The guard: within the block, the exporter must read the quantised normals, and they must
+    be the normals it would have read without the block, to 0.01 degrees."""
+    after = exported_normals(obj)
+    fix = ("apply the modifiers that change normals (or set the shape keys to 0) before "
+           "exporting, or export with --no-quantise (ADR-0022 amendment 3)")
+    corners = len(obj.data.loops)
+    if len(after) != corners or len(before) != corners:
+        raise RuntimeError(f"{obj.name}: {_normal_changers(obj)} changes the corner count "
+                           f"({corners} in the mesh, {len(after)} exported), so its normals "
+                           f"cannot be quantised before tangents; {fix}")
+    # In float64: in float32, arccos near 1 cannot resolve angles under about 0.02 degrees.
+    a, b = before.astype(np.float64), after.astype(np.float64)
+    lengths = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
+    angle = np.arctan2(np.linalg.norm(np.cross(a, b), axis=1), np.einsum("ij,ij->i", a, b))
+    angle[(lengths == 0) & np.any(before != after, axis=1)] = np.pi
+    worst = float(np.degrees(angle.max(initial=0.0)))
+    if worst > _GUARD_DEGREES:
+        raise RuntimeError(f"{obj.name}: {_normal_changers(obj)} changes the corner normals "
+                           f"(up to {worst:.2f} degrees from the quantised mesh normals), so they "
+                           f"cannot be quantised before tangents; {fix}")
+    if not np.array_equal(exporter_normals(after).view(np.uint32), after.view(np.uint32)):
+        raise RuntimeError(f"{obj.name}: {_normal_changers(obj)} moves the quantised normals off "
+                           f"the exporter's rounding; {fix}")
 
 
 @contextlib.contextmanager
@@ -206,49 +303,83 @@ def quantised_normals(objs):
     position, normal and UV are exactly equal. The exporter then rounds normals to 4 digits, so
     corners whose normals differed by less than 1e-4 become identical in the file except for
     TANGENT: the file holds split vertices, and the engine's MikkTSpace on it (GLB-MIKK) welds
-    them and disagrees. Quantising first makes Blender weld what the file welds. Cycles bakes
-    against the same tangents, so run the normal-map bake inside this block too, or the map will
-    not match the exported tangents where groups merge (ADR-0022 amendment 3).
+    them and disagrees. Quantising first makes Blender's weld see the normals the file holds.
+    Cycles bakes against the same tangents, so bake the normal map inside this block too
+    (`bake_normals`), or the map will not match the exported tangents where groups merge
+    (ADR-0022 amendment 3).
 
-    In memory only: on exit each mesh gets its previous `custom_normal` back (or none). Do not
-    save the .blend inside the block: free normals do not follow deformation, so posed renders
-    would shade with rest-pose normals. Yields the number of corners whose normal the rounding
-    changed."""
+    The normals quantised are the mesh data's, before modifiers and shape keys. The guard then
+    evaluates each object as the exporter will and raises, naming the object and its modifiers
+    or shape keys, unless the exporter would read the quantised normals, unchanged from what it
+    would read without the block to 0.01 degrees, with the same corner count (a Mirror, Edge
+    Split, Smooth by Angle, Weighted Normal, Bend, Subdivision or Triangulate modifier, or a
+    non-zero shape key with modifiers, fails it). Armature modifiers are hidden for this, as the
+    exporter hides them for skinned meshes.
+
+    In memory only: on exit each mesh gets its previous `custom_normal` back (or none), also
+    after an exception. Do not save the .blend inside the block: that makes the quantised free
+    normals permanent, and free normals do not follow deformation, so posed renders would shade
+    with rest-pose normals. Save baked images with `image.save()` instead. Yields a dict:
+    `moved`, the corners whose normal the rounding changed, and `merged`, the corners it made
+    equal to another at the same vertex and UV (where tangents change)."""
     saved = []
-    moved = 0
+    stats = {"moved": 0, "merged": 0}
     try:
-        for me in {o.data for o in objs if o.type == "MESH"}:
-            corners = len(me.loops)
-            raw = np.empty(corners * 3, dtype=np.float32)
-            me.corner_normals.foreach_get("vector", raw)
-            raw = raw.reshape(corners, 3)
+        meshes = [o for o in objs if o.type == "MESH"]
+        before = {o.name: exported_normals(o) for o in meshes}
+        for me in {o.data for o in meshes}:
+            raw = _corner_normals(me)
             old = me.attributes.get("custom_normal")
             snapshot = None
             if old is not None:
-                if old.domain != "CORNER" or old.data_type not in _CUSTOM_NORMAL_TYPES:
+                if old.data_type not in _CUSTOM_NORMAL_TYPES or (
+                        old.data_type == "INT16_2D" and old.domain != "CORNER"):
                     raise RuntimeError(f"{me.name}: custom_normal is {old.data_type} on "
-                                       f"{old.domain}, not a corner normal")
+                                       f"{old.domain}, not a custom normal")
                 key, width, kind = _CUSTOM_NORMAL_TYPES[old.data_type]
                 values = np.empty(len(old.data) * width, dtype=kind)
                 old.data.foreach_get(key, values)
-                snapshot = (old.data_type, key, values)
+                snapshot = (old.data_type, old.domain, key, values)
             q = quantise(raw)
             if old is not None:
                 me.attributes.remove(old)
             saved.append((me, snapshot))
-            moved += int(np.count_nonzero(np.any(q.view(np.uint32) != raw.view(np.uint32), axis=1)))
+            stats["moved"] += int(np.count_nonzero(
+                np.any(q.view(np.uint32) != raw.view(np.uint32), axis=1)))
+            stats["merged"] += _merged_corners(me, raw, q)
             me.attributes.new("custom_normal", "FLOAT_VECTOR", "CORNER").data.foreach_set(
                 "vector", q.ravel())
             me.update()
-        yield moved
+        for o in meshes:
+            _check_exported(o, before[o.name])
+        yield stats
     finally:
+        failures = []
         for me, snapshot in saved:
-            if "custom_normal" in me.attributes:
-                me.attributes.remove(me.attributes["custom_normal"])
-            if snapshot is not None:
-                data_type, key, values = snapshot
-                me.attributes.new("custom_normal", data_type, "CORNER").data.foreach_set(key, values)
-            me.update()
+            try:
+                if "custom_normal" in me.attributes:
+                    me.attributes.remove(me.attributes["custom_normal"])
+                if snapshot is not None:
+                    data_type, domain, key, values = snapshot
+                    me.attributes.new("custom_normal", data_type, domain).data.foreach_set(
+                        key, values)
+                me.update()
+            except Exception as e:  # noqa: BLE001 - restore every other mesh, then report
+                failures.append(f"{me.name}: {e}")
+        if failures:
+            raise RuntimeError(f"custom normals not restored: {'; '.join(failures)}")
+
+
+def bake_normals(objs, **bake):
+    """Cycles' tangent-space normal bake inside `quantised_normals(objs)`, so the map matches
+    the tangents the export writes. The caller sets up the bake as for `bpy.ops.object.bake`
+    (Cycles, the low-poly object active, an active Image Texture node in its material, and for
+    selected-to-active the high-poly sources selected) and saves the image afterwards with
+    `image.save()`. `bake` is passed on, for example `use_selected_to_active=True,
+    cage_extrusion=0.02`. Returns the `quantised_normals` stats."""
+    with quantised_normals(objs) as stats:
+        bpy.ops.object.bake(type="NORMAL", normal_space="TANGENT", **bake)
+    return stats
 
 
 def gltf_options(path):
@@ -348,7 +479,8 @@ def float_stream(doc, bin_chunk, index, width):
 
 def tangent_splits(doc, bin_chunk):
     """Vertices in the file that share POSITION, NORMAL and TEXCOORD_0 (bit for bit, within one
-    glTF mesh) with another vertex but have a different TANGENT: the symptom of tangents computed
+    glTF mesh; the engine merges every mesh of the file and welds across them, which this does
+    not count) with another vertex but have a different TANGENT: the symptom of tangents computed
     on normals other than the written ones, which the engine's MikkTSpace welds and averages
     (GLB-MIKK). Information, an upper bound: MikkTSpace itself can give one welded vertex two
     tangents (two fans of triangles meeting only at that vertex, by its grouping), and the engine
@@ -414,10 +546,27 @@ def main():
         bpy.ops.object.select_all(action="DESELECT")
         for o in objs:
             o.select_set(True)
-        with quantised_normals(objs) as moved:
-            bpy.ops.export_scene.gltf(**gltf_options(partial))
+        quantising = (contextlib.nullcontext({"moved": 0, "merged": 0}) if opts["no_quantise"]
+                      else quantised_normals(objs))
+        try:
+            with quantising as stats:
+                bpy.ops.export_scene.gltf(**gltf_options(partial))
+        except RuntimeError as e:
+            print(f"export_glb: error: {e}", flush=True)
+            sys.exit(1)
         errors, info = verify_glb(partial)
-        info["normals_quantised"] = moved
+        info["normals_quantised"] = stats["moved"]
+        info["normal_groups_merged"] = stats["merged"]
+        if opts["no_quantise"]:
+            print("export_glb: warning: --no-quantise: tangents computed on unrounded normals, as "
+                  "before ADR-0022 amendment 3; the file may hold vertices that differ only in "
+                  f"TANGENT ({info.get('tangent_splits')}) and GLB-MIKK may disagree", flush=True)
+        elif stats["merged"]:
+            print(f"export_glb: warning: quantising the normals merged {stats['merged']} corners "
+                  "into another's tangent group, so their tangents differ from an export without "
+                  "it: bake the normal map inside quantised_normals (bake_normals), or re-bake; "
+                  "--no-quantise keeps the old tangents for a bake that cannot be redone yet",
+                  flush=True)
         if errors:
             for e in errors:
                 print(f"export_glb: error in {path}: {e}", flush=True)

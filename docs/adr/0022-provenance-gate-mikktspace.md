@@ -459,7 +459,8 @@ a 4096² hero with seven RGB maps peaks at 414 MiB.
 - **TINT-1** loads the team mask and checks its size against the base map; a missing or
   wrong-sized mask fails.
 - **Export checks** load each model with the engine's bounded loader (`FileOnly`): the name
-  rule, the loader limits, baked `TANGENT` (Amendment 1), feet at y = 0 (or `hover_m`), and,
+  rule, the loader limits, baked `TANGENT` (Amendment 1; unit tangents, extended by amendment 3),
+  feet at y = 0 (or `hover_m`), and,
   as information, the agreement of the file's tangents with the engine's own MikkTSpace on the
   same mesh.
 - **Not built** (each needs §3's vocabulary as data, an accent mask, or the §6.6 material
@@ -603,7 +604,9 @@ may overrule this (open question 7).
   it);
 - clips sampled at 30 fps; clip names are free, and `animations/<model>.toml` maps them to
   engine states (ADR-0012);
-- MikkTSpace `TANGENT` exported, and no images, vertex colours, Draco or meshopt compression.
+- MikkTSpace `TANGENT` exported, and no images, vertex colours, Draco or meshopt compression;
+- corner normals quantised to the exporter's rounding before tangents are computed (extended
+  by amendment 3).
 
 The script refuses a scene that breaks the convention before writing anything; feet are
 measured in the rest pose at frame 0. It exports under a temporary name, re-reads the glTF
@@ -633,9 +636,9 @@ tangent space.
 
 - GLB-TANGENT now also counts the file's **raw** `TANGENT` elements whose `xyz` length is not
   within **1e-3** of 1 (zero included), or whose `w` is not within 1e-3 of ±1, and fails on any.
-  It reports the count, for example "35 of 9682 TANGENT not unit length (35 zero)". A `w`
-  outside the tolerance also makes the loader refuse the file, so `content-check` stops at the
-  load; the counts are then appended to the loader's refusal.
+  It reports the counts, for example "35 of 9682 TANGENT not unit length (35 zero), 0 with w not
+  ±1". A `w` outside the tolerance also makes the loader refuse the file, so `content-check`
+  stops at the load; the counts are then appended to the loader's refusal.
 - **Why 1e-3:** it is the loader's own snap for `w` (`MeshData::with_tangents`). It is also about
   10× the error of Blender's exporter, which rounds each tangent component to 4 decimals without
   renormalising (at most √3 × 5e-5 ≈ 8.7e-5 in length). The engine's own tangents (`sample-mesh`,
@@ -643,11 +646,18 @@ tangent space.
 - **Library:** `moba_assets::tangent_defects` and `tangent_defects_file` read every mesh's
   `TANGENT` accessors, each once, through the loader's bounded accessor code, and stop past
   `MeshData::MAX_VERTICES` elements. They return `TangentDefects`; the tolerance is
-  `TANGENT_TOLERANCE`.
+  `TANGENT_TOLERANCE`. They also read `TANGENT` accessors the loader drops (meshes outside the
+  default scene, primitives without `NORMAL`), so they err strict. `content-check` reads the
+  file once and passes the bytes to the count, the loader and `check_baked_tangents`.
 - **Unchanged:**
   - the loader (a zero tangent still loads);
-  - `check_baked_tangents` and the `--provenance` gate (amendment 1). The committed sample meshes
-    pass the new count, which a unit test pins.
+  - `check_baked_tangents` and the `--provenance` gate (amendment 1). The gate stays at
+    "`TANGENT` present" because it runs in CI on `content/`, and the count is a convention
+    check on art exports: a zero tangent costs only its vertex's normal map, and the loader
+    already handles it. All four committed sample meshes (sentinel, crystal and rampart; the
+    skinned sentinel has no UVs and no `TANGENT`) pass the count, which a unit test pins.
+- **Follow-up:** add the `tangent_defects` count to `--provenance` once hull-shard is fixed, so
+  shipped content is held to the same rule.
 
 With the new rule on the art-source manifests, only hull-shard fails. The current Warden
 (`7e8fc93`, hammer slivers removed) passes.
@@ -671,27 +681,66 @@ are exactly equal. The exporter then rounds normals to 4 decimals and renormalis
   - The normals are stored as free float3 custom normals, which Blender keeps exactly.
     `normals_split_custom_set` stores a lossy 16-bit encoding and ignores flat faces, which is
     probably why an earlier pre-rounding test left 53 split groups on the Monolith.
-  - Blender then welds exactly the corners the file welds.
-  - On exit, each mesh's previous custom normals are restored.
-  - `main` exports inside it.
+  - Blender's weld then sees the normals the file holds, so it merges the same corners as the
+    engine's, up to two effects outside this fix: the exporter writes `v` as `1 − v` in
+    float32, so UVs less than about 6e-8 apart can still merge in the file; and transforms
+    the exporter applies to positions can merge positions that close.
+  - On exit, each mesh's previous custom normals are restored (type and domain), each mesh on
+    its own, also after an exception.
+  - `main` exports inside it; `--no-quantise` exports as before (with a warning), for an asset
+    whose bake cannot be redone yet. With quantising, `main` warns when it merged corners into
+    another's tangent group (`normal_groups_merged` in the export info).
   - `verify_glb` reports `tangent_splits`: vertices equal in POSITION, NORMAL and TEXCOORD_0 but
-    not in `TANGENT`. It is information, not an error: MikkTSpace itself can give one welded
-    vertex two tangents, and the engine reproduces those splits. On the Monolith the 2 that
-    remain are such a pair (measured: GLB-MIKK 1.0000). That the cause is two triangle fans
-    meeting only at that vertex is deduced from MikkTSpace's grouping, not traced.
-- **After the fix:**
-  - the repro gives 4 vertices and GLB-MIKK 1.0000, through `main` and through the helpers;
-  - the Monolith gives 860 vertices (the file has 859 unique position, normal and UV
-    combinations), `tangent_splits` 2 (one fan pair) and GLB-MIKK 1.0000.
+    not in `TANGENT`, within one glTF mesh (the engine welds across the file's meshes too). It
+    is information, not an error: MikkTSpace itself can give one welded vertex two tangents,
+    and the engine reproduces those splits. On the Monolith the 2 that remain are such a pair
+    (measured: GLB-MIKK 1.0000). That the cause is two triangle fans meeting only at that vertex
+    is deduced from MikkTSpace's grouping, not traced.
+- **Limit: the mesh data's normals, guarded.** The block quantises the mesh data's normals, the
+  normals before modifiers and shape keys, and the free normals then override whatever the
+  modifier stack would have produced. The guard evaluates each object as the exporter does
+  (its Armature modifiers hidden, as the exporter hides them for skinned meshes; the mesh data
+  itself when there are no modifiers) before and after setting them, and raises, naming the
+  object and its enabled modifiers or non-zero shape keys, unless the evaluated corner count is
+  the mesh's, the evaluated normals are within 0.01° of those without the block, and they are
+  fixed points of the exporter's rounding. The fix for the artist is to apply the modifiers that
+  change normals, or set the shape keys to 0, before export (or `--no-quantise`). Without the
+  guard the reviewers measured Smooth by Angle merging 360 vertices into 151, Mirror errors up
+  to 117.6°, Edge Split 15.7°, Weighted Normal 4.2°, Bend 39.8°, a shape key at 0.7 under an
+  Armature 24.8°, and Subdivision + Triangulate silently unquantised.
+- **After the fix** (all scratch exports; art-source untouched):
+
+  | Case | Vertices | `tangent_splits` | GLB-MIKK |
+  |---|---|---|---|
+  | Repro, `main` and the helpers | 4 | 0 | 1.0000 |
+  | Void Monolith (skinned, 4 joints) | 860 (859 unique position, normal and UV combinations) | 2 | 1.0000 |
+  | Kiln Warden at `7e8fc93` (skinned, 28 joints), without the block | 9641 | 212 | 0.9899 |
+  | Kiln Warden at `7e8fc93`, inside the block | 9521 | 0 | 1.0000 |
+
 - **Consequence for bakes.** Cycles bakes against the tangents of the mesh it is given. Where
   quantising merges groups, the exported tangents change: on the Monolith, the copies in a
   merged group differed by a median 5.8° and at most 20.5° (the follow-up's measurement), and
-  each group now has one tangent. A normal map baked before is then off there.
-  - Run the bake inside the same `quantised_normals` block, or re-bake.
-  - Never save the .blend inside the block: free normals do not follow deformation.
+  each group now has one tangent. **Re-exporting an existing asset with this script changes its
+  tangents there**, and a normal map baked before is then off.
+  - Bake inside the same block: `export_glb.bake_normals(objects, **bake_kwargs)` runs
+    `bpy.ops.object.bake(type="NORMAL")` inside it. Bakes made from the UI's Bake button get no
+    quantisation, so a bake that goes with this convention must be scripted.
+  - Measured on the repro quad, baked selected-to-active from a plane tilted 10° (128² map,
+    12 237 interior texels decoded with the file's `TANGENT` and `NORMAL`): baked and exported
+    inside the block, at most 0.011° from the plane; baked without it and exported inside it,
+    median 0.69° and at most 0.98°; baked and exported without it (the old pipeline), at most
+    0.003°.
+  - Never save the .blend inside the block: that makes the quantised free normals permanent,
+    and free normals do not follow deformation, so posed renders would shade with rest-pose
+    normals. Save baked images with `image.save()`.
   - Scripts that call `check_scene`, `gltf_options` and `verify_glb` themselves, as art-source's
     `engine_export.py` does, must wrap their export (and bake) in the block; until they do,
     their files are unchanged.
+- **Check script.** `scripts/blender/check_export_glb.py` (run by hand; CI has no Blender) checks
+  the repro (6 → 4 vertices, GLB-MIKK 0.3333 → 1.0000 with `--content-check`), exact restore
+  (none, free normals on the corner and point domains, INT16 tangent-space normals, shared mesh
+  data, an exception inside the block) and the guard (Edge Split, Mirror, Subdivision +
+  Triangulate, Weighted Normal and a keyed Armature raise; an Armature alone passes).
 
 **GLB-MIKK keeps the exact weld.** Amendment 2 defines GLB-MIKK as the agreement of the file's
 tangents with "the engine's own MikkTSpace on the same mesh", and §4's adapter keeps MikkTSpace's
@@ -699,10 +748,11 @@ exact welding equality. A weld by normal tolerance would measure against tangent
 never computes. It would not fix the split either: the split copies already have identical
 normals in the file, so the exact weld already merges them. Once tangents are computed on the
 quantised normals, Blender's exact weld and the engine's see the same normals, and GLB-MIKK
-reads 1.0000 on both test files without a tolerance.
+reads 1.0000 on every test file above without a tolerance.
 
 **API additions** (additive): `moba_assets::{tangent_defects, tangent_defects_file,
-TangentDefects, TANGENT_TOLERANCE}`; in `export_glb.py`, `quantised_normals`, `quantise`,
-`exporter_normals`, `tangent_splits` and the `tangent_splits` and `normals_quantised` fields of
-the export info. No wire, replay, simulation-logic, state-hash or content-hash change; no shipped
-content changes.
+TangentDefects, TANGENT_TOLERANCE}`; in `export_glb.py`, `quantised_normals`, `bake_normals`,
+`exported_normals`, `quantise`, `exporter_normals`, `tangent_splits`, `--no-quantise` and the
+`tangent_splits`, `normals_quantised` and `normal_groups_merged` fields of the export info; the
+`check_export_glb.py` script. No wire, replay, simulation-logic, state-hash or content-hash
+change; no shipped content changes.

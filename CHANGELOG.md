@@ -156,9 +156,14 @@ the semver check):
     engine's MikkTSpace welded them and GLB-MIKK disagreed: the minimal repro (one near-flat
     quad) goes from 6 vertices and GLB-MIKK 0.3333 to 4 and 1.0000, and the A3 Void Monolith
     from 1460 vertices and 0.9007 to 860 and 1.0000. `verify_glb` reports the remaining
-    vertices that differ only in `TANGENT` (`tangent_splits`). The normal-map bake must run
-    inside the same `quantised_normals` block, or be redone, because the exported tangents
-    change where groups merge. GLB-MIKK keeps the exact weld.
+    vertices that differ only in `TANGENT` (`tangent_splits`); the A3 Kiln Warden goes from
+    212 to 0 and GLB-MIKK 0.9899 to 1.0000. Re-exporting an asset changes its tangents where
+    groups merge (the script warns), so the normal-map bake must run inside the same block
+    (new `bake_normals`, so bakes are scripted) or be redone; `--no-quantise` exports as
+    before. A guard evaluates each object as the exporter does and refuses modifiers or shape
+    keys whose normals the block would override; previous custom normals are restored by type
+    and domain. GLB-MIKK keeps the exact weld. New headless self-check
+    `scripts/blender/check_export_glb.py`.
 - **Reversed-Z and the thin G-buffer on Tiered (ADR-0023 N2a and amendment 1;
   [perf/0035](docs/perf/0035-n2a-gbuffer.md)). Compat is byte-identical, SPIR-V included:**
   - **Reversed-Z:** depth is cleared to 0 and tested `GREATER_OR_EQUAL`, with a finite far

@@ -1862,10 +1862,12 @@ fn check_model(
         format!("{stem:?}"),
         "model name (file stem) 1..=16 of [A-Za-z0-9_-]",
     );
-    // Read before the load: the loader refuses a `w` far from ±1 outright, and the count
-    // belongs in that refusal.
-    let defects = moba_assets::tangent_defects_file(path);
-    let mesh = moba_assets::load_glb_file_with(path, moba_assets::GlbTangents::FileOnly).map_err(
+    // Read once; the counts come before the load because the loader refuses a `w` far from ±1
+    // outright, and the count belongs in that refusal.
+    let refused = |error| format!("{shown}: the engine's loader refuses it: {error}");
+    let bytes = read_glb(path).map_err(refused)?;
+    let defects = moba_assets::tangent_defects(&bytes);
+    let mesh = moba_assets::load_glb_with(&bytes, moba_assets::GlbTangents::FileOnly).map_err(
         |error| {
             let counted = match &defects {
                 Ok(defects) if !defects.is_clean() => {
@@ -1886,7 +1888,7 @@ fn check_model(
         ),
         "loads with the engine's bounded loader (ADR-0007)",
     );
-    let (pass, detail) = tangent_rule(moba_assets::check_baked_tangents_file(path), defects);
+    let (pass, detail) = tangent_rule(moba_assets::check_baked_tangents(&bytes), defects);
     report.push(
         &format!("GLB-TANGENT ({stem})"),
         Some(pass),
@@ -1925,6 +1927,20 @@ fn check_model(
         uvs: uvs.to_vec(),
         indices: mesh.indices().to_vec(),
     })
+}
+
+/// The bytes of the `.glb` at `path`, read at most one byte past the loader's cap (which then
+/// refuses it as too large), as `moba_assets::load_glb_file` reads them.
+fn read_glb(path: &Path) -> Result<Vec<u8>, moba_assets::GlbError> {
+    use std::io::Read as _;
+    let io = |error: std::io::Error| moba_assets::GlbError::Io(error.kind());
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(io)?
+        .take(moba_assets::MAX_GLB_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    Ok(bytes)
 }
 
 /// GLB-TANGENT: the file has baked `TANGENT`s (`baked`) and every one is a unit vector with a
