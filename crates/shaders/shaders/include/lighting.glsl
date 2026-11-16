@@ -80,7 +80,25 @@ struct Surface {
     // R3a's terrain relief while GTAO runs (ADR-0015 §5), 1 everywhere else. The map's baked
     // AO (R2b) multiplies the result (ADR-0016).
     float occlusion;
+#ifdef MOBA_TIERED_SHADING
+    // The dielectric F0 (ADR-0023 §6b: from the material's `ior` and `specular`, 0.04 by
+    // default). Tiered only: Compat keeps its constant 0.04 until C1.
+    float f0;
+#endif
 };
+
+#ifdef MOBA_TIERED_SHADING
+// Multiscatter energy compensation of the GGX lobes (ADR-0023 §6b; Kulla and Conty 2017,
+// Filament's DFG form): the single-scatter specular times 1 + F0 (1 / E_ss - 1), where
+// E_ss = A + B is the split-sum LUT's value at F0 = 1, so no new LUT is needed. Set by
+// `shade()` before the light loop reads it. Tiered only (`MOBA_TIERED_SHADING`: the deferred
+// lighting and the tiered forward permutations); Compat gains it with C1.
+vec3 moba_energy_compensation = vec3(1.0);
+
+vec3 multiscatter_compensation(vec3 f0, vec2 brdf) {
+    return vec3(1.0) + f0 * (1.0 / max(brdf.x + brdf.y, 1e-4) - 1.0);
+}
+#endif
 
 // SH-L2 irradiance / pi in direction `n` (crates/tools env-bake convention).
 vec3 sh_irradiance(vec3 n) {
@@ -303,6 +321,9 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
         float vis = visibility_smith_ggx(n_dot_v, n_dot_l, alpha);
         vec3 specular = MOBA_PI * d * vis * fresnel * n_dot_l
             * surface.specular.rgb * surface.specular.w;
+#ifdef MOBA_TIERED_SHADING
+        specular *= moba_energy_compensation;
+#endif
         sum += (kd * surface.albedo * wrapped + specular) * color * attenuation;
         irradiance += moba_luminance(color) * attenuation * wrapped;
     }
@@ -328,7 +349,13 @@ vec3 shade(Surface surface) {
 
     float roughness = clamp(surface.roughness, MOBA_MIN_ROUGHNESS, 1.0);
     float alpha = roughness * roughness;
+#ifdef MOBA_TIERED_SHADING
+    vec3 f0 = mix(vec3(surface.f0), surface.albedo, surface.metallic);
+    vec2 brdf = textureLod(brdf_lut, vec2(n_dot_v, roughness), 0.0).rg;
+    moba_energy_compensation = multiscatter_compensation(f0, brdf);
+#else
     vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
+#endif
     vec3 sun = camera.sun_color.rgb * camera.light_direction.w;
 
     // Shadowing: strength < 1 keeps a floor of direct light (units in shadow stay readable).
@@ -354,6 +381,9 @@ vec3 shade(Surface surface) {
     float d = distribution_ggx(n_dot_h, alpha);
     float vis = visibility_smith_ggx(n_dot_v, n_dot_l, alpha);
     vec3 specular = MOBA_PI * d * vis * fresnel * n_dot_l * surface.specular.rgb * surface.specular.w;
+#ifdef MOBA_TIERED_SHADING
+    specular *= moba_energy_compensation;
+#endif
 
     vec3 direct = (diffuse + specular) * sun * lit
         + dynamic_lights(surface, n, v, n_dot_v, f0, alpha, sun);
@@ -361,11 +391,16 @@ vec3 shade(Surface surface) {
     // Ambient: SH or hemispheric diffuse, prefiltered specular through the split-sum LUT.
     vec3 f_ambient = fresnel_schlick_roughness(f0, n_dot_v, roughness);
     vec3 kd_ambient = (vec3(1.0) - f_ambient) * (1.0 - surface.metallic);
+#ifndef MOBA_TIERED_SHADING
     vec2 brdf = textureLod(brdf_lut, vec2(n_dot_v, roughness), 0.0).rg;
+#endif
     vec3 r = reflect(-v, n);
     vec3 ambient_diffuse = kd_ambient * surface.albedo * ambient_irradiance(n);
     vec3 ambient_spec = ambient_specular(r, roughness) * (f0 * brdf.x + brdf.y)
         * surface.specular.rgb * surface.specular.w;
+#ifdef MOBA_TIERED_SHADING
+    ambient_spec *= moba_energy_compensation;
+#endif
     // R6: AO occludes the ambient (indirect) terms only; direct light, rim and emissive
     // keep their readability (ADR-0015). R2b's baked map AO multiplies it: the map's static
     // occluders, which GTAO sees only on screen and at half resolution (ADR-0016).
@@ -402,6 +437,9 @@ Surface default_surface(vec3 albedo, vec3 normal, vec3 world_pos, float roughnes
     surface.specular = camera.specular_tint;
     surface.emissive = vec3(0.0);
     surface.occlusion = 1.0;
+#ifdef MOBA_TIERED_SHADING
+    surface.f0 = 0.04; // IOR 1.5 (ADR-0023 §6b)
+#endif
     return surface;
 }
 

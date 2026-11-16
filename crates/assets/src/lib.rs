@@ -123,8 +123,10 @@ pub use map_visuals::{
     MapTerrain, MapVisuals, MapVisualsError, MapWater, TerrainLayer, valid_mesh_name,
 };
 pub use material::{
-    MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
-    texture_path,
+    CompatMaterial, CompatOverride, MAX_DIELECTRIC_F0, MAX_MATERIAL_BYTES, MaterialDesc,
+    MaterialError, MaterialShader, ModelParams, ShadingModel, THIN_FILM_IOR,
+    THIN_FILM_THICKNESS_NM, TextureSlot, Transmission, has_emissive_mask, ior_to_f0, material_path,
+    texture_path, thin_film_reflectance,
 };
 pub use mesh::{MeshData, MeshError, bounding_sphere};
 #[cfg(feature = "glb")]
