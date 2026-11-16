@@ -32,6 +32,17 @@ layout(location = 3) out vec4 out_gb2;
 // empty write mask. lavapipe does not honour that mask, so there (CI only) the slot under
 // foliage is undefined (ADR-0023 amendment 1 item 16). Whether outlines should show under
 // brush at all is a gameplay decision left open.
+#ifdef GBUFFER_HDR
+// N2b (ADR-0023 §1a, §2): the light-accumulation target, after the outline IDs when they are
+// attached. Its write mask is empty (ADR-0023 amendment 2 item 6): the deferred lighting
+// replaces this pixel without reading it. Lavapipe, which ignores the empty mask, stores this
+// zero.
+#ifdef PREPASS_IDS
+layout(location = 5) out vec4 out_hdr;
+#else
+layout(location = 4) out vec4 out_hdr;
+#endif
+#endif
 #else
 layout(location = 0) out vec4 out_color;
 #endif
@@ -62,6 +73,9 @@ void main() {
     params.flags = 0u;
     params.rim_slot = 0u;
     encode_gbuffer(params, out_gb0, out_gb1, out_gb2);
+#ifdef GBUFFER_HDR
+    out_hdr = vec4(0.0, 0.0, 0.0, 1.0); // Foliage emits nothing.
+#endif
 #else
     vec3 lit = shade(surface);
 

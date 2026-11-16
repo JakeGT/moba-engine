@@ -966,7 +966,8 @@ const LIGHT_GRID_WORDS: usize =
 /// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6, binding 10 in
 /// ADR-0015 §5, 11–14 in ADR-0016 §6, 20 in ADR-0017 §6): combined image samplers
 /// `0..IMAGE_BINDINGS`, the terrain block, the AO image, the two light buffers, the baked AO
-/// and contact images and the decal storage buffer, all fragment-only. Also counted by the
+/// and contact images and the decal storage buffer, for the fragment stages and (N2b) the
+/// deferred lighting's compute stage. Also counted by the
 /// scene layout's descriptor budget (`descriptor_budget`).
 pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] {
     core::array::from_fn(|index| {
@@ -987,7 +988,7 @@ pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>;
             .binding(binding)
             .descriptor_type(kind)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::COMPUTE)
     })
 }
 
@@ -1404,24 +1405,22 @@ impl LightingResources {
         self.decals[frame % MAIN_SETS].write_bytes(0, upload.bytes());
     }
 
-    /// Points the main view's sets at `shadow` (the shadow transient) and `contact` (the
-    /// contact-shadow transient), or the defaults. The device must be idle or the sets unused
-    /// by pending work (creation, resize).
+    /// Points the main view's sets at `shadow` (the shadow transient), `contact` (the
+    /// contact-shadow transient) and `ao` (the blurred AO transient, R6), or the defaults
+    /// (white AO), in one write. The device must be idle or the sets unused by pending work
+    /// (creation, resize). All three are set before the write: after a resize the old views
+    /// are destroyed, so a write that named one of them (as separate calls once did for the
+    /// AO, between the shadow's write and its own) is invalid.
     pub(crate) fn bind_transients(
         &mut self,
         device: &DeviceContext,
         shadow: Option<vk::ImageView>,
         contact: Option<vk::ImageView>,
+        ao: Option<vk::ImageView>,
     ) {
         self.shadow_view = shadow.unwrap_or(self.default_shadow.view());
         self.contact_view = contact;
-        self.write(device);
-    }
-
-    /// Points the main view's sets at `view` (the blurred AO transient, R6) or white. The
-    /// device must be idle or the sets unused by pending work (creation, resize).
-    pub(crate) fn bind_ao(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
-        self.ao_view = view.unwrap_or(self.default_ramp.view());
+        self.ao_view = ao.unwrap_or(self.default_ramp.view());
         self.write(device);
     }
 

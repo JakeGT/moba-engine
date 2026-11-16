@@ -158,10 +158,10 @@ const MATRIX: [(&str, [Cell; 5]); 16] = [
     (
         "Frame",
         [
-            ("thin G-buffer, deferred", Planned(N2)),
-            ("thin G-buffer, deferred", Planned(N2)),
-            ("thin G-buffer, deferred", Planned(N2)),
-            ("thin G-buffer, deferred", Planned(N2)),
+            ("thin G-buffer, deferred", Built),
+            ("thin G-buffer, deferred", Built),
+            ("thin G-buffer, deferred", Built),
+            ("thin G-buffer, deferred", Built),
             (
                 "thin G-buffer, deferred, plus path-traced lighting",
                 Planned(N9),

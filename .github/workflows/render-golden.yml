@@ -77,6 +77,8 @@ jobs:
               - 'scripts/ghost-probe.sh'
               - 'scripts/overlay-invariance.sh'
               - 'scripts/tiered-goldens.sh'
+              # ADR-0023 gate 2 (N2b): deferred–forward parity.
+              - 'scripts/deferred-parity.sh'
               # ADR-0020 gate 3: the tiered smoke binaries.
               - 'crates/tools/src/tiered_smoke.rs'
               - 'crates/tools/src/bin/bindless-smoke.rs'
@@ -575,7 +577,7 @@ jobs:
     # the runner's CPU vendor).
     runs-on: ubuntu-26.04
     # The FSR 3.1 ghost probe (three modes), four overlay cases (with TAAU Quality as the
-    # reference) and eight tiered captures plus a reset run.
+    # reference), eight tiered captures plus a reset run, and the six parity captures (N2b).
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
@@ -614,6 +616,8 @@ jobs:
               - 'scripts/ghost-probe.sh'
               - 'scripts/overlay-invariance.sh'
               - 'scripts/tiered-goldens.sh'
+              # ADR-0023 gate 2 (N2b): deferred–forward parity.
+              - 'scripts/deferred-parity.sh'
               # ADR-0020 gate 3: the tiered smoke binaries.
               - 'crates/tools/src/tiered_smoke.rs'
               - 'crates/tools/src/bin/bindless-smoke.rs'
@@ -642,6 +646,7 @@ jobs:
           echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           echo "Using $ICD"
       - name: Build client and tools
+        id: build
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
       # ADR-0023 verification gate 1 (N2a): 4096 fixed surfaces through the G-buffer encoding
@@ -675,6 +680,18 @@ jobs:
         env:
           RUN: xvfb-run -a
           UPSCALERS: fsr3
+      # ADR-0023 verification gate 2 (N2b): the deferred frame against N1's tiered forward
+      # frame (`MOBA_DEFERRED=off`) with the stylisation off, for the default scene, the R3b
+      # river and the R3b teamfight: within 2/255 on at least 99.5 % of pixels and 6/255
+      # everywhere, with validation + sync validation clean. It runs whenever the build did,
+      # so a golden or probe failure above does not hide its result.
+      - name: Deferred–forward parity (ADR-0023 gate 2)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          scripts/deferred-parity.sh ./target/release/moba-client ./target/release/image-check \
+            deferred-parity
+        env:
+          RUN: xvfb-run -a
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -683,6 +700,7 @@ jobs:
             ghost-probe
             overlay-invariance
             tiered-goldens
+            deferred-parity
 
   # ADR-0021 amendment 6 item 5: `gh workflow run render-golden.yml --ref <branch>
   # -f cpu_sample=true` runs the tiered goldens (TAAU and FSR 3.1) on eight runners at once,

@@ -355,7 +355,10 @@ pub const REQUIRED_LIMITS: &[(&str, u64)] = &[
     // attachments at once (Vulkan only guarantees four); the fragment stage must be able to
     // output to all five, and they count against its combined output resources. ADR-0023
     // §1d: the G-buffer pass binds five too (motion, gb0–gb2 and the unit mask), and 8 (the
-    // Roadmap 2024 / Vulkan 1.4 value, which the tier-floor GPUs report) leaves N3 room.
+    // Roadmap 2024 / Vulkan 1.4 value, which the tier-floor GPUs report) leaves N3 room. The
+    // deferred frame's G-buffer pass writes a sixth (`hdr`, N2b); a device with five outputs
+    // stays Tiered and lights forward (ADR-0023 amendment 2 item 13), so it is not required
+    // here.
     ("maxColorAttachments", 8),
     ("maxFragmentOutputAttachments", 5),
     ("maxFragmentCombinedOutputResources", 5),

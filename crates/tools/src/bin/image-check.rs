@@ -1,7 +1,9 @@
 //! Compare a rendered PPM against a checked-in downscaled fingerprint, or (`--against`)
 //! against another full-resolution capture of the same frame: at least `--min-changed`
 //! pixels must differ and every `--same-box` must be byte-identical (ADR-0019: the heat haze
-//! is drawn, and the units' pixels are never touched by it).
+//! is drawn, and the units' pixels are never touched by it). With `--parity` the two
+//! captures must instead agree: at least 99.5 % of the pixels within 2/255 on every channel
+//! and none past 6/255 (ADR-0023 gate 2, the deferred–forward parity).
 #![allow(clippy::print_stdout)]
 
 use std::path::Path;
@@ -9,7 +11,37 @@ use std::process::ExitCode;
 
 const FINGERPRINT_WIDTH: usize = 64;
 const FINGERPRINT_HEIGHT: usize = 36;
-const USAGE: &str = "usage: image-check <actual.ppm> --expected <fingerprint.rgb> [--write] [--diff <out.ppm>]\n       image-check <actual.ppm> --against <other.ppm> [--min-changed <pixels>] [--same-box <x0,y0,x1,y1>]... [--diff <out.ppm>]";
+const USAGE: &str = "usage: image-check <actual.ppm> --expected <fingerprint.rgb> [--write] [--diff <out.ppm>]\n       image-check <actual.ppm> --against <other.ppm> [--min-changed <pixels>] [--same-box <x0,y0,x1,y1>]... [--diff <out.ppm>]\n       image-check <actual.ppm> --against <other.ppm> --parity [--diff <out.ppm>]";
+
+/// ADR-0023 gate 2: the per-channel difference most pixels stay within, the share of pixels
+/// that must (per mille), and the difference no pixel may exceed.
+const PARITY_CLOSE: u8 = 2;
+const PARITY_CLOSE_PER_MILLE: usize = 995;
+const PARITY_MAX: u8 = 6;
+
+/// Per-pixel largest channel difference, as a histogram over 0..=255.
+fn difference_histogram(actual: &[u8], other: &[u8]) -> [usize; 256] {
+    let mut histogram = [0usize; 256];
+    let (actual, _) = actual.as_chunks::<3>();
+    let (other, _) = other.as_chunks::<3>();
+    for (a, b) in actual.iter().zip(other) {
+        let delta = (0..3).map(|channel| a[channel].abs_diff(b[channel])).max();
+        histogram[usize::from(delta.unwrap_or(0))] += 1;
+    }
+    histogram
+}
+
+/// Whether `histogram` passes gate 2: the close pixels and the largest difference.
+fn parity(histogram: &[usize; 256]) -> (usize, u8, bool) {
+    let total: usize = histogram.iter().sum();
+    let close: usize = histogram[..=usize::from(PARITY_CLOSE)].iter().sum();
+    let max = histogram
+        .iter()
+        .rposition(|&count| count > 0)
+        .map_or(0, |index| u8::try_from(index).unwrap_or(u8::MAX));
+    let ok = close * 1000 >= total * PARITY_CLOSE_PER_MILLE && max <= PARITY_MAX;
+    (close, max, ok)
+}
 
 /// A pixel box `[x0, x1) x [y0, y1)`.
 type PixelBox = [usize; 4];
@@ -61,6 +93,7 @@ fn against(
     min_changed: usize,
     boxes: &[PixelBox],
     diff_path: Option<&Path>,
+    parity_mode: bool,
 ) -> ExitCode {
     let (Ok((width, height, actual)), Ok((other_width, other_height, other))) =
         (read_ppm(Path::new(actual_path)), read_ppm(other_path))
@@ -70,6 +103,41 @@ fn against(
     };
     if (width, height) != (other_width, other_height) {
         eprintln!("size mismatch: {width}x{height} vs {other_width}x{other_height}");
+        return ExitCode::from(1);
+    }
+    if parity_mode {
+        let histogram = difference_histogram(&actual, &other);
+        let (close, max, ok) = parity(&histogram);
+        let total = width * height;
+        let tail: Vec<String> = histogram
+            .iter()
+            .enumerate()
+            .skip(usize::from(PARITY_CLOSE) + 1)
+            .filter(|&(_, &count)| count > 0)
+            .map(|(delta, count)| format!("{delta}:{count}"))
+            .collect();
+        #[allow(clippy::cast_precision_loss)] // A percentage for the log.
+        let percent = close as f64 * 100.0 / total.max(1) as f64;
+        println!(
+            "render parity: within_{PARITY_CLOSE}={percent:.3}% ({close} of {total}) max_diff={max} \
+             over_{PARITY_CLOSE}=[{}]",
+            tail.join(" ")
+        );
+        if let Some(path) = diff_path {
+            let diff: Vec<u8> = actual
+                .iter()
+                .zip(&other)
+                .map(|(a, b)| a.abs_diff(*b).saturating_mul(32))
+                .collect();
+            let _ = write_ppm(path, width, height, &diff);
+        }
+        if ok {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!(
+            "render parity failed: fewer than 99.5% of pixels within {PARITY_CLOSE}/255, or one \
+             past {PARITY_MAX}/255"
+        );
         return ExitCode::from(1);
     }
     let (changed, in_box) = compare_full(&actual, &other, width, height, boxes);
@@ -111,10 +179,12 @@ fn main() -> ExitCode {
     let mut against_path = None;
     let mut min_changed = 1usize;
     let mut boxes = Vec::new();
+    let mut parity_mode = false;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--expected" => expected_path = args.next().map(std::path::PathBuf::from),
             "--write" => write = true,
+            "--parity" => parity_mode = true,
             "--diff" => diff_path = args.next().map(std::path::PathBuf::from),
             "--against" => against_path = args.next().map(std::path::PathBuf::from),
             "--min-changed" => {
@@ -148,7 +218,12 @@ fn main() -> ExitCode {
             min_changed,
             &boxes,
             diff_path.as_deref(),
+            parity_mode,
         );
+    }
+    if parity_mode {
+        eprintln!("--parity needs --against <other.ppm>");
+        return ExitCode::from(2);
     }
     let Ok((width, height, pixels)) = read_ppm(Path::new(&actual_path)) else {
         eprintln!("cannot read PPM {actual_path}");
@@ -329,6 +404,28 @@ mod tests {
         assert_eq!(parse_box("3,2,1,4"), None);
         assert_eq!(parse_box("1,2,3"), None);
         assert_eq!(parse_box("1,2,3,4,5"), None);
+    }
+
+    #[test]
+    fn parity_counts_close_pixels_and_the_largest_difference() {
+        let base = vec![100u8; 1000 * 3];
+        let mut other = base.clone();
+        // Five pixels 3/255 off (99.5 % close), one channel each.
+        for pixel in 0..5 {
+            other[pixel * 3 + pixel % 3] = 103;
+        }
+        let (close, max, ok) = parity(&difference_histogram(&base, &other));
+        assert_eq!((close, max, ok), (995, 3, true));
+        // A sixth fails the share; one pixel 7/255 off fails the maximum.
+        other[5 * 3] = 97;
+        assert!(!parity(&difference_histogram(&base, &other)).2);
+        let mut spike = base.clone();
+        spike[42] = 107;
+        assert_eq!(
+            parity(&difference_histogram(&base, &spike)),
+            (999, 7, false)
+        );
+        assert_eq!(parity(&difference_histogram(&base, &base)), (1000, 0, true));
     }
 
     #[test]

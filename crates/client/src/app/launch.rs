@@ -544,6 +544,28 @@ pub(crate) fn debug_view() -> moba_render::TemporalDebugView {
     })
 }
 
+/// `MOBA_DEFERRED=off` keeps N1's tiered forward frame instead of the deferred lighting
+/// (ADR-0023 §2, N2b): the reference of the deferred–forward parity gate. Anything else, or
+/// unset, lights deferred. Read once at startup.
+pub(crate) fn deferred_lighting() -> bool {
+    deferred_lighting_from(std::env::var("MOBA_DEFERRED").ok().as_deref())
+}
+
+fn deferred_lighting_from(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| value.trim().eq_ignore_ascii_case("off"))
+}
+
+/// `MOBA_STYLISATION=off`: the map's stylisation (wrap, rim, ramp and painted specular) set
+/// to its neutral values, so a frame shows the plain BRDF (the deferred–forward parity gate,
+/// ADR-0023 gate 2, compares with stylisation off on both paths). Read once.
+pub(crate) fn stylisation_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("MOBA_STYLISATION")
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("off"))
+    })
+}
+
 /// Dynamic resolution's defaults on the tiered path (ADR-0020 §5c).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TieredScale {
@@ -1482,7 +1504,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 /// GPU lanes of the frame log, in sample order (see [`gpu_sample`]).
-pub(crate) const GPU_LANES: [&str; 33] = [
+pub(crate) const GPU_LANES: [&str; 36] = [
     "shadow",
     "scene",
     "composite",
@@ -1518,6 +1540,10 @@ pub(crate) const GPU_LANES: [&str; 33] = [
     "tc_mask",
     "overlay_prepass",
     "overlay",
+    // ADR-0023 §2 (N2b): the deferred lighting's passes, on the tiered deferred frame only.
+    "light_classify",
+    "deferred_light",
+    "simple_water",
 ];
 /// First lane of a pass that only some configurations have (R6 post, ADR-0015; R2b's contact
 /// shadows and outlines, ADR-0016).
@@ -1576,6 +1602,9 @@ pub(crate) fn gpu_sample(
         pass("tc_mask"),
         pass("overlay_prepass"),
         pass("overlay"),
+        pass("light_classify"),
+        pass("deferred_light"),
+        pass("simple_water"),
     ]
 }
 
@@ -1666,6 +1695,16 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_deferred_lighting_is_on_unless_switched_off() {
+        use super::deferred_lighting_from;
+        assert!(deferred_lighting_from(None));
+        assert!(deferred_lighting_from(Some("on")));
+        assert!(deferred_lighting_from(Some("")));
+        assert!(!deferred_lighting_from(Some("off")));
+        assert!(!deferred_lighting_from(Some(" OFF ")));
+    }
 
     #[test]
     fn the_frame_rate_limit_defaults_to_240_and_zero_uncaps() {
@@ -2313,6 +2352,10 @@ mod tests {
                     0.02,
                     0.05,
                     0.04,
+                    // N2b: the deferred lighting ran in every frame but the first.
+                    if index == 0 { 0.0 } else { 0.004 },
+                    if index == 0 { 0.0 } else { 0.06 },
+                    if index == 0 { 0.0 } else { 0.007 },
                 ]
             })
             .collect();
@@ -2325,10 +2368,15 @@ mod tests {
         assert!(report.contains("gpu_tc_mask_runs=101 gpu_tc_mask_p50_ms=0.020 "));
         assert!(report.contains("gpu_overlay_prepass_runs=101 gpu_overlay_prepass_p50_ms=0.050 "));
         assert!(
-            report.ends_with(
+            report.contains(
                 "gpu_overlay_runs=101 gpu_overlay_p50_ms=0.040 gpu_overlay_p95_ms=0.040 "
             )
         );
+        assert!(report.contains("gpu_light_classify_runs=100 gpu_light_classify_p50_ms=0.004 "));
+        assert!(report.contains("gpu_deferred_light_runs=100 gpu_deferred_light_p50_ms=0.060 "));
+        assert!(report.ends_with(
+            "gpu_simple_water_runs=100 gpu_simple_water_p50_ms=0.007 gpu_simple_water_p95_ms=0.007 "
+        ));
         assert!(report.starts_with("gpu_shadow_p50_ms=0.250 gpu_shadow_p95_ms=0.475 "));
         assert!(report.contains("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
         assert!(report.contains("gpu_composite_p95_ms=1.900 "));

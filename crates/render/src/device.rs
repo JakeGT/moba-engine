@@ -63,6 +63,17 @@ pub(crate) struct DeviceContext {
     pub(crate) max_image_dimension_2d: u32,
     /// `maxSamplerLodBias`: bounds the temporal material mip bias (ADR-0021 §1).
     pub(crate) max_sampler_lod_bias: f32,
+    /// `maxFragmentOutputAttachments`: the deferred frame's G-buffer pass writes six
+    /// (admission guarantees five; ADR-0023 amendment 2 item 13).
+    pub(crate) max_fragment_output_attachments: u32,
+    /// `maxFragmentCombinedOutputResources` (likewise).
+    pub(crate) max_fragment_combined_outputs: u32,
+    /// `maxComputeWorkGroupInvocations`: the 16 x 16 compute tiles (TAAU, the deferred
+    /// lighting) need 256; the core minimum is 128.
+    pub(crate) max_compute_work_group_invocations: u32,
+    /// Subgroup arithmetic operations in compute shaders (`VkPhysicalDeviceSubgroupProperties`,
+    /// core 1.1): `light_classify`'s `WaveActiveBitOr`.
+    pub(crate) subgroup_arithmetic_compute: bool,
     /// Colour and depth attachments support 4x MSAA (`framebufferColorSampleCounts` and
     /// `framebufferDepthSampleCounts`, R6).
     pub(crate) msaa4: bool,
@@ -562,6 +573,19 @@ impl DeviceContext {
                 .max(1),
             max_image_dimension_2d: candidate.properties.limits.max_image_dimension2_d,
             max_sampler_lod_bias: candidate.properties.limits.max_sampler_lod_bias,
+            max_fragment_output_attachments: candidate
+                .properties
+                .limits
+                .max_fragment_output_attachments,
+            max_fragment_combined_outputs: candidate
+                .properties
+                .limits
+                .max_fragment_combined_output_resources,
+            max_compute_work_group_invocations: candidate
+                .properties
+                .limits
+                .max_compute_work_group_invocations,
+            subgroup_arithmetic_compute: query_subgroup_arithmetic_compute(instance, physical),
             msaa4: candidate
                 .properties
                 .limits
@@ -1122,6 +1146,23 @@ fn query_vulkan12(
         unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
     }
     features
+}
+
+/// Whether compute shaders have subgroup arithmetic (core Vulkan 1.1 subgroup properties).
+fn query_subgroup_arithmetic_compute(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
+    let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+    {
+        let mut properties = vk::PhysicalDeviceProperties2::default().push(&mut subgroup);
+        // SAFETY: the physical device belongs to this instance (Vulkan 1.1 or later, as every
+        // device the engine opens), and the chain is valid for the duration of the call.
+        unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+    }
+    subgroup
+        .supported_stages
+        .contains(vk::ShaderStageFlags::COMPUTE)
+        && subgroup
+            .supported_operations
+            .contains(vk::SubgroupFeatureFlags::ARITHMETIC)
 }
 
 /// The update-after-bind descriptor limits (core Vulkan 1.2 properties).

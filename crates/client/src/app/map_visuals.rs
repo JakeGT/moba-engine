@@ -413,7 +413,12 @@ impl MapLibrary {
     /// The scene lighting for the active map: the renderer's defaults with the descriptor's
     /// `[lighting]` overrides. Never allocates.
     pub(crate) fn scene_lighting(&self) -> SceneLighting {
-        scene_lighting(&self.lighting)
+        let lighting = scene_lighting(&self.lighting);
+        if super::launch::stylisation_off() {
+            unstylised(lighting)
+        } else {
+            lighting
+        }
     }
 
     /// Applies the descriptor's sun direction, intensity and hemispheric ambient to `camera`.
@@ -911,6 +916,17 @@ fn theme_label(theme: MapTheme) -> &'static str {
     theme.asset_name().trim_start_matches("map-")
 }
 
+/// `lighting` without the map stylisation (`MOBA_STYLISATION=off`): no wrap, rim or ramp, a
+/// white painted specular at scale 1.
+pub(crate) fn unstylised(lighting: SceneLighting) -> SceneLighting {
+    let rim_color = lighting.rim_color;
+    lighting
+        .with_wrap(0.0)
+        .with_rim(0.0, rim_color)
+        .with_ramp(0.0)
+        .with_specular(Vec3::ONE, 1.0)
+}
+
 /// The renderer's default lighting with `map`'s overrides.
 pub(crate) fn scene_lighting(map: &MapLighting) -> SceneLighting {
     let mut lighting = SceneLighting::DEFAULT;
@@ -1331,6 +1347,22 @@ pub(crate) fn bind_local_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `MOBA_STYLISATION=off` keeps the light and drops only the stylisation.
+    #[test]
+    fn unstylised_lighting_keeps_the_light() {
+        let styled = SceneLighting::DEFAULT
+            .with_wrap(0.5)
+            .with_sun_color(Vec3::new(1.0, 0.5, 0.25));
+        let plain = unstylised(styled);
+        assert_eq!(
+            (plain.wrap, plain.rim, plain.ramp, plain.specular),
+            (0.0, 0.0, 0.0, 1.0)
+        );
+        assert_eq!(plain.specular_tint, Vec3::ONE);
+        assert_eq!(plain.sun_color, styled.sun_color);
+        assert_eq!(plain.shadow_strength, styled.shadow_strength);
+    }
 
     const CRYSTAL: &[u8] = include_bytes!("../../../../content/models/crystal.glb");
 

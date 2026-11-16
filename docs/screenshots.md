@@ -18,6 +18,33 @@ deterministic simulation tick; minions and structures retain the instanced-cube 
 Local bot preview after 3,000 warmup ticks on an RTX 5070 Ti with validation required; frame log
 p95 4.197 ms / max 4.538 ms with vsync off.
 
+### Tiered deferred lighting debug views (N2b)
+![The deferred lighting debug views](images/n2b-deferred-views.png)
+
+The teamfight replay (`MOBA_WARMUP_TICKS=330`, camera distance 30) on the tiered path, Tiered
+High with TAAU, on an RTX 5070 Ti at 1280×720 (shown at half size), with validation required
+and zero messages. Clockwise from the top left: the deferred frame, then
+`MOBA_DEBUG_VIEW=tiles`, `lit-only` and `light-count`
+([ADR-0023](adr/0023-frame-architecture-materials.md) §2 and amendment 2).
+- `deferred_light` draws these views itself, so they cost no extra pass. The water, the
+  particles and the gameplay overlay are drawn after it, over the view.
+- `tiles` tints each 16 × 16 tile by its class: green tiles hold only `STANDARD` (and
+  `UNLIT`) pixels and take the standard permutation; orange tiles hold a `FOLIAGE` pixel
+  (the grass) and take the extended one. Tile edges are darker. Sky tiles are not lit.
+- `lit-only` shades every surface with white albedo and no emissive: the sun, shadows,
+  ambient, AO and lights alone.
+- `light-count` colours each pixel by the number of lights in its 4.6 m ground column
+  (dark blue none, then blue, green and red at 16). The ability lights of the fight show as
+  the column squares around the ring.
+
+```bash
+MOBA_DEBUG_VIEW=tiles MOBA_QUALITY=high MOBA_WINDOW_SIZE=1280x720 \
+MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 MOBA_CAMERA_DISTANCE=30 \
+MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40 MOBA_CAPTURE=/tmp/n2b-tiles.ppm \
+cargo run --release -p moba-client
+# lavapipe needs MOBA_RENDER_PATH=tiered; the views need the deferred frame (temporal AA)
+```
+
 ### Tiered G-buffer debug views (N2a)
 ![The G-buffer debug views](images/n2a-gbuffer-views.png)
 

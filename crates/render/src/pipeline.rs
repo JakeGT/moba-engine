@@ -467,7 +467,10 @@ pub(crate) struct TargetsSpec<'a> {
     pub(crate) vertex: vk::ShaderModule,
     /// `None`: depth only (every colour attachment then needs an empty write mask).
     pub(crate) fragment: Option<vk::ShaderModule>,
-    /// At most five (the G-buffer prepass: motion, `gb0`–`gb2` and the unit IDs).
+    /// The fragment stage's specialisation constants (the deferred sky's background, N2b).
+    pub(crate) fragment_specialization: Option<&'a vk::SpecializationInfo<'a>>,
+    /// At most six (the G-buffer prepass: motion, `gb0`–`gb2`, the unit IDs and, on the
+    /// deferred frame, `hdr`).
     pub(crate) colors: &'a [ColorTarget],
     pub(crate) depth_format: vk::Format,
     /// Test and write; otherwise test only.
@@ -483,10 +486,10 @@ pub(crate) fn create_targets(
     device: &DeviceContext,
     spec: &TargetsSpec<'_>,
 ) -> RenderResult<vk::Pipeline> {
-    const MAX_TARGETS: usize = 5;
+    const MAX_TARGETS: usize = 6;
     assert!(
         spec.colors.len() <= MAX_TARGETS,
-        "at most five colour targets"
+        "at most six colour targets"
     );
     let vertex_stage = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::VERTEX)
@@ -495,10 +498,14 @@ pub(crate) fn create_targets(
     let mut stages = [vertex_stage, vertex_stage];
     let stage_count = match spec.fragment {
         Some(fragment) => {
-            stages[1] = vk::PipelineShaderStageCreateInfo::default()
+            let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(fragment)
                 .name(c"main");
+            stages[1] = match spec.fragment_specialization {
+                Some(specialization) => stage.specialization_info(specialization),
+                None => stage,
+            };
             2
         }
         None => 1,
@@ -539,15 +546,18 @@ pub(crate) fn create_targets(
     let mut attachments = [vk::PipelineColorBlendAttachmentState::default(); MAX_TARGETS];
     let mut formats = [vk::Format::UNDEFINED; MAX_TARGETS];
     for (index, target) in spec.colors.iter().enumerate() {
-        let max = target.blend == TargetBlend::Max;
+        let (enable, source, op) = match target.blend {
+            TargetBlend::None => (false, vk::BlendFactor::ONE, vk::BlendOp::MAX),
+            TargetBlend::Max => (true, vk::BlendFactor::ONE, vk::BlendOp::MAX),
+        };
         attachments[index] = vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(max)
-            .src_color_blend_factor(vk::BlendFactor::ONE)
+            .blend_enable(enable)
+            .src_color_blend_factor(source)
             .dst_color_blend_factor(vk::BlendFactor::ONE)
-            .color_blend_op(vk::BlendOp::MAX)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .color_blend_op(op)
+            .src_alpha_blend_factor(source)
             .dst_alpha_blend_factor(vk::BlendFactor::ONE)
-            .alpha_blend_op(vk::BlendOp::MAX)
+            .alpha_blend_op(op)
             .color_write_mask(target.write_mask);
         formats[index] = target.format;
     }

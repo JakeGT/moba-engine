@@ -166,8 +166,16 @@ That is the Compat frame. On the tiered path, with temporal AA
 writes motion vectors. Since N2a it is the G-buffer pass as well
 ([ADR-0023](adr/0023-frame-architecture-materials.md) §1 and amendment 1): `gb0`–`gb2` hold
 base colour and metallic, the octahedral normal, roughness and flags, and the model data, rim
-slot and shading model (`crates/render/src/gbuffer.rs`). The forward `scene` still shades
-until N2b. Depth on Tiered is **reversed-Z**: cleared to 0, tested `GREATER_OR_EQUAL`, with a
+slot and shading model (`crates/render/src/gbuffer.rs`), and the surfaces' emissive goes
+into `hdr`. Since N2b (amendment 2) the tiered frame is **deferred**: the `scene` pass leaves
+it, `light_classify` sorts 16 × 16 tiles into standard and extended lists with their
+indirect dispatch arguments (`crates/render/src/passes/deferred.rs`), `deferred_light`
+reconstructs each pixel's position from depth and shades it with the forward `shade()`
+(sun, shadows, the column-grid lights, ambient, AO, fog of war and height fog); the
+G-buffer pass draws the sky's radiance, and on Low/Medium a `simple_water` pass draws the
+simple water. Refracting water and the transparents follow as before.
+`MOBA_DEFERRED=off` runs N1's forward frame, and `scripts/deferred-parity.sh` holds the two
+to ADR-0023's parity gate. Depth on Tiered is **reversed-Z**: cleared to 0, tested `GREATER_OR_EQUAL`, with a
 finite far plane. The reversal is applied only where matrices reach the GPU
 (`crates/render/src/depth.rs`), and shadow maps stay forward. `temporal` then upscales to
 output resolution, the post chain runs there, and the gameplay overlay draws after it.

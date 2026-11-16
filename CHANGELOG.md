@@ -140,6 +140,47 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
+  [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
+  Compat is byte-identical (its images; every Compat SPIR-V module but `sky.frag`, whose body
+  moved into a shared include):**
+  - **New passes:** `light_classify` (Slang compute) sorts 16 × 16 tiles into standard and
+    extended lists with `VkDispatchIndirectCommand`s; `deferred_light` (GLSL compute,
+    sharing the forward `shade()` through `include/lighting.glsl`) decodes the G-buffer,
+    reconstructs each pixel from reversed-Z depth and applies sun, shadows, contact shadows,
+    the column-grid point lights, ambient, AO, the map rim on units, fog of war and height
+    fog. The G-buffer pass also writes the sky's radiance (the clear colour with
+    `MOBA_SKY=off`, written by the sky's draw itself) and the units' emissive into `hdr`, which is `RGBA16F` whenever the frame is deferred; on Low/Medium a `simple_water`
+    pass draws the simple water after the lighting. A device without 6 fragment outputs,
+    256 compute invocations, compute subgroup arithmetic or the pass's descriptor budget
+    lights forward, with one log line; debug views are a specialisation constant.
+  - **Off switch:** `MOBA_DEFERRED=off` (`RenderConfig::with_deferred`) runs N1's forward
+    frame; the tiered start-up log prints `[render] lighting: deferred|forward`.
+    `MOBA_STYLISATION=off` turns the map's wrap, rim, ramp and painted specular off on both.
+  - **`MOBA_DEBUG_VIEW`** gains `tiles`, `light-count` and `lit-only`.
+  - **Gates:** `scripts/deferred-parity.sh` (CI `tiered-temporal`) compares the two frames
+    (`image-check --parity`) and passes on the default scene (also with `MOBA_SKY=off`),
+    the R3b river and the teamfight (worst pixel 5/255, locally and on CI), after the TAAU
+    fix below.
+    `gbuffer-smoke` also checks the GLSL decode. A CPU test holds that the forward and
+    deferred light loops visit the same lights under every cap. On the RTX 5070 Ti the frame
+    is 1.014–1.065× N1's forward frame (gate ≤ 1.10×) and 0.959–0.981× N2a's.
+  - **Fix: TAAU's history clip amplified sub-step differences** (ADR-0021 amendment 7). It
+    scaled the whole history offset by the most-violated axis of a box whose extent was
+    floored at 1e-5, so a chroma change far below one 8-bit step could move a pixel by
+    15/255; this, not the deferred frame, failed the first parity runs at the river's bank.
+    Where the box's half-extent is under 0.004 the clip now blends into a per-channel clamp (a
+    clamp alone failed the ghost probe's particle smear); every ADR-0021 probe passes, and
+    the Tiered goldens' exact hashes were retaken from CI.
+  - **Frame log:** `gpu_light_classify`, `gpu_deferred_light` and `gpu_simple_water` lanes.
+    `MAX_PASSES` is 48 (the largest deferred topology has 39).
+  - **Fix: a resize wrote a destroyed AO view.** The main view's lighting sets were
+    rewritten with the new shadow and contact views before the AO view was updated, so the
+    first write named the old, destroyed AO transient (a validation error on any resize with
+    GTAO on, Compat included). The three are now set before one write
+    (`Lighting::bind_transients`).
+  - **Tiered admission** now requires `maxFragmentOutputAttachments` and
+    `maxFragmentCombinedOutputResources` ≥ 6 (the G-buffer pass's `hdr` output).
 - **A1 tool fixes from the A3 re-export
   ([ADR-0022 amendment 3](docs/adr/0022-provenance-gate-mikktspace.md#amendment-3-2026-11-15-unit-tangents-and-normals-quantised-before-tangents)):**
   - `content-check --source`'s GLB-TANGENT now also fails a file whose raw `TANGENT` has an

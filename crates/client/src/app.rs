@@ -748,6 +748,7 @@ impl App for ClientApp {
             .with_mesh_lod(launch::mesh_lod())
             .with_environment(Some(launch::environment_config(self.config_quality)))
             .with_debug_view(launch::debug_view())
+            .with_deferred(launch::deferred_lighting())
             .with_readback(launch::motion_probe_requested());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {

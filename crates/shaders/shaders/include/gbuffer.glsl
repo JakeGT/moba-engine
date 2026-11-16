@@ -1,7 +1,8 @@
-// The thin G-buffer's encoding (ADR-0023 §1a, §6c) for the G-buffer fragment stages. The
-// twin of `encode` in crates/render/src/gbuffer.rs and `encode_gbuffer` in
-// shaders/slang/lib/gbuffer.slang; `gbuffer-smoke` checks the stored bytes against the Rust
-// twin (verification gate 1). Keep the three in step.
+// The thin G-buffer's encoding (ADR-0023 §1a, §6c) for the G-buffer fragment stages, and its
+// decoding for `deferred_light.comp` (N2b). The twin of `encode`/`decode` in
+// crates/render/src/gbuffer.rs and `encode_gbuffer`/`decode_gbuffer` in
+// shaders/slang/lib/gbuffer.slang; `gbuffer-smoke` checks the stored bytes and this decode
+// against the Rust twin (verification gate 1). Keep the three in step.
 //
 // gb0 R8G8B8A8_UNORM:          rgb base colour (sRGB-encoded here), a metallic
 // gb1 A2B10G10R10_UNORM_PACK32: rg octahedral world normal, b perceptual roughness,
@@ -119,6 +120,77 @@ void encode_gbuffer(SurfaceParams s, out vec4 gb0, out vec4 gb1, out vec4 gb2) {
         gbuffer_quantise(c.g, 255.0),
         gbuffer_quantise(c.b, 255.0),
         float(alpha) / 255.0);
+}
+
+// --- Decoding (N2b, ADR-0023 §2c step 1) -------------------------------------------------
+
+// The integer a stored UNORM value holds.
+uint gbuffer_unorm_bits(float x, float steps) {
+    return uint(clamp(x, 0.0, 1.0) * steps + 0.5);
+}
+
+float gbuffer_srgb_decode(float encoded) {
+    return encoded <= 0.04045 ? encoded / 12.92 : pow((encoded + 0.055) / 1.055, 2.4);
+}
+
+vec3 gbuffer_octahedral_decode(vec2 encoded) {
+    vec2 p = encoded * 2.0 - 1.0;
+    vec3 n = vec3(p.x, 1.0 - abs(p.x) - abs(p.y), p.y);
+    float t = max(-n.y, 0.0);
+    n.x += n.x >= 0.0 ? -t : t;
+    n.z += n.z >= 0.0 ? -t : t;
+    return n / sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+}
+
+// The model ID alone, from `gb2` (the classification needs nothing else).
+uint gbuffer_model(vec4 gb2) {
+    return gbuffer_unorm_bits(gb2.a, 255.0) >> 4;
+}
+
+// `decode_gbuffer`: the three texels back to a surface. A reserved model ID (8-15) decodes
+// with its ID and the model data as stored.
+SurfaceParams decode_gbuffer(vec4 gb0, vec4 gb1, vec4 gb2) {
+    SurfaceParams s;
+    s.base_color = vec3(
+        gbuffer_srgb_decode(float(gbuffer_unorm_bits(gb0.r, 255.0)) / 255.0),
+        gbuffer_srgb_decode(float(gbuffer_unorm_bits(gb0.g, 255.0)) / 255.0),
+        gbuffer_srgb_decode(float(gbuffer_unorm_bits(gb0.b, 255.0)) / 255.0));
+    s.metallic = float(gbuffer_unorm_bits(gb0.a, 255.0)) / 255.0;
+    s.normal = gbuffer_octahedral_decode(vec2(
+        float(gbuffer_unorm_bits(gb1.r, 1023.0)) / 1023.0,
+        float(gbuffer_unorm_bits(gb1.g, 1023.0)) / 1023.0));
+    s.roughness = float(gbuffer_unorm_bits(gb1.b, 1023.0)) / 1023.0;
+    uint alpha = gbuffer_unorm_bits(gb2.a, 255.0);
+    s.model = alpha >> 4;
+    s.rim_slot = alpha & 7u;
+    s.flags = gbuffer_unorm_bits(gb1.a, 3.0)
+        | ((alpha & 8u) != 0u ? GBUFFER_FLAG_NO_FOG_OF_WAR : 0u);
+    vec3 c = vec3(
+        float(gbuffer_unorm_bits(gb2.r, 255.0)) / 255.0,
+        float(gbuffer_unorm_bits(gb2.g, 255.0)) / 255.0,
+        float(gbuffer_unorm_bits(gb2.b, 255.0)) / 255.0);
+    s.ao = 1.0;
+    s.model_data = c;
+    if (s.model == GBUFFER_MODEL_UNLIT) {
+        s.model_data = vec3(0.0);
+    } else if (s.model == GBUFFER_MODEL_STANDARD
+               || s.model == GBUFFER_MODEL_TRANSMISSIVE_FALLBACK) {
+        s.model_data = vec3(GBUFFER_MAX_DIELECTRIC_F0 * c.x * c.x, 0.0, 0.0);
+        s.ao = c.y;
+    } else if (s.model == GBUFFER_MODEL_CLEARCOAT) {
+        s.model_data = vec3(c.x, c.y, 0.0);
+        s.ao = c.z;
+    } else if (s.model == GBUFFER_MODEL_ANISOTROPIC) {
+        s.model_data = vec3(c.x, c.y * GBUFFER_PI, 0.0);
+        s.ao = c.z;
+    } else if (s.model == GBUFFER_MODEL_THIN_FILM) {
+        s.model_data = vec3(100.0 + c.x * 300.0, 1.0 + c.y, 0.0);
+        s.ao = c.z;
+    } else if (s.model == GBUFFER_MODEL_FOLIAGE) {
+        s.model_data = vec3(c.x, 0.0, 0.0);
+        s.ao = c.y;
+    }
+    return s;
 }
 
 #endif

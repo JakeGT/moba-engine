@@ -76,7 +76,10 @@ impl TaauDebugView {
             | View::Metallic
             | View::Model
             | View::RimSlot
-            | View::Flags => Self::None,
+            | View::Flags
+            | View::Tiles
+            | View::LightCount
+            | View::LitOnly => Self::None,
         }
     }
 }
@@ -637,6 +640,11 @@ mod tests {
             // ADR-0023 §1f: the G-buffer views are drawn by their own pass, never by TAAU.
             if view.gbuffer_view().is_some() {
                 assert_eq!(TaauDebugView::of(view), TaauDebugView::None, "{view:?}");
+            }
+            // N2b: the deferred lighting draws its views in the lit frame.
+            if view.deferred_view() != 0 {
+                assert_eq!(TaauDebugView::of(view), TaauDebugView::None, "{view:?}");
+                assert_eq!(view.gbuffer_view(), None, "{view:?}");
             }
         }
         let gbuffer: Vec<u32> = View::ALL

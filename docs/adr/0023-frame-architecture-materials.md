@@ -3,7 +3,8 @@
 **Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-02)). N2a is recorded in
-[Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built).
+[Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built) and N2b in
+[Amendment 2](#amendment-2-2026-11-15-n2b-deferred-lighting-for-standard-as-built).
 Proposed 2026-11-02. This is phase N2 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§3, §4, §5.2, §6.2, §6.6, §8
 and §12), written before the code.
@@ -1147,6 +1148,210 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
       A third frame at the horizon checks that the sky's pixels are zero in all three
       targets (`UNLIT`). This is gate 1's in-frame complement to `gbuffer-smoke`, which tests
       the encoder alone.
+
+### Amendment 2 (2026-11-15, N2b): deferred lighting for `STANDARD` as built
+
+Recorded in the N2b PR (`feat/n2b-deferred-lighting`), the second of the six PRs under
+[Consequences](#consequences). The evidence is in [perf/0036](../perf/0036-n2b-deferred.md).
+§2 and §11 hold for N2b's scope (`STANDARD`, sun, ambient, AO, clustered point lights, fog
+and fog of war, today's map rim; the `scene` pass leaves Tiered), with these departures and
+clarifications:
+
+1. **`deferred_light` is GLSL and shades with the forward `shade()`** (departs from §2d and
+   from "New Slang: … `deferred_light`" under Consequences). It includes the forward
+   `include/lighting.glsl`, so the deferred pixel runs the same BRDF, sun shadow (PCF/PCSS by
+   tier), contact shadows, column-grid light loop, SH and specular ambient, AO, specular
+   occlusion and map stylisation as the forward fragment did, and the parity gate measures
+   the G-buffer's quantisation and the depth reconstruction, not two lighting codes. The only
+   change to the shared code is `MOBA_PIXEL_CENTER` (the pixel centre `shade()` reads where
+   the fragment stages read `gl_FragCoord.xy`; their expansion is unchanged, so every forward
+   and Compat module's SPIR-V is byte-identical). N2c ports the lighting to Slang with the
+   material model, when the forward path stops being the reference. `light_classify` is
+   Slang (`shaders/slang/light_classify.slang`).
+2. **Plain descriptor sets, not the bindless table** (departs from §2d). `deferred_light`
+   binds set 0 (the camera block, the existing layout), set 1 (its own: `gb0`–`gb2`, depth,
+   `hdr` as an `rgba16f` storage image and the tile buffer) and set 3 (the scene's lighting
+   set: shadow map, environment, BRDF LUT, light grid, AO, contact shadows, fog of war). The
+   camera and lighting layouts gain the `COMPUTE` stage. The pass's sampler count is checked
+   against the device by `descriptor_budget` before the frame is chosen (item 17). Both
+   passes' sets are written once per transient binding (at creation and after a resize, with
+   the device idle), not per frame. The bindless move comes with N2c's material table, which
+   is what needs it.
+3. **Tile buffer.** One `GpuOnly` storage buffer (`deferred-tiles`, imported into the graph as
+   a persistent buffer), not two: a 12-word header (the sky, standard and extended
+   `VkDispatchIndirectCommand`s, then the three classes' tile counts), then the standard and
+   the extended lists of `capacity` packed tiles (`x | y << 16`). Sky tiles are classified but
+   not appended (their header words keep the reset values), and §2a's per-tile depth range is
+   not stored: nothing reads it until a pass needs it. `light_classify` ORs the tile's models
+   with `WaveActiveBitOr` and one shared atomic per subgroup (item 17). `capacity` is the tile
+   count at the swapchain extent, the render resolution's ceiling; the buffer is recreated
+   on a swapchain resize. `TileLayout` in `crates/render/src/passes/deferred.rs` is the Rust
+   twin, checked against both shaders by a source test. **The arguments are rows of
+   `tiles_x` groups, not one long row:** a class can hold more tiles than
+   `maxComputeWorkGroupCount[0]`'s guaranteed 65,535 (79,712 at 6016 × 3384 and native
+   scale), so `light_classify` raises each class's `x` and `y` to `min(n, tiles_x)` and
+   `ceil(n / tiles_x)` with atomic maxima as it appends, and `deferred_light` skips the
+   last row's groups past the class's count (a CPU test covers the formula up to a
+   32,768² image). The same check bounds every list read by `capacity`.
+4. **The reset is a `vkCmdUpdateBuffer` of the 12 header words, in `mask_clear`** (departs
+   from §2a's fill). `mask_clear` already opens the tiered frame with transfers, so the reset
+   needs no new pass; the lists themselves need no clearing (each is read only up to its
+   count).
+5. **No scalarised loop in N2b** (defers §2b's wave-uniform permutation). The loop is
+   `shade()`'s own, so a scalarised variant would fork the shared code that gate 2 depends
+   on. It returns with the Slang port in N2c, measured against the plain loop.
+6. **Emissive is loaded and replaced, not `hdr +=`** (§2c step 8), and only the units write
+   or read it. The G-buffer pass writes `hdr` (attachment 4, or 5 with the outline IDs: §1a,
+   closing amendment 1 item 6) from the units (their emissive) and the sky (item 7); the
+   terrain and the foliage have an empty write mask there, since they emit nothing. The
+   attachment is not loaded (`DONT_CARE`): every pixel is either the sky or lit. For a unit
+   pixel (`GBUFFER_FLAG_UNIT`) `deferred_light` reads the emissive, shades, applies the fogs
+   (in the forward order: emissive before fog, as `shade()` adds it) and stores the result;
+   any other lit pixel is stored without a read. An `UNLIT` pixel off the far plane keeps
+   what the G-buffer pass wrote (`deferred_light` returns early). No shipped surface but the
+   sky is `UNLIT`; the early return is sound only while the units, which write `hdr`, are the
+   only pipelines that may write `UNLIT` off the far plane. An `UNLIT` terrain or foliage
+   pixel would keep an undefined `hdr`, so a new `UNLIT` surface must write `hdr` too (a
+   comment at the return says so). Lavapipe ignores the empty mask (amendment 1 item 16) and stores the terrain's
+   and foliage's zero; that is safe only because nothing reads those texels before the
+   lighting overwrites them. Without the world's sky (`MOBA_SKY=off`) the sky's draw writes
+   the main view's clear colour itself: `sky_motion`'s `SKY_RADIANCE` specialisation
+   constant is false and constants 1–4 carry `RenderConfig::clear_color`, so `hdr` stays
+   `DONT_CARE` either way. (The first build cleared `hdr` and kept the clear colour with a
+   (`ZERO`, `ONE`) blend on the sky's attachment; lavapipe does not honour that blend and
+   stored the sky's radiance, so the sky-off frame was 93.2 % within 2/255, max 140. The
+   parity script now captures the default scene with `MOBA_SKY=off`: 100 % within 2, max 2.)
+   As with amendment 1 item 16's masks, lavapipe lost a state set on one attachment only
+   (the trigger is again not traced in Mesa). Within the G-buffer pass and the other
+   `TargetsSpec` pipelines nothing else depends on lavapipe honouring per-attachment state
+   (the VFX's per-attachment blends are honoured there, amendment 1 item 16). Every G-buffer
+   pipeline now blends nothing and writes every output with a mask covering it, except the
+   two empty `hdr` masks above (the terrain and the foliage, safe because unread) and the
+   foliage's unit ID (amendment 1 item 16's documented exception, whose texel lavapipe
+   leaves undefined). The other `TargetsSpec` pipelines (`tc_mask`'s `MAX`, the overlay
+   prepass's IDs) have a single attachment.
+7. **The sky is drawn once, by the G-buffer pass.** Its far-plane draw (§2a's "depth EQUAL
+   far", through the sky's own vertex stage and compare) already wrote the background's
+   motion and an `UNLIT` G-buffer; with `GBUFFER_HDR` it also writes the sky's radiance
+   (`include/sky_radiance.glsl`, shared with the forward `sky.frag`) or, without the world's
+   sky, the clear colour (item 6), and `deferred_light` skips the far plane. On Low/Medium, where water is the simple, non-refracting draw, a
+   `simple_water` pass after the lighting draws it (the forward `scene` did); with refraction,
+   `water_copy → water` follows as in N1 and there is no pass between. (The first build drew
+   the sky a second time in a `sky` pass after the lighting, with an `hdr` round trip between
+   the colour and the general layout; the review removed it.)
+8. **`hdr` is `RGBA16F` whenever the frame is deferred**, since it is a storage image (§2d's
+   mandatory format). Where N1 used the packed `B10G11R11` (`QualityTier::hdr_format` for a Low
+   configuration tier), a deferred frame's `hdr` doubles in size. The gate 7 runs were
+   already `RGBA16F` on both sides (their configuration tier is High), so perf/0036's
+   numbers do not include that cost. Nor do they include two costs the RTX cannot show:
+   `deferred_light` writing `hdr` in `GENERAL` as a storage image, which on some AMD and
+   Intel drivers turns off the image's colour compression for the passes that read it
+   (re-checked with #9/#127's devices), and the light loop under many lights (the teamfight
+   replay peaks at 10 lights in view).
+9. **What the G-buffer does not carry, and so leaves Tiered with the forward `scene`:**
+   - **per-material style overrides** on textured units (the material's wrap, rim scale,
+     ramp scale and specular tint): every unit pixel gets the map's wrap, ramp and specular
+     tint and a rim of 1, the untextured units' values. The one shipped textured material
+     (`content/materials/sentinel.toml`) sets none of these keys, so it has the defaults
+     and no shipped frame changes for it; N2c's material table carries them;
+   - **the stored F0**: the lighting takes F0 from `default_surface` (0.04, which is what
+     every N2a surface stores);
+   - **the shadow normal offset uses the shading normal**: the G-buffer has no geometric
+     normal. Foliage offsets along +y, as `foliage.frag` does; for terrain and units the
+     shading normal's offset moves the lookup by at most the normal-map deviation times the
+     offset (a few centimetres);
+   - **the units' roughness below 0.08**: the G-buffer floors a unit's stored roughness at
+     0.08 (`gbuffer.rs`, `include/gbuffer.glsl`, amendment 1), while the forward `shade()`
+     floors it at 0.045. No shipped unit material is below 0.08, so no frame changes; N2c's
+     material model revisits the floor.
+10. **`FOLIAGE` is lit in the extended permutation** (`deferred_light_extended.comp`): the
+    `STANDARD` lighting plus `foliage.frag`'s translucent back light from the stored
+    translucency. The other models do not exist until N2c and shade as `STANDARD` there.
+11. **Team rims are not in N2b** (§2c step 7). They are N2e's (§8); the `rim_slot` channel
+    stays 0. The map rim is the forward one, through `shade()`.
+12. **`MOBA_STYLISATION=off`** (client): the map's wrap, rim and ramp go to 0 and its painted
+    specular to white at scale 1, on both paths. It exists for gate 2 ("stylisation off on
+    both") and for N2e's comparison; the default is on.
+13. **Six fragment outputs, checked per frame, not at admission.** With screen-space outlines
+    the G-buffer pass writes motion, `gb0`–`gb2`, the IDs and `hdr`. Admission keeps
+    `maxFragmentOutputAttachments` and `maxFragmentCombinedOutputResources` at 5 (the forward
+    frame's need); a Tiered device with fewer than 6 lights forward (item 17), so
+    `MOBA_DEFERRED=off` never costs a device its Tiered path. Every recorded device reports 8
+    and more. **Graph limit.** The largest deferred topology (with a G-buffer debug view) has
+    39 passes; `MAX_PASSES` is now 48, and the topology test asserts the largest variant's
+    count. `MAX_RESOURCES` stays 48 (N2b adds one resource, the tile buffer).
+14. **Debug views.** `MOBA_DEBUG_VIEW=tiles` (standard tiles green, extended orange),
+    `light-count` (the pixel's column light count, a heat ramp over 0–16) and `lit-only`
+    (white albedo, no emissive) are drawn by `deferred_light` itself, so they need no pass.
+    The view is the pipelines' specialisation constant `DEBUG_VIEW` (fixed at start-up, like
+    `MOBA_DEBUG_VIEW`), so the shipped pipelines carry no debug branches. Their colours are
+    scene-linear, before exposure: the pass runs before the frame's exposure is measured, and
+    the composite's exposure scales them with the frame.
+15. **Off switch.** `MOBA_DEFERRED=off` (and `RenderConfig::with_deferred(false)`) runs N1's
+    forward frame (§11). The tiered start-up log prints `[render] lighting: deferred` or
+    `forward`, which the parity script checks. The forward `scene` pipelines are still built
+    on a deferred frame (the simple water draws from them); the tiered pipeline count is in
+    perf/0036.
+16. **Gate 2 is met, after a TAAU fix ([ADR-0021 amendment 7](0021-temporal-upscaling-overlay.md#amendment-7-2026-11-15-n2b-the-history-clip-on-a-degenerate-box)).**
+    `scripts/deferred-parity.sh` (CI `tiered-temporal`) runs the gate as written: High (the
+    default tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness
+    0.25), 1280×720, stylisation and foliage off; within 2/255 on at least 99.5 % of pixels
+    and 6/255 everywhere. The script also captures the default scene without the world's sky
+    (`MOBA_SKY=off`, item 6). Each cell gives the share within 2/255, the worst pixel and the
+    number of pixels past 2/255 (of 921,600).
+
+    | Scene | Local (Mesa 26.2.5) | CI (Mesa 26.0.8, LLVM 21.1.8; AMD EPYC 9V74 and Intel Xeon 6975P-C alike) |
+    |---|---|---|
+    | Default | 100.000 %, max 2, 0 pixels past 2 | 100.000 %, max 4, 2 pixels past 2 |
+    | Default, `MOBA_SKY=off` | 100.000 %, max 2, 0 pixels past 2 | — (added after these CI runs) |
+    | R3b river | 100.000 %, max 3, 3 pixels past 2 | 100.000 %, max 3, 2 pixels past 2 |
+    | R3b teamfight | 99.999 %, max 5, 9 pixels past 2 | 99.999 %, max 5, 7 pixels past 2 |
+
+    **The first build failed the river** (locally max 15/255 at 7 pixels; on CI max 9 at 11
+    pixels, and the teamfight 7 at one pixel), all at high-contrast edges of the river's
+    bank. The review found the cause in TAAU, not in the deferred frame:
+    - **On the river, before the upscaler, the two frames agree within 2/255 everywhere.**
+      With TAAU patched to output its nearest raw sample (no history, native scale,
+      sharpness 0), the river is 100 % within 2, max 2, and every earlier outlier is within
+      2 over its 7 × 7 neighbourhood. The lighting is exact up to the G-buffer's
+      quantisation, which is the case gate 2's second sentence allows. The teamfight is not:
+      through the same raw passthrough it is max 8/255, at a cast shadow's edge
+      ((744–747, 350–351)) and at a terrain crack ((1180, 665)); their cause was not
+      isolated, and through TAAU both are within the gate.
+    - **TAAU's variance clip amplified sub-step differences.** It pulled the history toward
+      the box centre along its whole offset, scaled by the most-violated axis
+      (`h = centre + offset / largest`), with the box's extent floored at only 1e-5. On
+      near-uniform chroma the box is a few 1e-5 wide, so a chroma change far below one
+      8-bit step rescaled the luma offset too and moved the pixel by up to 15/255. This was
+      also the earlier "the frame is unstable" control: scaling the forward terrain albedo by
+      1.001 moved a pixel by 13–14/255 through TAAU, and by 2 through the raw passthrough.
+      Sharpening was not the cause (native, sharpness 0: still 7), nor the water
+      (`MOBA_WATER=off`: a pixel at 8, on dry sand).
+    - **The fix** (ADR-0021 amendment 7) keeps the clip on every box whose half-extent is
+      at least 0.004 and blends it into a per-channel clamp where the box is narrower. The
+      clamp alone met
+      gate 2 (2, 2 and 4) but failed ghost energy (particle smear 8.20 % at Performance,
+      bound 7.5 %); a floor on the clip's extent of 0.004 left the teamfight at 5/255, and
+      one of 0.01 ghosted the hero. The blend measures as the 0.004 floor does on gate 2,
+      fails safe if its constant is widened, and passes every ADR-0021 probe. It moves the forward tiered frame too (TAAU runs on
+      both), so the tiered hashes were retaken from CI.
+
+    The teamfight's worst pixel (5/255, at (516, 475)) is on a unit's silhouette edge, just
+    inside its outline. The review isolated it: through the raw passthrough the 9 × 9 block
+    around it is within 1/255, and the pixel is unchanged with sharpness 0 and with either
+    RCAS `hit_min` floor (ADR-0021 amendment 7 item 6), so it is the clip's residual gain
+    on a box that is not degenerate (wider than 0.004 at the silhouette), which amendment 7
+    deliberately keeps. Native scale was not an option: on the first build, at frame 90, it
+    measured 7.
+17. **A Tiered device that cannot run the deferred passes lights forward** (one log line,
+    `[render] deferred lighting unavailable (…); lighting forward`): fewer than 6 fragment
+    outputs (item 13), a compute-stage descriptor budget below the pass's sets (item 2),
+    `maxComputeWorkGroupInvocations` below 256 (the 16 × 16 tiles; the core minimum is 128),
+    or no subgroup arithmetic in compute shaders (`light_classify`'s `WaveActiveBitOr`).
+    TAAU's 16 × 16 workgroups likewise fall back to FXAA below 256 invocations. These are
+    runtime checks rather than admission limits because the recorded device fixtures
+    (`vulkan-probe --json`) do not record them, so an admission test could not hold them;
+    they can join `REQUIRED_LIMITS` when the fixtures are re-recorded on #9/#127's devices.
 
 ## Corrections to the roadmap
 
