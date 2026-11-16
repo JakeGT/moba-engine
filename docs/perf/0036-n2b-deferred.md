@@ -170,9 +170,11 @@ against the gate's comparison, locally:
 
 ## Gate 7: performance
 
-- **Builds:** `ab42718`, `790d9be` and the branch at `3131b7f` (merged with `fdc0a5d`, the
-  review's fixes and ADR-0021 amendment 7), release, detached worktrees for the first two.
-  That build has the accidental 0.01 RCAS `hit_min` floor that round 3 (`a729bb7`) reverts
+- **Builds:** `ab42718`, `790d9be` and the branch's working tree as later committed in
+  `3131b7f` (merged with `fdc0a5d`, the review's fixes and ADR-0021 amendment 7), release,
+  detached worktrees for the first two. The branch was built and timed 12:58–13:21 UTC,
+  before that commit at 13:39; the logs carry no commit hash, and their lanes match
+  `3131b7f`'s code. That build has the accidental 0.01 RCAS `hit_min` floor that round 3 (`a729bb7`) reverts
   to 1e-5 (ADR-0021 amendment 7 item 6): a constant operand of the same `max`, so the cost
   is the same. Round 3's sky-off change does not touch the timed sky-on path.
 - **Machine:** the RTX 5070 Ti (driver 620.70.06, Linux 7.3.4).
