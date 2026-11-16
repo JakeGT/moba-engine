@@ -1353,6 +1353,27 @@ clarifications:
     (`vulkan-probe --json`) do not record them, so an admission test could not hold them;
     they can join `REQUIRED_LIMITS` when the fixtures are re-recorded on #9/#127's devices.
 
+### Amendment 3 (2026-11-16, N2c): the material model as built
+
+<!-- N2C-LEDGER: running list while N2c is built; rewritten before the PR. -->
+
+1. Content format (§6f) parsed and validated by `moba_assets::MaterialDesc`: `model`, a table
+   named after the model (`[clearcoat]`, `[sheen]`, `[anisotropic]`, `[thin_film]`,
+   `[foliage]`), `ior`, `dust`, `emissive_texture`, `model_texture`, `[transmission]`,
+   `[compat]`. Dielectric F0 above 0.16 is an error (the G-buffer's range).
+2. `model_texture` (linear, per-texel model data in rgb) is added: §6d's record lists a
+   model-texture handle that §6f did not name.
+3. Compat collapse: `MaterialDesc::compat_fallback()`; the UBO of every textured material is
+   built from it (identical for `STANDARD` content).
+4. Emissive mask in `metallic_roughness.b` on both paths only when the texture has a third
+   channel (BC7/RGBA8); BC5/RG8 maps keep a full mask.
+5. Multiscatter and the stored F0 (`MOBA_TIERED_SHADING`) on every Tiered lighting module,
+   forward and deferred; Compat expansion unchanged (SPIR-V byte-identical).
+6. Per-material style overrides stay out of the tiered frame (corrects amendment 2 item 9's
+   "N2c's material table carries them": §6b removes stylisation from Tiered).
+7. Alpha cutoff: no key and no record word (no shipped cutout material); reserved.
+8. Dust colour is a constant (ash) until a map has a dust colour.
+
 ## Corrections to the roadmap
 
 These were re-checked on 2026-11-02. This PR only adds a link to this ADR from roadmap §12;
