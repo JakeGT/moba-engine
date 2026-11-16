@@ -44,6 +44,7 @@ use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::memory::MemoryStats;
 use crate::passes::contact::ContactPass;
+use crate::passes::decal_gbuffer::{DecalGBufferPass, DecalGBufferTarget};
 use crate::passes::deferred::{DeferredPass, DeferredTargets, DeferredViews};
 use crate::passes::fog::FogPass;
 use crate::passes::gameplay_overlay::{GameplayOverlay, OverlayBlock, OverlayImages};
@@ -52,9 +53,9 @@ use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
-    CullSettings, MainFrame, MainViewSpec, OutlineIdTarget, OverlayPrepassTarget, PrepassTarget,
-    ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget, SimpleWaterTargets,
-    TcMaskTarget, ViewBudget, WaterTargets,
+    CullSettings, MainFrame, MainViewSpec, OutlineIdTarget, OverlayPrepassTarget, PrepassPhase,
+    PrepassTarget, ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget,
+    SimpleWaterTargets, TcMaskTarget, ViewBudget, WaterTargets,
 };
 use crate::passes::vfx::{
     DistortionTargets, VfxFrameExtras, VfxOverlayTargets, VfxPass, VfxTargets,
@@ -618,6 +619,9 @@ pub struct Renderer {
     gbuffer_debug: Option<GBufferDebugPass>,
     /// The deferred lighting (ADR-0023 §2, N2b): with [`FrameSpec::has_deferred`].
     deferred: Option<DeferredPass>,
+    /// N2c (ADR-0023 §7a): the `Paint` decals' G-buffer pass, with the deferred frame and
+    /// decals on.
+    gbuffer_decals: Option<DecalGBufferPass>,
     /// The frame being recorded's temporal state.
     temporal_frame: Option<TemporalFrame>,
     /// [`Renderer::warm_up_temporal`] ran: the next capture keeps the history it built.
@@ -1033,6 +1037,7 @@ impl Renderer {
             depth: DepthConvention::of(path),
             gbuffer_debug: temporal && config.debug_view.gbuffer_view().is_some(),
             deferred,
+            gbuffer_decals: environment_config.decals,
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
         // that run them; see `plan_index`.
@@ -1175,6 +1180,17 @@ impl Renderer {
             }),
         )?;
         config.max_bones = scene.max_bones();
+        let gbuffer_decals_pass = frame_spec
+            .has_gbuffer_decals()
+            .then(|| {
+                DecalGBufferPass::new(
+                    &device,
+                    &shaders,
+                    scene.camera_set_layout(),
+                    &lighting.decal_buffers(),
+                )
+            })
+            .transpose()?;
         let deferred_pass = frame_spec
             .has_deferred()
             .then(|| {
@@ -1371,6 +1387,7 @@ impl Renderer {
             exposure_linear,
             gbuffer_debug,
             deferred: deferred_pass,
+            gbuffer_decals: gbuffer_decals_pass,
             temporal_frame: None,
             capture_warmed: false,
             overlay,
@@ -2501,6 +2518,9 @@ impl Renderer {
         if let (Some(pass), Some(depth)) = (&self.contact, view(Some(resources.depth))) {
             pass.bind_depth(&self.device, depth);
         }
+        if let (Some(pass), Some(depth)) = (&self.gbuffer_decals, view(Some(resources.depth))) {
+            pass.bind_depth(depth);
+        }
         if let (Some(pass), Some(ids)) = (
             &self.outline,
             view(resources.outline_ids.map(|ids| ids.ids)),
@@ -3122,7 +3142,7 @@ impl Renderer {
                         );
                     }
                 }
-                PassKind::Prepass => self.scene.record_prepass(
+                PassKind::Prepass | PassKind::GBufferRest => self.scene.record_prepass(
                     &self.device,
                     command_buffer,
                     frame_index,
@@ -3140,8 +3160,30 @@ impl Renderer {
                         hdr: deferred.then_some(hdr_view),
                         lighting: self.lighting.set(frame_index),
                         extent: render_extent,
+                        // N2c (ADR-0023 §7a): split around the decals when they are a pass.
+                        phase: match (pass.tag, self.gbuffer_decals.is_some()) {
+                            (PassKind::GBufferRest, _) => PrepassPhase::Rest,
+                            (_, true) => PrepassPhase::Receivers,
+                            _ => PrepassPhase::All,
+                        },
                     },
                 ),
+                PassKind::GBufferDecals => {
+                    if let (Some(pass), Some(temporal)) = (&self.gbuffer_decals, resources.temporal)
+                    {
+                        pass.record(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &DecalGBufferTarget {
+                                gb0_srgb: self.transient(temporal.gbuffer[0]).srgb_view(),
+                                extent: render_extent,
+                                camera: self.scene.camera_set(frame_index),
+                                decals: u32::try_from(self.decal_upload.count()).unwrap_or(0),
+                            },
+                        );
+                    }
+                }
                 PassKind::ContactShadows => {
                     if let (Some(pass), Some(target)) = (&self.contact, contact_view) {
                         pass.record(

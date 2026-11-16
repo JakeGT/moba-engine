@@ -254,6 +254,19 @@ pub(crate) struct PrepassTarget {
     /// The main view's lighting set (the G-buffer prepass's fragment stages read it).
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) extent: vk::Extent2D,
+    /// Which draws this recording makes (N2c: the G-buffer pass split around the decals).
+    pub(crate) phase: PrepassPhase,
+}
+
+/// The draws one prepass recording makes (N2c, ADR-0023 §7a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrepassPhase {
+    /// Everything, clearing the targets (one G-buffer pass, or the depth prepass).
+    All,
+    /// The receivers (the terrain), clearing the targets and storing them for the decals.
+    Receivers,
+    /// The rest (units, walls, props, minions, foliage, sky) over the loaded targets.
+    Rest,
 }
 
 /// The `tc_mask` pass's targets (ADR-0021 §2d).
@@ -2935,10 +2948,13 @@ impl ScenePass {
             return;
         };
         let state = &self.views[0];
+        // N2c: the rest loads what the receivers and the decals left.
+        let rest = target.phase == PrepassPhase::Rest;
+        let load = |op| if rest { vk::AttachmentLoadOp::LOAD } else { op };
         let mut depth_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(target.depth)
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(load(vk::AttachmentLoadOp::CLEAR))
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
                 depth_stencil: self.main.depth.clear(),
@@ -2953,7 +2969,7 @@ impl ScenePass {
             let attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(ids.view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .load_op(load(vk::AttachmentLoadOp::CLEAR))
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue { uint32: [0; 4] },
@@ -2972,14 +2988,14 @@ impl ScenePass {
             vk::RenderingAttachmentInfo::default()
                 .image_view(view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .load_op(load(vk::AttachmentLoadOp::CLEAR))
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue { float32: [0.0; 4] },
                 })
         };
         let motion_attachment = target.motion.map(cleared);
-        let gbuffer_store = if target.gbuffer_store {
+        let gbuffer_store = if target.gbuffer_store || target.phase == PrepassPhase::Receivers {
             vk::AttachmentStoreOp::STORE
         } else {
             vk::AttachmentStoreOp::DONT_CARE
@@ -2991,7 +3007,7 @@ impl ScenePass {
             .map(|view| cleared(view).store_op(gbuffer_store));
         let hdr_attachment = target
             .hdr
-            .map(|view| cleared(view).load_op(vk::AttachmentLoadOp::DONT_CARE));
+            .map(|view| cleared(view).load_op(load(vk::AttachmentLoadOp::DONT_CARE)));
         let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 6];
         let mut color_count = 0;
         for attachment in motion_attachment
@@ -3037,7 +3053,14 @@ impl ScenePass {
             }
         }
         // The same terrain runs as `record` (the map's heightfield, or the R2a plane).
-        self.draw_terrain(device, command_buffer, state, &prepass.terrain);
+        if !rest {
+            self.draw_terrain(device, command_buffer, state, &prepass.terrain);
+        }
+        if target.phase == PrepassPhase::Receivers {
+            // N2c (ADR-0023 §7a): the decals follow the receivers; the rest is its own pass.
+            device.cmd_end_rendering(command_buffer);
+            return;
+        }
         // The position-only prepass shaders read no material, so one pipeline draws both
         // the vertex-colour and the textured meshes; the G-buffer prepass has a textured
         // pipeline that binds the materials. The camera list, as the scene's.

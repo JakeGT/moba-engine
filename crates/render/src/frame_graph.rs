@@ -188,6 +188,12 @@ pub(crate) enum PassKind {
     LightClassify,
     /// The deferred lighting, one indirect dispatch per tile class (ADR-0023 §2).
     DeferredLight,
+    /// N2c (ADR-0023 §7a): the `Paint` decals blended into `gb0` between the G-buffer's
+    /// receivers ([`Self::Prepass`], the terrain) and [`Self::GBufferRest`].
+    GBufferDecals,
+    /// The rest of the G-buffer pass after the decals: the units, walls, props, minions,
+    /// foliage and sky, over the receivers' targets (loaded).
+    GBufferRest,
     /// The simple (non-refracting) water after the deferred lighting, where there is no full
     /// water pass (ADR-0023 §11, amendment 2 item 7).
     SimpleWater,
@@ -407,6 +413,11 @@ pub(crate) struct FrameSpec {
     /// With [`Self::temporal`] only (its prepass is the G-buffer pass), never with MSAA; see
     /// [`Self::has_deferred`]. `MOBA_DEFERRED=off` turns it off.
     pub(crate) deferred: bool,
+    /// N2c (ADR-0023 §7a): with [`Self::has_deferred`], the `Paint` decals are a raster pass
+    /// (`gbuffer_decals`) between the G-buffer's receivers (`prepass`: the terrain) and the
+    /// rest (`gbuffer_rest`), and `gb0` has an sRGB view. Off with the decals
+    /// (`MOBA_DECALS=off`): one G-buffer pass, as in N2b.
+    pub(crate) gbuffer_decals: bool,
 }
 
 impl FrameSpec {
@@ -443,6 +454,7 @@ impl FrameSpec {
             depth: DepthConvention::Forward,
             gbuffer_debug: false,
             deferred: false,
+            gbuffer_decals: false,
         }
     }
 
@@ -476,6 +488,11 @@ impl FrameSpec {
     /// and without MSAA (Tiered refuses it).
     pub(crate) const fn has_deferred(&self) -> bool {
         self.deferred && self.temporal && !self.msaa
+    }
+
+    /// Whether the G-buffer pass is split around `gbuffer_decals` (N2c, ADR-0023 §7a).
+    pub(crate) const fn has_gbuffer_decals(&self) -> bool {
+        self.gbuffer_decals && self.has_deferred()
     }
 
     /// Whether the bloom down-chain runs (bloom, or metering for auto exposure).
@@ -773,6 +790,8 @@ pub(crate) fn build_variant(
                     } else {
                         vk::ImageUsageFlags::empty()
                     },
+                    // N2c: the G-buffer decals blend `gb0` through an sRGB view.
+                    srgb_view: name == "gb0" && spec.has_gbuffer_decals(),
                     ..image(format, render)
                 },
             )
@@ -933,6 +952,27 @@ pub(crate) fn build_variant(
         } else {
             pass
         };
+        // N2c (ADR-0023 §7a): the `Paint` decals between the receivers (the pass above draws
+        // the terrain alone) and the rest, which loads every target and draws the rest.
+        if let Some(temporal) = temporal.filter(|_| spec.has_gbuffer_decals()) {
+            let _ = graph
+                .pass("gbuffer_decals", PassKind::GBufferDecals)
+                .access(temporal.gbuffer[0], Access::ColorReadWrite)
+                .access(depth, Access::SampledFragment);
+            let rest = graph
+                .pass("gbuffer_rest", PassKind::GBufferRest)
+                .access(bones, Access::VertexStorageRead)
+                .access(depth, Access::DepthReadWrite)
+                .access(temporal.motion, Access::ColorReadWrite);
+            let rest = temporal.gbuffer.iter().fold(rest, |pass, &target| {
+                pass.access(target, Access::ColorReadWrite)
+            });
+            let rest = match outline_ids {
+                Some(OutlineIdResources { ids, .. }) => rest.access(ids, Access::ColorReadWrite),
+                None => rest,
+            };
+            let _ = rest.access(hdr, Access::ColorReadWrite);
+        }
     }
     if let Some(temporal) = temporal {
         // ADR-0021 §2d: both masks start at 0 every frame; the distortion, the particles and

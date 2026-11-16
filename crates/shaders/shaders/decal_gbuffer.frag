@@ -31,7 +31,10 @@ void main() {
     // The world size of a pixel, in uniform control flow (derivatives).
     float aa = decal_pixel(world);
     uint index = in_index;
-    if (DEPTH_IS_FAR(depth) || (uint(MOBA_DECAL(index).params.y) & MOBA_DECAL_GLOW) != 0u) {
+    // The box is drawn without culling or a depth test: of its two layers over a pixel, only
+    // the back faces shade, so each covered pixel blends once.
+    if (gl_FrontFacing || DEPTH_IS_FAR(depth)
+        || (uint(MOBA_DECAL(index).params.y) & MOBA_DECAL_GLOW) != 0u) {
         discard;
     }
     vec4 coverage = decal_coverage(index, world, aa);

@@ -536,9 +536,8 @@ impl DecalUpload {
         dropped
     }
 
-    /// Decals in the upload.
-    #[cfg(test)]
-    fn count(&self) -> usize {
+    /// Decals in the upload (paint and glow).
+    pub(crate) fn count(&self) -> usize {
         self.header.counts[0] as usize
     }
 }
