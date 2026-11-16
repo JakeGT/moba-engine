@@ -1303,8 +1303,9 @@ clarifications:
       1.001 moved a pixel by 13–14/255 through TAAU, and by 2 through the raw passthrough.
       Sharpening was not the cause (native, sharpness 0: still 7), nor the water
       (`MOBA_WATER=off`: a pixel at 8, on dry sand).
-    - **The fix** (ADR-0021 amendment 7) keeps the clip on every box at least 0.004 wide
-      and blends it into a per-channel clamp where the box is narrower. The clamp alone met
+    - **The fix** (ADR-0021 amendment 7) keeps the clip on every box whose half-extent is
+      at least 0.004 and blends it into a per-channel clamp where the box is narrower. The
+      clamp alone met
       gate 2 (2, 2 and 4) but failed ghost energy (particle smear 8.20 % at Performance,
       bound 7.5 %); a floor on the clip's extent of 0.004 left the teamfight at 5/255, and
       one of 0.01 ghosted the hero. The blend measures as the 0.004 floor does on gate 2,

@@ -98,8 +98,8 @@ against the gate's comparison, locally:
 - **The fix and its alternatives** are measured in ADR-0021 amendment 7: a per-channel
   clamp alone met this gate (2, 2, 4) but failed ghost energy; a floor on the clip's extent
   passes at 0.004 (2, 3, 5) and ghosts the hero at 0.01. The shipped blend keeps the clip on
-  every box at least 0.004 wide and clamps the narrower; it measures as the 0.004 floor
-  does here, and fails safe if its constant is widened.
+  every box whose half-extent is at least 0.004 on every axis and clamps the narrower; it
+  measures as the 0.004 floor does here, and fails safe if its constant is widened.
 - **The teamfight's worst pixel** (5/255, one pixel at (516, 475)) is on a unit's
   silhouette edge, just inside its outline; its cause was not isolated.
 
@@ -208,8 +208,8 @@ against the gate's comparison, locally:
 | Compat Ultra | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
 - **Nothing exceeds 1.10×**, on either metric. The least headroom is Tiered Low's span
-  (1.078×). `gpu_span` runs 1–1.5 points above `gpu_total` against `ab42718`: the deferred
-  frame has three more passes, and so more gaps between them.
+  (1.078×). `gpu_span` runs 1–1.5 points above `gpu_total` against `ab42718` (about
+  0.008 ms more); the cause of that gap was not isolated.
 - **N2a's own cost** (`790d9be` ÷ `ab42718`) measured 1.066–1.089× on `gpu_total` (1.058× at
   Overdrive), consistent with #369's projection of at most 1.092×.
 - **The deferred lighting is now cheaper than the forward `scene` it replaces.** The two

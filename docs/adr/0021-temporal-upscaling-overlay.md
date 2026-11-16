@@ -1669,10 +1669,10 @@ box is degenerate.
 2. **The change.** `temporal_taau.slang` computes both the clip and a per-channel clamp
    into the same box (`mean ± γσ`, the same γ), and blends them by the box's narrowest
    half-extent: `lerp(clamp, clip, saturate(narrowest / CLAMP_EXTENT))`, `CLAMP_EXTENT`
-   0.004 (tonemapped YCoCg). A box at least 0.004 wide on every axis is clipped exactly as
-   before; a degenerate one is clamped, so a tiny change on its narrow axis moves only that
-   axis, by as much. The blend is continuous in the box, so it adds no new threshold to
-   amplify.
+   0.004 (tonemapped YCoCg). A box whose half-extent is at least 0.004 on every axis is
+   clipped exactly as before; a degenerate one is clamped, so a tiny change on its narrow
+   axis moves only that axis, by as much. The blend is continuous in the box, so it adds no
+   new threshold to amplify.
 3. **The variants measured** (local lavapipe, Mesa 26.2.5; gate 2's worst pixel per scene,
    and ghost energy's three measures at Performance, 640×360 → 1280×720, the mode with
    the least margin; bounds 3 %, 1.75 % and 7.5 %):
@@ -1696,10 +1696,11 @@ box is degenerate.
      ghosts (32.5 % wake).
    - **Every variant that brought the teamfight to 4/255 failed ghost energy or ghosted the
      hero**: the particle's bright core keeps its history wherever it is clamped rather
-     than clipped (the luma-only clip, and the blend at 0.02, which clamps boxes up to 0.02
-     wide).
-   - **The blend** measures as the 0.004 floor does on gate 2 (the remaining 3s and the 5
-     are on boxes wider than 0.004, where both are the plain clip), with the hero's smear
+     than clipped (the luma-only clip, and the blend at 0.02, which clamps boxes whose
+     half-extent is under 0.02).
+   - **The blend** measures as the 0.004 floor does on gate 2 (presumably because the
+     remaining 3s and the 5 are on boxes whose half-extent is at least 0.004, where both are
+     the plain clip; not isolated), with the hero's smear
      lower. It was chosen over the floor because its constant fails safe: widened, the blend
      tends to the clamp (bounded ghosting, the particle's 8.20 % at worst), where a widened
      floor ghosts without bound. A single unit-edge pixel at 5/255 against gate 2's 6 is the

@@ -142,7 +142,8 @@ the semver check):
 ### Rendering and assets
 - **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
   [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
-  Compat is byte-identical, SPIR-V included:**
+  Compat is byte-identical (its images; every Compat SPIR-V module but `sky.frag`, whose body
+  moved into a shared include):**
   - **New passes:** `light_classify` (Slang compute) sorts 16 × 16 tiles into standard and
     extended lists with `VkDispatchIndirectCommand`s; `deferred_light` (GLSL compute,
     sharing the forward `shade()` through `include/lighting.glsl`) decodes the G-buffer,
@@ -167,7 +168,7 @@ the semver check):
     scaled the whole history offset by the most-violated axis of a box whose extent was
     floored at 1e-5, so a chroma change far below one 8-bit step could move a pixel by
     15/255; this, not the deferred frame, failed the first parity runs at the river's bank.
-    Where the box is narrower than 0.004 the clip now blends into a per-channel clamp (a
+    Where the box's half-extent is under 0.004 the clip now blends into a per-channel clamp (a
     clamp alone failed the ghost probe's particle smear); every ADR-0021 probe passes, and
     the Tiered goldens' exact hashes were retaken from CI.
   - **Frame log:** `gpu_light_classify`, `gpu_deferred_light` and `gpu_simple_water` lanes.
