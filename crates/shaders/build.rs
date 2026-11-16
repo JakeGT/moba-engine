@@ -168,22 +168,31 @@ const PERMUTATIONS: &[Permutation] = &[
     Permutation {
         source: "terrain.frag",
         output: "terrain_tiered.frag",
-        defines: &["MOBA_NO_GLOW_DECALS"],
+        defines: &["MOBA_NO_GLOW_DECALS", "MOBA_TIERED_SHADING"],
     },
     Permutation {
         source: "foliage.frag",
         output: "foliage_tiered.frag",
-        defines: &["MOBA_NO_GLOW_DECALS"],
+        defines: &["MOBA_NO_GLOW_DECALS", "MOBA_TIERED_SHADING"],
     },
     Permutation {
         source: "water.frag",
         output: "water_tiered.frag",
-        defines: &["MOBA_NO_GLOW_DECALS", "MOBA_REVERSED_Z"],
+        defines: &[
+            "MOBA_NO_GLOW_DECALS",
+            "MOBA_REVERSED_Z",
+            "MOBA_TIERED_SHADING",
+        ],
     },
     Permutation {
         source: "water.frag",
         output: "water_refraction_tiered.frag",
-        defines: &["WATER_REFRACTION", "MOBA_NO_GLOW_DECALS", "MOBA_REVERSED_Z"],
+        defines: &[
+            "WATER_REFRACTION",
+            "MOBA_NO_GLOW_DECALS",
+            "MOBA_REVERSED_Z",
+            "MOBA_TIERED_SHADING",
+        ],
     },
     // The tiered G-buffer prepass (ADR-0023 §1e): the scene's surfaces encoded into gb0-gb2
     // next to the motion; `PREPASS_IDS` also writes the unit outline slot.
@@ -223,16 +232,6 @@ const PERMUTATIONS: &[Permutation] = &[
         defines: &["GBUFFER", "PREPASS_IDS"],
     },
     Permutation {
-        source: "unit.frag",
-        output: "unit_textured_gbuffer.frag",
-        defines: &["MATERIAL_TEXTURED", "GBUFFER"],
-    },
-    Permutation {
-        source: "unit.frag",
-        output: "unit_textured_gbuffer_ids.frag",
-        defines: &["MATERIAL_TEXTURED", "GBUFFER", "PREPASS_IDS"],
-    },
-    Permutation {
         source: "terrain.frag",
         output: "terrain_gbuffer.frag",
         defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS"],
@@ -266,19 +265,15 @@ const PERMUTATIONS: &[Permutation] = &[
         defines: &["GBUFFER", "PREPASS_IDS", "GBUFFER_HDR"],
     },
     Permutation {
-        source: "unit.frag",
-        output: "unit_textured_gbuffer_hdr.frag",
-        defines: &["MATERIAL_TEXTURED", "GBUFFER", "GBUFFER_HDR"],
-    },
-    Permutation {
-        source: "unit.frag",
-        output: "unit_textured_gbuffer_ids_hdr.frag",
-        defines: &["MATERIAL_TEXTURED", "GBUFFER", "PREPASS_IDS", "GBUFFER_HDR"],
-    },
-    Permutation {
         source: "terrain.frag",
         output: "terrain_gbuffer_hdr.frag",
-        defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS", "GBUFFER_HDR"],
+        // N2c (ADR-0023 §7): the deferred frame's `Paint` decals are their own pass.
+        defines: &[
+            "GBUFFER",
+            "MOBA_NO_GLOW_DECALS",
+            "GBUFFER_HDR",
+            "MOBA_NO_DECALS",
+        ],
     },
     Permutation {
         source: "terrain.frag",
@@ -288,6 +283,7 @@ const PERMUTATIONS: &[Permutation] = &[
             "MOBA_NO_GLOW_DECALS",
             "PREPASS_IDS",
             "GBUFFER_HDR",
+            "MOBA_NO_DECALS",
         ],
     },
     Permutation {
@@ -319,6 +315,45 @@ const PERMUTATIONS: &[Permutation] = &[
         source: "deferred_light.comp",
         output: "deferred_light_extended.comp",
         defines: &["DEFERRED_EXTENDED"],
+    },
+    // N2c (ADR-0023 §6): the Tiered BRDF core (multiscatter, the stored F0) on the tiered
+    // forward units, which also ignore the per-material stylisation; Compat keeps `unit.frag`
+    // and `unit_textured.frag`. The textured units' G-buffer stage is Slang
+    // (`unit_material_gbuffer`, the material table and bindless textures), in the same four
+    // permutations as the untextured GLSL one.
+    Permutation {
+        source: "unit.frag",
+        output: "unit_tiered.frag",
+        defines: &["MOBA_TIERED_SHADING"],
+    },
+    Permutation {
+        source: "unit.frag",
+        output: "unit_textured_tiered.frag",
+        defines: &["MATERIAL_TEXTURED", "MOBA_TIERED_SHADING"],
+    },
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_nodecals_tiered.frag",
+        defines: &[
+            "MOBA_NO_DECALS",
+            "MOBA_NO_GLOW_DECALS",
+            "MOBA_TIERED_SHADING",
+        ],
+    },
+    Permutation {
+        source: "slang/unit_material_gbuffer.slang",
+        output: "unit_material_gbuffer_ids.slang",
+        defines: &["PREPASS_IDS"],
+    },
+    Permutation {
+        source: "slang/unit_material_gbuffer.slang",
+        output: "unit_material_gbuffer_hdr.slang",
+        defines: &["GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "slang/unit_material_gbuffer.slang",
+        output: "unit_material_gbuffer_ids_hdr.slang",
+        defines: &["PREPASS_IDS", "GBUFFER_HDR"],
     },
     // Reversed-Z depth consumers on Tiered (ADR-0023 §1c); Compat keeps the default builds.
     Permutation {

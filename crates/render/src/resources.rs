@@ -227,6 +227,8 @@ pub(crate) struct GpuImage {
     allocator: AllocatorHandle,
     image: vk::Image,
     view: vk::ImageView,
+    /// An `*_SRGB` view of a `MUTABLE_FORMAT` UNORM image ([`Self::with_srgb_view`]).
+    srgb_view: Option<vk::ImageView>,
     allocation: Option<Allocation>,
     /// The accounting class and bytes counted in `crate::memory`, released on drop.
     tracked: (crate::memory::MemoryClass, u64),
@@ -381,6 +383,33 @@ impl GpuImage {
         )
     }
 
+    /// As [`Self::with_samples`] (single-sampled), `MUTABLE_FORMAT` with the format list
+    /// `[format, srgb]` and a second view in `srgb` ([`Self::srgb_view`]), for blending into a
+    /// UNORM target that holds sRGB-encoded values in linear space (N2c's G-buffer decals).
+    pub(crate) fn with_srgb_view(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        srgb: vk::Format,
+        usage: vk::ImageUsageFlags,
+    ) -> RenderResult<Self> {
+        Self::create_with(
+            device,
+            allocator,
+            name,
+            extent,
+            format,
+            usage,
+            vk::ImageAspectFlags::COLOR,
+            1,
+            Layers::Single,
+            vk::SampleCountFlags::TYPE_1,
+            Some(srgb),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)] // The create info, flattened.
     fn create(
         device: ash::Device,
@@ -393,6 +422,25 @@ impl GpuImage {
         mip_levels: u32,
         kind: Layers,
         samples: vk::SampleCountFlags,
+    ) -> RenderResult<Self> {
+        Self::create_with(
+            device, allocator, name, extent, format, usage, aspect, mip_levels, kind, samples, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // The create info, flattened.
+    fn create_with(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspect: vk::ImageAspectFlags,
+        mip_levels: u32,
+        kind: Layers,
+        samples: vk::SampleCountFlags,
+        srgb: Option<vk::Format>,
     ) -> RenderResult<Self> {
         assert!(extent.width > 0 && extent.height > 0);
         assert!(mip_levels > 0);
@@ -417,7 +465,14 @@ impl GpuImage {
                 depth.max(1),
             ),
         };
-        let create_info = vk::ImageCreateInfo::default()
+        let formats = [format, srgb.unwrap_or(format)];
+        let mut format_list = vk::ImageFormatListCreateInfo::default().view_formats(&formats);
+        let flags = if srgb.is_some() {
+            flags | vk::ImageCreateFlags::MUTABLE_FORMAT
+        } else {
+            flags
+        };
+        let mut create_info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(image_type)
             .format(format)
@@ -433,6 +488,11 @@ impl GpuImage {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        if srgb.is_some() {
+            // The list keeps the image's compression where a driver needs to know every view
+            // format (core in Vulkan 1.2).
+            create_info = create_info.push(&mut format_list);
+        }
         // SAFETY: the device is live and the create info is fully initialised.
         let image = unsafe { device.create_image(&create_info, None) }?;
         // SAFETY: `image` was created by this device.
@@ -477,6 +537,20 @@ impl GpuImage {
             }
         };
 
+        let srgb_view = match srgb
+            .map(|srgb| create_view(&device, image, srgb, aspect, mip_levels, kind))
+            .transpose()
+        {
+            Ok(srgb_view) => srgb_view,
+            Err(error) => {
+                // SAFETY: the view belongs to this image and is destroyed once.
+                unsafe { device.destroy_image_view(view, None) };
+                drop_allocator_free(&allocator, allocation);
+                // SAFETY: the image's only view is gone and it is destroyed once.
+                unsafe { device.destroy_image(image, None) };
+                return Err(error);
+            }
+        };
         let class = crate::memory::MemoryClass::of_image(usage);
         crate::memory::track_alloc(class, requirements.size);
         Ok(Self {
@@ -484,6 +558,7 @@ impl GpuImage {
             allocator,
             image,
             view,
+            srgb_view,
             allocation: Some(allocation),
             tracked: (class, requirements.size),
         })
@@ -499,6 +574,12 @@ impl GpuImage {
         self.view
     }
 
+    /// The sRGB view of an image made with [`Self::with_srgb_view`]; its only view otherwise.
+    #[inline]
+    pub(crate) fn srgb_view(&self) -> vk::ImageView {
+        self.srgb_view.unwrap_or(self.view)
+    }
+
     /// Device memory this image holds: its allocation's size.
     #[inline]
     pub(crate) fn allocated_bytes(&self) -> u64 {
@@ -508,8 +589,12 @@ impl GpuImage {
 
 impl Drop for GpuImage {
     fn drop(&mut self) {
-        // SAFETY: the view and image belong to this device and are destroyed once.
+        // SAFETY: the views and image belong to this device and are destroyed once.
         unsafe { self.device.destroy_image_view(self.view, None) };
+        if let Some(srgb_view) = self.srgb_view {
+            // SAFETY: as above.
+            unsafe { self.device.destroy_image_view(srgb_view, None) };
+        }
         // SAFETY: same as above.
         unsafe { self.device.destroy_image(self.image, None) };
         if let Some(allocation) = self.allocation.take() {

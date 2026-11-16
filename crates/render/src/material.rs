@@ -8,7 +8,14 @@
 //! and written at load time, so drawing a material only binds its set.
 //!
 //! Unbound slots use 1×1 defaults (white base colour, flat normal, metallic 0 / roughness 1,
-//! full team mask). BC textures upload as is when the device enables
+//! full team mask, white emissive and model textures).
+//!
+//! **Tiered (N2c, ADR-0023 §6d):** every texture is also registered in the bindless table,
+//! and every material gets a [`MaterialRecord`] in one host-written table the textured units'
+//! G-buffer stage reads by device address (`unit_material_gbuffer.slang`). The per-material
+//! sets stay: Compat and the forward Tiered frame (`unit.frag`) bind them. Their parameter
+//! block is the material's Compat fallback ([`moba_assets::MaterialDesc::compat_fallback`],
+//! ADR-0023 §10), with the emissive-mask and unlit flags and the dielectric F0. BC textures upload as is when the device enables
 //! `textureCompressionBC` and samples the format with linear filtering; otherwise (or when
 //! [`RenderConfig::compressed_textures`](crate::RenderConfig) is off) they are decoded to
 //! their 8-bit equivalent on the CPU at load.
@@ -16,8 +23,11 @@
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use gpu_allocator::MemoryLocation;
-use moba_assets::{MaterialShader, TextureData, TextureFormat, TextureSlot};
+use moba_assets::{
+    CompatMaterial, MaterialShader, ModelParams, TextureData, TextureFormat, TextureSlot,
+};
 
+use crate::bindless::{BindlessTable, TextureHandle};
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::resources::{DescriptorPool, DescriptorSetLayout, GpuBuffer, GpuImage, Sampler};
@@ -105,6 +115,16 @@ pub struct MaterialData {
     pub specular: f32,
     /// Painted-specular tint, linear RGB `0..=1` (times the scene's).
     pub specular_tint: [f32; 3],
+    /// The shading model and its parameters (ADR-0023 §6c). The deferred Tiered frame shades
+    /// it; Compat and the forward Tiered frame draw [`Self::compat`].
+    pub model: ModelParams,
+    /// Dielectric F0, `0..=0.16` (Tiered; ADR-0023 §6b): 0.04 is IOR 1.5.
+    pub f0: f32,
+    /// Dust layer amount, `0..=1` (Tiered; ADR-0023 §6a).
+    pub dust: f32,
+    /// What Compat and the forward Tiered frame draw (ADR-0023 §10); `None` draws the
+    /// material's own factors (a `STANDARD` material's fallback is itself).
+    pub compat: Option<CompatMaterial>,
 }
 
 impl MaterialData {
@@ -125,6 +145,10 @@ impl MaterialData {
             ramp: 1.0,
             specular: 1.0,
             specular_tint: [1.0; 3],
+            model: ModelParams::Standard,
+            f0: 0.04,
+            dust: 0.0,
+            compat: None,
         }
     }
 
@@ -146,6 +170,10 @@ impl MaterialData {
             ramp: desc.ramp,
             specular: desc.specular,
             specular_tint: desc.specular_tint,
+            model: desc.model,
+            f0: desc.dielectric_f0(),
+            dust: desc.dust,
+            compat: Some(desc.compat_fallback()),
         }
     }
 
@@ -218,47 +246,178 @@ struct MaterialParamsGpu {
     params: [f32; 4],
     /// rgb emissive, w specular scale.
     emissive: [f32; 4],
-    /// x wrap (negative: the scene's), y rim, z ramp, w reserved.
+    /// x wrap (negative: the scene's), y rim, z ramp, w flags ([`MATERIAL_FLAG_EMISSIVE_MASK`]
+    /// + 2 × [`MATERIAL_FLAG_UNLIT`], as a float).
     style: [f32; 4],
-    /// rgb painted-specular tint, w reserved.
+    /// rgb painted-specular tint, w the dielectric F0 (the forward Tiered frame's).
     specular_tint: [f32; 4],
 }
 
+/// The material's emissive is masked by `metallic_roughness.b` (ADR-0023 §6d): set when the
+/// bound map has a third channel ([`moba_assets::has_emissive_mask`]).
+pub(crate) const MATERIAL_FLAG_EMISSIVE_MASK: u32 = 1;
+/// `UNLIT` (the UBO only): the forward Tiered frame draws the emissive alone.
+pub(crate) const MATERIAL_FLAG_UNLIT: u32 = 2;
+
+/// A finite `value` clamped to `0..=high` (0 for NaN or infinity).
+fn clamp(value: f32, high: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, high)
+    } else {
+        0.0
+    }
+}
+
 impl MaterialParamsGpu {
-    fn from(material: &MaterialData) -> Self {
-        let clamp = |value: f32, high: f32| {
-            if value.is_finite() {
-                value.clamp(0.0, high)
-            } else {
-                0.0
-            }
-        };
+    /// The parameter block: the material's Compat fallback (or its own factors), its
+    /// stylisation, `mask` (the emissive mask flag) and its F0.
+    fn from(material: &MaterialData, mask: bool) -> Self {
+        // (base colour factor, metallic, roughness, emissive, specular scale, rim)
+        let fallback = material.compat.map_or(
+            (
+                material.base_color_factor,
+                material.metallic,
+                material.roughness,
+                material.emissive,
+                material.specular,
+                material.rim,
+            ),
+            |compat: CompatMaterial| {
+                (
+                    compat.base_color_factor,
+                    compat.metallic,
+                    compat.roughness,
+                    compat.emissive,
+                    compat.specular,
+                    compat.rim,
+                )
+            },
+        );
+        let (base_color_factor, metallic, roughness, emissive, specular, rim) = fallback;
+        let unlit = matches!(material.model, ModelParams::Unlit);
+        let flags =
+            u32::from(mask) * MATERIAL_FLAG_EMISSIVE_MASK + u32::from(unlit) * MATERIAL_FLAG_UNLIT;
         Self {
-            base_color_factor: material.base_color_factor.map(|value| clamp(value, 1.0)),
+            base_color_factor: base_color_factor.map(|value| clamp(value, 1.0)),
             params: [
-                clamp(material.metallic, 1.0),
-                clamp(material.roughness, 1.0),
+                clamp(metallic, 1.0),
+                clamp(roughness, 1.0),
                 clamp(material.normal_scale, 2.0),
                 clamp(material.team_tint, 1.0),
             ],
             emissive: [
-                clamp(material.emissive[0], 16.0),
-                clamp(material.emissive[1], 16.0),
-                clamp(material.emissive[2], 16.0),
-                clamp(material.specular, 2.0),
+                clamp(emissive[0], 16.0),
+                clamp(emissive[1], 16.0),
+                clamp(emissive[2], 16.0),
+                clamp(specular, 2.0),
             ],
             style: [
                 material.wrap.map_or(-1.0, |wrap| clamp(wrap, 1.0)),
-                clamp(material.rim, 4.0),
+                clamp(rim, 4.0),
                 clamp(material.ramp, 1.0),
-                0.0,
+                flags as f32,
             ],
             specular_tint: [
                 clamp(material.specular_tint[0], 1.0),
                 clamp(material.specular_tint[1], 1.0),
                 clamp(material.specular_tint[2], 1.0),
-                0.0,
+                clamp(material.f0, moba_assets::MAX_DIELECTRIC_F0),
             ],
+        }
+    }
+}
+
+/// One material in the Tiered material table (ADR-0023 §6d; 64 bytes, `MaterialRecord` in
+/// `shaders/slang/lib/material.slang`, checked against its reflection). Texture words hold
+/// two bindless handles each (low, high); the model word the model data as the three
+/// G-buffer channels (§6c, UNORM8), the model ID in bits 24–27 and flags in 28–31.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub(crate) struct MaterialRecord {
+    pub(crate) base_color_factor: [f32; 4],
+    pub(crate) emissive: [f32; 3],
+    pub(crate) normal_scale: f32,
+    pub(crate) metallic: f32,
+    pub(crate) roughness: f32,
+    pub(crate) team_tint: f32,
+    pub(crate) dust: f32,
+    /// Base colour | normal << 16.
+    pub(crate) base_normal: u32,
+    /// Metallic-roughness | team mask << 16.
+    pub(crate) mr_mask: u32,
+    /// Emissive | model texture << 16.
+    pub(crate) emissive_model: u32,
+    /// Data r | g << 8 | b << 16 | model << 24 | flags << 28.
+    pub(crate) model: u32,
+}
+
+/// `x` (clamped to `0..=1`) as a UNORM8 byte.
+fn unorm8(x: f32) -> u32 {
+    (clamp(x, 1.0) * 255.0 + 0.5) as u32
+}
+
+impl MaterialRecord {
+    /// The record of `material` with `textures` (bindless handles in [`TextureSlot`] order)
+    /// and `mask` (the emissive mask flag).
+    pub(crate) fn new(
+        material: &MaterialData,
+        textures: [u32; TextureSlot::COUNT],
+        mask: bool,
+    ) -> Self {
+        let ao = 255;
+        let f0_byte = unorm8((clamp(material.f0, moba_assets::MAX_DIELECTRIC_F0) / 0.16).sqrt());
+        let thickness = |nm: f32| unorm8((nm - 100.0) / 300.0);
+        let [r, g, b] = match material.model {
+            ModelParams::Clearcoat { weight, roughness } => [unorm8(weight), unorm8(roughness), ao],
+            ModelParams::Sheen {
+                weight,
+                roughness,
+                tint,
+            } => [unorm8(weight), unorm8(roughness), unorm8(tint)],
+            ModelParams::Anisotropic { strength, rotation } => {
+                let angle = if rotation.is_finite() {
+                    rotation.rem_euclid(core::f32::consts::PI)
+                } else {
+                    0.0
+                };
+                [unorm8(strength), unorm8(angle / core::f32::consts::PI), ao]
+            }
+            ModelParams::ThinFilm {
+                thickness_min,
+                thickness_max,
+                ior,
+            } => [
+                thickness(thickness_min),
+                unorm8(ior - 1.0),
+                thickness(thickness_max),
+            ],
+            ModelParams::Foliage { translucency } => [unorm8(translucency), ao, 0],
+            ModelParams::Unlit => [0, 0, 0],
+            // `Standard`, `Transmissive` and any later variant: F0 and the material AO.
+            _ => [f0_byte, ao, 0],
+        };
+        let model = u32::from(material.model.model().gbuffer_id());
+        let pack = |low: u32, high: u32| (low & 0xFFFF) | (high << 16);
+        let slot = |slot: TextureSlot| textures[slot.index()];
+        Self {
+            base_color_factor: material.base_color_factor.map(|value| clamp(value, 1.0)),
+            emissive: material.emissive.map(|value| clamp(value, 16.0)),
+            normal_scale: clamp(material.normal_scale, 2.0),
+            metallic: clamp(material.metallic, 1.0),
+            roughness: clamp(material.roughness, 1.0),
+            team_tint: clamp(material.team_tint, 1.0),
+            dust: clamp(material.dust, 1.0),
+            base_normal: pack(slot(TextureSlot::BaseColor), slot(TextureSlot::Normal)),
+            mr_mask: pack(
+                slot(TextureSlot::MetallicRoughness),
+                slot(TextureSlot::Mask),
+            ),
+            emissive_model: pack(slot(TextureSlot::Emissive), slot(TextureSlot::Model)),
+            model: r
+                | (g << 8)
+                | (b << 16)
+                | ((model & 0xF) << 24)
+                | (u32::from(mask) * MATERIAL_FLAG_EMISSIVE_MASK) << 28,
         }
     }
 }
@@ -269,6 +428,8 @@ struct RegisteredTexture {
     format: TextureFormat,
     /// A cube map (never bindable to a material slot or as a ramp).
     cube: bool,
+    /// Its bindless handle (Tiered only).
+    bindless: Option<TextureHandle>,
 }
 
 struct GpuMaterial {
@@ -300,8 +461,15 @@ pub(crate) struct Materials {
     pools: Vec<DescriptorPool>,
     param_buffers: Vec<GpuBuffer>,
     textures: Vec<RegisteredTexture>,
-    /// White base colour, flat normal, metallic 0 / roughness 1, full mask (slot order).
+    /// White base colour, flat normal, metallic 0 / roughness 1, full mask, white emissive
+    /// and white model data (slot order).
     defaults: [GpuImage; TextureSlot::COUNT],
+    /// The defaults' bindless handles (Tiered; zero, the magenta fallback, on Compat).
+    default_handles: [u32; TextureSlot::COUNT],
+    /// The Tiered material table: [`MAX_MATERIALS`] records, host-written at load.
+    table: Option<GpuBuffer>,
+    /// Its device address (0 without a table).
+    table_address: u64,
     sampler: Sampler,
     set_layout: DescriptorSetLayout,
     /// Upload BC formats as is (device feature + config).
@@ -310,16 +478,17 @@ pub(crate) struct Materials {
 }
 
 /// Bindings of the material set (set 2): the material block and one combined image sampler
-/// per [`TextureSlot`], all fragment-only. Also counted by the scene layout's descriptor
-/// budget (`descriptor_budget`).
+/// per set slot ([`TextureSlot::SET_SLOTS`]; the emissive and model textures are Tiered-only,
+/// bindless), all fragment-only. Also counted by the scene layout's descriptor budget
+/// (`descriptor_budget`).
 pub(crate) fn set_layout_bindings()
--> [vk::DescriptorSetLayoutBinding<'static>; 1 + TextureSlot::COUNT] {
+-> [vk::DescriptorSetLayoutBinding<'static>; 1 + TextureSlot::SET_COUNT] {
     let mut bindings = [vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
         .descriptor_count(1)
         .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        1 + TextureSlot::COUNT];
+        1 + TextureSlot::SET_COUNT];
     for (index, binding) in bindings.iter_mut().enumerate().skip(1) {
         *binding = vk::DescriptorSetLayoutBinding::default()
             .binding(index as u32)
@@ -332,11 +501,14 @@ pub(crate) fn set_layout_bindings()
 
 impl Materials {
     /// The set layout, sampler and default textures. `anisotropy` is the tier's maximum
-    /// sampler anisotropy (`None` or 1 disables it).
+    /// sampler anisotropy (`None` or 1 disables it). With `bindless` (Tiered) the defaults
+    /// are registered in it, the sampler goes into its material slot and the material table
+    /// is created.
     pub(crate) fn new(
         device: &DeviceContext,
         compressed: bool,
         anisotropy: Option<f32>,
+        mut bindless: Option<&mut BindlessTable>,
     ) -> RenderResult<Self> {
         let bindings = set_layout_bindings();
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &bindings)?;
@@ -372,13 +544,40 @@ impl Materials {
                 &[0, 255],
             )?,
             default("default-mask", TextureFormat::R8Unorm, &[255])?,
+            default("default-emissive", TextureFormat::Rgba8Srgb, &[255; 4])?,
+            default("default-model", TextureFormat::Rgba8Unorm, &[255; 4])?,
         ];
+        let mut default_handles = [0; TextureSlot::COUNT];
+        let mut table = None;
+        if let Some(bindless) = bindless.as_deref_mut() {
+            for (handle, image) in default_handles.iter_mut().zip(&defaults) {
+                *handle = bindless.register_texture(image.view())?.index();
+            }
+            bindless.set_material_sampler(sampler.handle());
+            table = Some(GpuBuffer::new(
+                device.device.clone(),
+                device.allocator(),
+                "material-table",
+                (MAX_MATERIALS * core::mem::size_of::<MaterialRecord>()) as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                MemoryLocation::CpuToGpu,
+            )?);
+        }
+        let table_address = table.as_ref().map_or(0, |table| {
+            // SAFETY: a bindless table exists only on a Tiered device, which enables
+            // `bufferDeviceAddress` and allocates every block with `DEVICE_ADDRESS`
+            // (`device.rs`); the buffer has the usage flag.
+            unsafe { table.device_address() }
+        });
         Ok(Self {
             entries: Vec::with_capacity(MAX_MATERIALS),
             pools: Vec::new(),
             param_buffers: Vec::new(),
             textures: Vec::with_capacity(MAX_TEXTURES),
             defaults,
+            default_handles,
+            table,
+            table_address,
             sampler,
             set_layout,
             compressed: compressed && device.texture_compression_bc,
@@ -409,6 +608,7 @@ impl Materials {
         device: &DeviceContext,
         data: &TextureData,
         texture_budget: u64,
+        bindless: Option<&mut BindlessTable>,
     ) -> RenderResult<TextureId> {
         if self.textures.len() >= MAX_TEXTURES {
             return Err(RenderError::TooManyTextures);
@@ -462,6 +662,11 @@ impl Materials {
             }
         };
         let image = texture::upload(device, "material-texture", upload)?;
+        // Tiered: also a bindless handle (a cube map is never a material texture).
+        let handle = match bindless {
+            Some(bindless) if !upload.is_cube() => Some(bindless.register_texture(image.view())?),
+            _ => None,
+        };
         self.stats.textures += 1;
         self.stats.decoded_textures += usize::from(upload.format() != data.format());
         self.stats.texture_bytes += upload.data().len();
@@ -469,6 +674,7 @@ impl Materials {
             image,
             format: upload.format(),
             cube: upload.is_cube(),
+            bindless: handle,
         });
         Ok(id)
     }
@@ -553,7 +759,7 @@ impl Materials {
                     .descriptor_count(count),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(count * TextureSlot::COUNT as u32),
+                    .descriptor_count(count * TextureSlot::SET_COUNT as u32),
             ];
             let pool = DescriptorPool::new(device.device.clone(), &pool_sizes, count)?;
             let layouts = vec![self.set_layout.handle(); textured.len()];
@@ -569,7 +775,7 @@ impl Materials {
                 MemoryLocation::CpuToGpu,
             )?;
             for (index, material) in textured.iter().enumerate() {
-                let block = MaterialParamsGpu::from(material);
+                let block = MaterialParamsGpu::from(material, self.emissive_mask(material));
                 params.write_bytes(index * stride as usize, bytemuck::bytes_of(&block));
             }
             for (index, (material, &set)) in textured.iter().zip(&sets).enumerate() {
@@ -582,6 +788,27 @@ impl Materials {
         }
         let mut next_set = sets.into_iter();
         let mut ids = Vec::with_capacity(materials.len());
+        // Tiered: every material's record, at its id (no pending frame reads a new index).
+        if self.table.is_some() {
+            let records: Vec<MaterialRecord> = materials
+                .iter()
+                .map(|material| {
+                    let handles: [u32; TextureSlot::COUNT] = core::array::from_fn(|slot| {
+                        material.textures[slot]
+                            .and_then(|texture| self.textures.get(texture.index()))
+                            .and_then(|texture| texture.bindless)
+                            .map_or(self.default_handles[slot], TextureHandle::index)
+                    });
+                    MaterialRecord::new(material, handles, self.emissive_mask(material))
+                })
+                .collect();
+            if let Some(table) = &mut self.table {
+                table.write_bytes(
+                    self.entries.len() * core::mem::size_of::<MaterialRecord>(),
+                    bytemuck::cast_slice(&records),
+                );
+            }
+        }
         for material in materials {
             let set = if material.shader == MaterialShader::Textured {
                 next_set.next().unwrap_or_default()
@@ -607,7 +834,7 @@ impl Materials {
             .buffer(params.handle())
             .offset(offset)
             .range(core::mem::size_of::<MaterialParamsGpu>() as u64)];
-        let image_infos: [[vk::DescriptorImageInfo; 1]; TextureSlot::COUNT] =
+        let image_infos: [[vk::DescriptorImageInfo; 1]; TextureSlot::SET_COUNT] =
             core::array::from_fn(|slot| {
                 let view = material.textures[slot]
                     .and_then(|texture| self.textures.get(texture.index()))
@@ -621,7 +848,7 @@ impl Materials {
             .dst_set(set)
             .dst_binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .buffer_info(&buffer_info); 1 + TextureSlot::COUNT];
+            .buffer_info(&buffer_info); 1 + TextureSlot::SET_COUNT];
         for (slot, info) in image_infos.iter().enumerate() {
             writes[slot + 1] = vk::WriteDescriptorSet::default()
                 .dst_set(set)
@@ -639,6 +866,19 @@ impl Materials {
         self.entries
             .get(material.index())
             .map_or(vk::DescriptorSet::null(), |material| material.set)
+    }
+
+    /// Whether `material`'s metallic-roughness map carries the emissive mask (a third
+    /// channel, ADR-0023 §6d).
+    fn emissive_mask(&self, material: &MaterialData) -> bool {
+        material.textures[TextureSlot::MetallicRoughness.index()]
+            .and_then(|texture| self.textures.get(texture.index()))
+            .is_some_and(|texture| moba_assets::has_emissive_mask(texture.format))
+    }
+
+    /// The material table's device address (Tiered), for the G-buffer stage's push constant.
+    pub(crate) fn table_address(&self) -> Option<u64> {
+        self.table.is_some().then_some(self.table_address)
     }
 
     /// Whether `material` exists.
@@ -667,7 +907,7 @@ mod tests {
             .with_base_color_factor([2.0, 0.5, f32::NAN, 1.0])
             .with_team_tint(0.25);
         material.normal_scale = 5.0;
-        let block = MaterialParamsGpu::from(&material);
+        let block = MaterialParamsGpu::from(&material, false);
         assert_eq!(block.base_color_factor, [1.0, 0.5, 0.0, 1.0]);
         assert_eq!(block.params, [0.0, 1.0, 2.0, 0.25]);
         // The scene's wrap unless the material sets one; stylisation clamped.
@@ -676,9 +916,11 @@ mod tests {
             &material
                 .with_style(Some(3.0), 9.0, 0.5)
                 .with_specular([0.5, 2.0, f32::INFINITY], 5.0),
+            true,
         );
-        assert_eq!(styled.style, [1.0, 4.0, 0.5, 0.0]);
-        assert_eq!(styled.specular_tint, [0.5, 1.0, 0.0, 0.0]);
+        // The emissive-mask flag in style.w, the F0 (0.04 by default) in specular_tint.w.
+        assert_eq!(styled.style, [1.0, 4.0, 0.5, 1.0]);
+        assert_eq!(styled.specular_tint, [0.5, 1.0, 0.0, 0.04]);
         assert_eq!(styled.emissive[3], 2.0);
         assert_eq!(material.texture(TextureSlot::Mask), Some(TextureId(3)));
         assert_eq!(material.texture(TextureSlot::Normal), None);

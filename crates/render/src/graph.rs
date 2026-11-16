@@ -378,6 +378,9 @@ pub(crate) struct ImageDesc {
     /// Usage beyond what the graph's accesses imply (for example `SAMPLED` on a depth
     /// buffer that later passes will read).
     pub(crate) extra_usage: vk::ImageUsageFlags,
+    /// Also an `R8G8B8A8_SRGB` view (`MUTABLE_FORMAT`; an `R8G8B8A8_UNORM` image only): the
+    /// G-buffer decals blend `gb0` through it (N2c, ADR-0023 §7).
+    pub(crate) srgb_view: bool,
 }
 
 /// Synchronisation state of an imported resource when the graph starts.

@@ -265,14 +265,6 @@ pub const UNIT_GBUFFER_FRAG: &[u8] =
 /// Units into the G-buffer, motion and the outline IDs (ADR-0023 §1e).
 pub const UNIT_GBUFFER_IDS_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer_ids.frag.spv"));
-/// Textured units into the G-buffer and motion (ADR-0023 §1e).
-pub const UNIT_TEXTURED_GBUFFER_FRAG: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured_gbuffer.frag.spv"));
-/// Textured units into the G-buffer, motion and the outline IDs (ADR-0023 §1e).
-pub const UNIT_TEXTURED_GBUFFER_IDS_FRAG: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/unit_textured_gbuffer_ids.frag.spv"
-));
 /// The terrain into the G-buffer and motion (ADR-0023 §1e).
 pub const TERRAIN_GBUFFER_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer.frag.spv"));
@@ -320,16 +312,6 @@ pub const UNIT_GBUFFER_HDR_FRAG: &[u8] =
 /// As [`UNIT_GBUFFER_HDR_FRAG`], with the outline slot.
 pub const UNIT_GBUFFER_IDS_HDR_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer_ids_hdr.frag.spv"));
-/// Textured units into the G-buffer, motion and `hdr` (N2b).
-pub const UNIT_TEXTURED_GBUFFER_HDR_FRAG: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/unit_textured_gbuffer_hdr.frag.spv"
-));
-/// As [`UNIT_TEXTURED_GBUFFER_HDR_FRAG`], with the outline slot.
-pub const UNIT_TEXTURED_GBUFFER_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/unit_textured_gbuffer_ids_hdr.frag.spv"
-));
 /// The terrain into the G-buffer, motion and `hdr` (N2b).
 pub const TERRAIN_GBUFFER_HDR_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer_hdr.frag.spv"));
@@ -363,6 +345,45 @@ pub const DEFERRED_LIGHT_EXTENDED_COMP: &[u8] = include_bytes!(concat!(
 /// The deferred lighting's tile classification (N2b, ADR-0023 §2a).
 pub const LIGHT_CLASSIFY_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/light_classify.slang.spv"));
+
+/// N2c (ADR-0023 §6b): `unit.frag` with the Tiered BRDF core (`MOBA_TIERED_SHADING`), the
+/// tiered forward frame's untextured units.
+pub const UNIT_TIERED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_tiered.frag.spv"));
+/// As [`UNIT_TIERED_FRAG`], textured (`MATERIAL_TEXTURED`).
+pub const UNIT_TEXTURED_TIERED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured_tiered.frag.spv"));
+/// The tiered terrain without decals (`MOBA_DECALS=off`), with the Tiered BRDF core.
+pub const TERRAIN_NODECALS_TIERED_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/terrain_nodecals_tiered.frag.spv"
+));
+/// N2c (ADR-0023 §6d): the textured units' G-buffer fragment stage (Slang; the material
+/// table and bindless textures).
+pub const UNIT_MATERIAL_GBUFFER_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_material_gbuffer.slang.spv"));
+/// As [`UNIT_MATERIAL_GBUFFER_SLANG`], with the outline slot (`PREPASS_IDS`).
+pub const UNIT_MATERIAL_GBUFFER_IDS_SLANG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_material_gbuffer_ids.slang.spv"
+));
+/// As [`UNIT_MATERIAL_GBUFFER_SLANG`], with the emissive into `hdr` (`GBUFFER_HDR`).
+pub const UNIT_MATERIAL_GBUFFER_HDR_SLANG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_material_gbuffer_hdr.slang.spv"
+));
+/// As [`UNIT_MATERIAL_GBUFFER_HDR_SLANG`], with the outline slot.
+pub const UNIT_MATERIAL_GBUFFER_IDS_HDR_SLANG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_material_gbuffer_ids_hdr.slang.spv"
+));
+/// N2c (ADR-0023 §7): the `Paint` decals' G-buffer pass, one box per decal.
+pub const DECAL_GBUFFER_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/decal_gbuffer.vert.spv"));
+/// The `Paint` decals' G-buffer fragment stage: the ground from the depth, the shape from
+/// `decals.glsl`, blended into `gb0`'s sRGB view.
+pub const DECAL_GBUFFER_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/decal_gbuffer.frag.spv"));
 
 include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
 
@@ -723,14 +744,6 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: UNIT_GBUFFER_IDS_FRAG,
     },
     ShaderModule {
-        name: "unit_textured_gbuffer.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_FRAG,
-    },
-    ShaderModule {
-        name: "unit_textured_gbuffer_ids.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_IDS_FRAG,
-    },
-    ShaderModule {
         name: "terrain_gbuffer.frag",
         spirv: TERRAIN_GBUFFER_FRAG,
     },
@@ -787,14 +800,6 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: UNIT_GBUFFER_IDS_HDR_FRAG,
     },
     ShaderModule {
-        name: "unit_textured_gbuffer_hdr.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_HDR_FRAG,
-    },
-    ShaderModule {
-        name: "unit_textured_gbuffer_ids_hdr.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_IDS_HDR_FRAG,
-    },
-    ShaderModule {
         name: "terrain_gbuffer_hdr.frag",
         spirv: TERRAIN_GBUFFER_HDR_FRAG,
     },
@@ -829,6 +834,42 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "light_classify.slang",
         spirv: LIGHT_CLASSIFY_SLANG,
+    },
+    ShaderModule {
+        name: "unit_tiered.frag",
+        spirv: UNIT_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "unit_textured_tiered.frag",
+        spirv: UNIT_TEXTURED_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_nodecals_tiered.frag",
+        spirv: TERRAIN_NODECALS_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_SLANG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer_ids.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_IDS_SLANG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer_hdr.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_HDR_SLANG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer_ids_hdr.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_IDS_HDR_SLANG,
+    },
+    ShaderModule {
+        name: "decal_gbuffer.vert",
+        spirv: DECAL_GBUFFER_VERT,
+    },
+    ShaderModule {
+        name: "decal_gbuffer.frag",
+        spirv: DECAL_GBUFFER_FRAG,
     },
 ];
 

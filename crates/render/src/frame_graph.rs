@@ -500,6 +500,7 @@ const fn image(format: vk::Format, size: ImageSize) -> ImageDesc {
         size,
         samples: vk::SampleCountFlags::TYPE_1,
         extra_usage: vk::ImageUsageFlags::empty(),
+        srgb_view: false,
     }
 }
 
@@ -565,6 +566,7 @@ pub(crate) fn build_variant(
             } else {
                 vk::ImageUsageFlags::SAMPLED
             },
+            srgb_view: false,
         },
     );
     let msaa = spec.msaa.then(|| MsaaResources {
@@ -585,6 +587,7 @@ pub(crate) fn build_variant(
                 size: render,
                 samples: vk::SampleCountFlags::TYPE_4,
                 extra_usage: vk::ImageUsageFlags::empty(),
+                srgb_view: false,
             },
         ),
     });
@@ -623,6 +626,7 @@ pub(crate) fn build_variant(
                 },
                 samples: vk::SampleCountFlags::TYPE_1,
                 extra_usage: vk::ImageUsageFlags::empty(),
+                srgb_view: false,
             },
         )
     });
@@ -787,6 +791,7 @@ pub(crate) fn build_variant(
                     size: ImageSize::Output { shift: 0 },
                     samples: vk::SampleCountFlags::TYPE_1,
                     extra_usage: vk::ImageUsageFlags::SAMPLED,
+                    srgb_view: false,
                 },
             ),
             graph.transient_image(

@@ -201,8 +201,14 @@ pub(crate) struct SamplerKey {
     pub(crate) compare: bool,
 }
 
-/// Palette entries in use; slots past this hold the slot-0 sampler.
+/// Palette entries in use; slots past this hold the slot-0 sampler, except
+/// [`MATERIAL_SAMPLER`].
 pub(crate) const PALETTE_LEN: u32 = 12;
+/// The material textures' sampler (N2c, ADR-0023 §6d): `Materials`' own (repeat, trilinear,
+/// the quality tier's anisotropy, which the palette's device-maximum anisotropic entry is
+/// not), written by [`BindlessTable::set_material_sampler`]. `MATERIAL_SAMPLER` in
+/// `shaders/slang/unit_material_gbuffer.slang`.
+pub(crate) const MATERIAL_SAMPLER: SamplerHandle = SamplerHandle(PALETTE_LEN);
 /// The non-comparison entries are slots `0..NON_COMPARE_SAMPLERS`.
 pub(crate) const NON_COMPARE_SAMPLERS: u32 = 6;
 
@@ -677,6 +683,25 @@ impl BindlessTable {
         // one by none because shaders index only live handles and the reserved fallbacks
         // (module docs). `UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING` allow that write
         // even while the set is bound in a pending command buffer; the view is live.
+        unsafe {
+            self.device
+                .update_descriptor_sets(core::slice::from_ref(&write), &[]);
+        }
+        self.writes += 1;
+    }
+
+    /// Writes `sampler` into [`MATERIAL_SAMPLER`]'s slot. Start-up only (before any frame
+    /// binds the set); the sampler must outlive every use of the set.
+    pub(crate) fn set_material_sampler(&mut self, sampler: vk::Sampler) {
+        let info = [vk::DescriptorImageInfo::default().sampler(sampler)];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(self.set)
+            .dst_binding(BINDING_SAMPLERS)
+            .dst_array_element(MATERIAL_SAMPLER.index())
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .image_info(&info);
+        // SAFETY: the slot is inside binding 0 (32 slots), the sampler is live, and this runs
+        // at start-up, before any command buffer binds the set.
         unsafe {
             self.device
                 .update_descriptor_sets(core::slice::from_ref(&write), &[]);

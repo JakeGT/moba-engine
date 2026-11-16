@@ -33,6 +33,12 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 vec2 moba_pixel_center;
 #define MOBA_PIXEL_CENTER moba_pixel_center
 
+// N2c (ADR-0023 §6b): the Tiered BRDF core (multiscatter, the stored F0), and in the
+// extended permutation the other shading models (§6c).
+#define MOBA_TIERED_SHADING
+#ifdef DEFERRED_EXTENDED
+#define MOBA_SHADING_MODELS
+#endif
 #include "camera.glsl"
 #include "lighting.glsl"
 #include "atmosphere.glsl"
@@ -136,7 +142,14 @@ void main() {
     // The shadow lookup's normal offset: the G-buffer has only the shading normal; foliage
     // offsets along +y, as `foliage.frag` does.
     surface.geometric_normal = s.normal;
+    // ADR-0023 §6b: the stored dielectric F0 (`STANDARD` and the transmissive fallback);
+    // the other models' dielectric base is IOR 1.5's 0.04.
+    surface.f0 = (s.model == GBUFFER_MODEL_STANDARD
+                  || s.model == GBUFFER_MODEL_TRANSMISSIVE_FALLBACK)
+        ? s.model_data.x : 0.04;
 #ifdef DEFERRED_EXTENDED
+    surface.model = s.model;
+    surface.model_data = s.model_data;
     if (s.model == GBUFFER_MODEL_FOLIAGE) {
         surface.geometric_normal = vec3(0.0, 1.0, 0.0);
     }

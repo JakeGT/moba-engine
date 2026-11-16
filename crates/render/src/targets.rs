@@ -95,6 +95,17 @@ fn create_slot(
     slot: &PhysicalImage,
     extents: TargetExtents,
 ) -> RenderResult<GpuImage> {
+    if slot.desc.srgb_view {
+        return GpuImage::with_srgb_view(
+            device.device.clone(),
+            device.allocator(),
+            &format!("graph-transient-{index}"),
+            extents.of(slot.desc.size),
+            slot.desc.format,
+            vk::Format::R8G8B8A8_SRGB,
+            slot.usage,
+        );
+    }
     GpuImage::with_samples(
         device.device.clone(),
         device.allocator(),

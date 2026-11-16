@@ -85,6 +85,11 @@ struct Surface {
     // default). Tiered only: Compat keeps its constant 0.04 until C1.
     float f0;
 #endif
+#ifdef MOBA_SHADING_MODELS
+    // The G-buffer's model and its data in physical units (ADR-0023 §6c; extended tiles).
+    uint model;
+    vec3 model_data;
+#endif
 };
 
 #ifdef MOBA_TIERED_SHADING
@@ -279,6 +284,10 @@ float moba_luminance(vec3 color) {
     return dot(color, vec3(0.2126, 0.7152, 0.0722));
 }
 
+#ifdef MOBA_SHADING_MODELS
+#include "shading_models.glsl"
+#endif
+
 // Clustered dynamic point lights (ADR-0016): the lights binned into this fragment's grid
 // column, each with a windowed inverse-square falloff, wrap-lit diffuse and GGX specular,
 // unshadowed. Lights only add light, so team colour in albedo survives (ADR-0011 rule 1).
@@ -324,7 +333,12 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
 #ifdef MOBA_TIERED_SHADING
         specular *= moba_energy_compensation;
 #endif
+#ifdef MOBA_SHADING_MODELS
+        sum += model_direct(surface, n, v, l, h, n_dot_v, n_dot_l, alpha, f0,
+                            kd * surface.albedo * wrapped, specular) * color * attenuation;
+#else
         sum += (kd * surface.albedo * wrapped + specular) * color * attenuation;
+#endif
         irradiance += moba_luminance(color) * attenuation * wrapped;
     }
     float cap = MOBA_DYNAMIC_LIGHT_CAP * max(moba_luminance(sun), 1.0);
@@ -385,8 +399,14 @@ vec3 shade(Surface surface) {
     specular *= moba_energy_compensation;
 #endif
 
+#ifdef MOBA_SHADING_MODELS
+    vec3 direct = model_direct(surface, n, v, l, h, n_dot_v, n_dot_l, alpha, f0, diffuse,
+                               specular) * sun * lit
+        + dynamic_lights(surface, n, v, n_dot_v, f0, alpha, sun);
+#else
     vec3 direct = (diffuse + specular) * sun * lit
         + dynamic_lights(surface, n, v, n_dot_v, f0, alpha, sun);
+#endif
 
     // Ambient: SH or hemispheric diffuse, prefiltered specular through the split-sum LUT.
     vec3 f_ambient = fresnel_schlick_roughness(f0, n_dot_v, roughness);
@@ -396,8 +416,15 @@ vec3 shade(Surface surface) {
 #endif
     vec3 r = reflect(-v, n);
     vec3 ambient_diffuse = kd_ambient * surface.albedo * ambient_irradiance(n);
+#ifdef MOBA_SHADING_MODELS
+    vec3 ambient_spec = ambient_specular(model_ambient_direction(surface, n, v, r, roughness),
+                                         roughness)
+        * (model_ambient_f0(surface, f0, n_dot_v) * brdf.x + brdf.y)
+        * surface.specular.rgb * surface.specular.w;
+#else
     vec3 ambient_spec = ambient_specular(r, roughness) * (f0 * brdf.x + brdf.y)
         * surface.specular.rgb * surface.specular.w;
+#endif
 #ifdef MOBA_TIERED_SHADING
     ambient_spec *= moba_energy_compensation;
 #endif
@@ -406,7 +433,16 @@ vec3 shade(Surface surface) {
     // occluders, which GTAO sees only on screen and at half resolution (ADR-0016).
     float ao = min(surface.occlusion, ambient_occlusion_here()) * baked_occlusion(surface.world_pos);
     ambient_diffuse *= ao;
+#ifdef MOBA_SHADING_MODELS
+    float specular_ao = specular_occlusion(n_dot_v, ao, roughness);
+    ambient_spec *= specular_ao;
+    vec3 ambient_models = model_ambient(surface, n, v, n_dot_v, ambient_diffuse + ambient_spec,
+                                        ao, specular_ao);
+    ambient_diffuse = ambient_models;
+    ambient_spec = vec3(0.0);
+#else
     ambient_spec *= specular_occlusion(n_dot_v, ao, roughness);
+#endif
 
     // Rim: a coloured silhouette term, strongest where the surface turns away from the eye.
     // Half of it takes the surface's own hue (albedo normalised to its brightest channel), so
@@ -439,6 +475,10 @@ Surface default_surface(vec3 albedo, vec3 normal, vec3 world_pos, float roughnes
     surface.occlusion = 1.0;
 #ifdef MOBA_TIERED_SHADING
     surface.f0 = 0.04; // IOR 1.5 (ADR-0023 §6b)
+#endif
+#ifdef MOBA_SHADING_MODELS
+    surface.model = 1u; // STANDARD
+    surface.model_data = vec3(0.0);
 #endif
     return surface;
 }

@@ -790,7 +790,7 @@ impl Renderer {
         );
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
-        let bindless = if path == RenderPath::Tiered {
+        let mut bindless = if path == RenderPath::Tiered {
             let table = BindlessTable::new(&device)?;
             eprintln!(
                 "[render] bindless table: {} samplers, {} storage images, {} textures; {} \
@@ -1083,6 +1083,7 @@ impl Renderer {
             &device,
             config.compressed_textures,
             config.quality_tier.max_anisotropy(),
+            bindless.as_mut(),
         )?;
         // View 0 is the main scene; view `1 + slot` renders offscreen image `slot`.
         let mut views = [ViewBudget {
@@ -1163,6 +1164,15 @@ impl Renderer {
                 model_triangles: config.quality_tier.budget().model_triangles,
             },
             environment_config,
+            bindless.as_ref().and_then(|table| {
+                materials.table_address().map(|table_address| {
+                    crate::passes::scene::MaterialTableSpec {
+                        bindless_layout: table.layout(),
+                        bindless_set: table.set(),
+                        table_address,
+                    }
+                })
+            }),
         )?;
         config.max_bones = scene.max_bones();
         let deferred_pass = frame_spec
@@ -2152,7 +2162,8 @@ impl Renderer {
     /// level fits the texture budget, otherwise allocation or Vulkan errors.
     pub fn register_texture(&mut self, data: &crate::TextureData) -> RenderResult<TextureId> {
         let budget = self.config.quality_tier.budget().texture_bytes;
-        self.materials.register_texture(&self.device, data, budget)
+        self.materials
+            .register_texture(&self.device, data, budget, self.bindless.as_mut())
     }
 
     /// Creates materials. The textured ones get a descriptor set each, from one descriptor
@@ -2184,7 +2195,9 @@ impl Renderer {
             return Err(RenderError::InvalidMaterial("unknown material id"));
         }
         let set = self.materials.set(material);
-        self.scene.set_mesh_material(mesh, set)
+        let index = u16::try_from(material.index())
+            .map_err(|_| RenderError::InvalidMaterial("unknown material id"))?;
+        self.scene.set_mesh_material(mesh, set, index)
     }
 
     /// Texture and material counts.

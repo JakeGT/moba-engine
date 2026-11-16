@@ -11,7 +11,10 @@
 //   material's stylisation overrides;
 // - `GBUFFER` (ADR-0023 §1e): the G-buffer prepass's encode of the same surface (STANDARD,
 //   F0 0.04, flags UNIT | NO_FOG_OF_WAR), with `PREPASS_IDS` also the outline slot and with
-//   `GBUFFER_HDR` (N2b, the deferred frame) the emissive into `hdr`.
+//   `GBUFFER_HDR` (N2b, the deferred frame) the emissive into `hdr`. Untextured only: the
+//   textured units' G-buffer stage is `slang/unit_material_gbuffer.slang` (N2c);
+// - `MOBA_TIERED_SHADING` (N2c, the tiered forward frame): the Tiered BRDF core (ADR-0023
+//   §6b), the material's F0, no per-material stylisation and `UNLIT` as emissive only.
 
 #include "camera.glsl"
 #include "lighting.glsl"
@@ -65,11 +68,19 @@ void main() {
     vec4 base = texture(base_color_map, in_uv, camera.temporal.x) * material.base_color_factor;
     float tint = texture(mask_map, in_uv, camera.temporal.x).r * material.params.w;
     surface.albedo = base.rgb * mix(vec3(1.0), in_color, tint);
-    vec2 metallic_roughness = texture(metallic_roughness_map, in_uv, camera.temporal.x).rg;
+    vec3 metallic_roughness = texture(metallic_roughness_map, in_uv, camera.temporal.x).rgb;
     surface.metallic = clamp(metallic_roughness.r * material.params.x, 0.0, 1.0);
     surface.roughness = clamp(metallic_roughness.g * material.params.y, 0.0, 1.0);
     surface.normal = material_normal(normal, in_tangent, in_uv);
-    surface.emissive = material.emissive.rgb;
+    // ADR-0023 §6d: the emissive mask in metallic_roughness.b, when the map has a third
+    // channel (`MATERIAL_FLAG_EMISSIVE_MASK`; a two-channel map keeps the full emissive).
+    float emissive_mask = mod(material.style.w, 2.0) >= 1.0 ? metallic_roughness.b : 1.0;
+    surface.emissive = material.emissive.rgb * emissive_mask;
+#ifdef MOBA_TIERED_SHADING
+    // Tiered (ADR-0023 §6b): the material's dielectric F0, and no per-material stylisation
+    // (the map's, as the deferred frame shades).
+    surface.f0 = material.specular_tint.w;
+#else
     if (material.style.x >= 0.0) {
         surface.wrap = material.style.x;
     }
@@ -77,6 +88,7 @@ void main() {
     surface.ramp = camera.style.z * material.style.z;
     surface.specular = vec4(camera.specular_tint.rgb * material.specular_tint.rgb,
                             camera.specular_tint.w * material.emissive.w);
+#endif
 #endif
 #ifdef GBUFFER
     out_motion = vec4(motion_pixels(in_motion_current, in_motion_previous), 0.0, 1.0);
@@ -101,6 +113,14 @@ void main() {
     out_hdr = vec4(min(surface.emissive, vec3(MOBA_MAX_RADIANCE)), 1.0);
 #endif
 #else
+#if defined(MOBA_TIERED_SHADING) && defined(MATERIAL_TEXTURED)
+    // `UNLIT` (`MATERIAL_FLAG_UNLIT`): the emissive alone, as the deferred frame keeps the
+    // G-buffer pass's `hdr` for it (ADR-0023 amendment 2 item 6).
+    if (material.style.w >= 2.0) {
+        out_color = vec4(min(surface.emissive, vec3(MOBA_MAX_RADIANCE)), 1.0);
+        return;
+    }
+#endif
     // Height fog (R3a, ADR-0014). Units are never fogged by the fog of war: the server
     // decides what the client sees, so darkening a unit could only hide a visible one.
     out_color = vec4(apply_height_fog(shade(surface), in_world_pos), 1.0);
