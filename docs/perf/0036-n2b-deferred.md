@@ -170,8 +170,11 @@ against the gate's comparison, locally:
 
 ## Gate 7: performance
 
-- **Builds:** `ab42718`, `790d9be` and the branch's final code (merged with `fdc0a5d`, the
+- **Builds:** `ab42718`, `790d9be` and the branch at `3131b7f` (merged with `fdc0a5d`, the
   review's fixes and ADR-0021 amendment 7), release, detached worktrees for the first two.
+  That build has the accidental 0.01 RCAS `hit_min` floor that round 3 (`a729bb7`) reverts
+  to 1e-5 (ADR-0021 amendment 7 item 6): a constant operand of the same `max`, so the cost
+  is the same. Round 3's sky-off change does not touch the timed sky-on path.
 - **Machine:** the RTX 5070 Ti (driver 620.70.06, Linux 7.3.4).
 - **Replay:** the teamfight replay (`MOBA_WARMUP_TICKS=330`) at 1920×1080, vsync off, the
   240 fps limit, validation off, the pipeline cache off, 3,000 frames per run.
