@@ -1688,6 +1688,11 @@ box is degenerate.
    | Clip blended into a clamp below 0.02 | 2 | 2 | 4 | 2.281 % | 1.37 % | **7.53 %** |
    | **Clip blended into a clamp below 0.004 (shipped)** | 2 | 3 | 5 | 2.204 % | 1.31 % | 5.96 % |
 
+   The rows did not all run with the same RCAS: the clip, the clamp, the 0.004 floor and the
+   chroma floor ran with RCAS's `hit_min` floor at 1e-5, the 0.01 floor, the luma-only clip,
+   the 0.02 blend and the shipped blend at 0.01 (item 6). With this scene set the two
+   floors render the same bytes, so the rows compare as they are.
+
    - **The clamp alone fails ghost energy** at Performance (particle smear 8.20 %), and is
      worse at Quality (3.74 → 5.78 %) and native (1.40 → 2.62 %): it leaves the particle's
      bright history at a corner of the box, where the clip pulled it into the interior.
@@ -1732,6 +1737,18 @@ box is degenerate.
    `cpu_sample` dispatch run 43722069812); the 64×36 fingerprints pass unchanged. FSR 3.1, FXAA and Compat do not run this shader and are
    unchanged (Compat byte for byte). The simulation, wire format, replays and state hash are
    untouched.
+6. **RCAS's `hit_min` floor is FSR 1's 1e-5 again.** The commit with this amendment
+   (`3131b7f`) also changed the floor of RCAS's `hit_min` denominator,
+   `mn4 / max(4 × mx4, floor)`, to 0.01. It was not a design change: the edit that built the
+   "floored at 0.01" variant replaced the first `float3(1e-5, 1e-5, 1e-5))` on every line of
+   the shader, which also caught RCAS's line, and the variants built from that file after it
+   carried it into the shipped code. The review found it. With the old floor restored, on the
+   local lavapipe, the gate 2 captures (four scenes, both frames), the ghost probe's three
+   modes (same numbers) and the four TAAU tiered goldens (same hashes) are byte for byte what
+   the 0.01 floor rendered, so it is restored and the hashes taken from CI are kept (CI's
+   exact checks re-verify them on the restoring commit). The floor
+   matters only where `4 × mx4` is under 0.01 (a near-black cross in RCAS's input); the
+   identical bytes suggest none of these frames has one where it changes the result.
 
 ## Sources
 

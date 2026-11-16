@@ -247,10 +247,10 @@ pub(crate) struct PrepassTarget {
     /// need not write them out.
     pub(crate) gbuffer_store: bool,
     /// The deferred frame's light-accumulation target (N2b, ADR-0023 §2), after the G-buffer
-    /// and the IDs: the units write their emissive and the sky its radiance, and the lighting
-    /// overwrites every other pixel, so it is not loaded (`DONT_CARE`). Without the sky its
-    /// clear colour is given: the background keeps it.
-    pub(crate) hdr: Option<(vk::ImageView, Option<[f32; 4]>)>,
+    /// and the IDs: the units write their emissive, the sky's draw its radiance (or, without
+    /// the world's sky, the clear colour) and the lighting every other pixel, so it is not
+    /// loaded (`DONT_CARE`).
+    pub(crate) hdr: Option<vk::ImageView>,
     /// The main view's lighting set (the G-buffer prepass's fragment stages read it).
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) extent: vk::Extent2D,
@@ -595,8 +595,11 @@ pub(crate) struct SceneSetSpec {
     /// The deferred lighting (ADR-0023 §2, N2b): the G-buffer pass also writes `hdr`.
     pub(crate) deferred: bool,
     /// The world draws the sky (`WorldConfig::sky`): the deferred frame's G-buffer pass
-    /// writes its radiance into `hdr`; without it the background keeps the clear colour.
+    /// writes its radiance into `hdr`; without it the sky's draw writes `clear_color` there.
     pub(crate) sky: bool,
+    /// The main view's clear colour as `f32` bits (`RenderConfig::clear_color`; bits, so the
+    /// spec stays `Eq`): the deferred frame's background without the world's sky (N2b).
+    pub(crate) clear_color: [u32; 4],
 }
 
 impl ScenePipelines {
@@ -623,6 +626,7 @@ impl ScenePipelines {
             depth,
             deferred,
             sky: world_sky,
+            clear_color,
         } = set;
         let depth_compare = depth.compare();
         let module = |name| shaders.module(device, name);
@@ -900,7 +904,7 @@ impl ScenePipelines {
                 skinned.is_some(),
                 vat.is_some(),
                 deferred.then_some(color_format),
-                world_sky,
+                (!world_sky).then(|| clear_color.map(f32::from_bits)),
             )?)
         } else {
             let id_format = outline_ids.then_some(crate::frame_graph::OUTLINE_ID_FORMAT);
@@ -991,6 +995,7 @@ impl ScenePipelines {
                         vertex_layout: Some(VertexLayout::Water),
                         vertex: water_vertex.handle(),
                         fragment: Some(fragment.handle()),
+                        fragment_specialization: None,
                         colors: &target,
                         depth_format,
                         depth_write: false,
@@ -1107,7 +1112,8 @@ impl ScenePipelines {
     /// The fragment stages are the forward shaders' `GBUFFER` permutations, so the surface is
     /// the one the forward `scene` shades (ADR-0023 amendment 1). With `hdr` (the deferred
     /// frame, N2b) every pipeline also writes the light-accumulation target after those: the
-    /// emissive, or the clear colour kept where the sky is (ADR-0023 amendment 2).
+    /// emissive, or the sky's radiance, or (`sky_clear`, without the world's sky) the clear
+    /// colour, which the sky's draw writes itself (ADR-0023 amendment 2 item 6).
     #[allow(clippy::too_many_arguments)] // One set of pipelines.
     #[allow(clippy::too_many_lines)] // One pipeline per drawable kind, in draw order.
     #[allow(clippy::fn_params_excessive_bools)] // The variant's switches, each one pipeline axis.
@@ -1124,7 +1130,7 @@ impl ScenePipelines {
         skinned: bool,
         vat: bool,
         hdr: Option<vk::Format>,
-        sky_radiance: bool,
+        sky_clear: Option<[f32; 4]>,
     ) -> RenderResult<PrepassPipelines> {
         let module = |name| shaders.module(device, name);
         let depth_compare = depth.compare();
@@ -1170,8 +1176,9 @@ impl ScenePipelines {
         // and the sky (its radiance) write it; the terrain and the foliage have an empty mask,
         // since the deferred lighting replaces their pixels without reading them (amendment 2
         // item 6). Lavapipe ignores the empty mask (amendment 1 item 16) and stores the
-        // shader's zero there, which nothing reads either. Without the world's sky, the sky
-        // keeps the clear colour (`TargetBlend::Keep`).
+        // shader's zero there, which is safe only because nothing reads those texels. Without
+        // the world's sky, the sky's draw writes the clear colour itself (specialisation
+        // constants below), not through blending, which lavapipe does not honour either.
         let hdr_target = |write_mask, blend| ColorTarget {
             format: hdr.unwrap_or(vk::Format::UNDEFINED),
             write_mask,
@@ -1190,17 +1197,12 @@ impl ScenePipelines {
         };
         let emits = hdr_target(rgba, TargetBlend::None);
         let no_hdr = hdr_target(none, TargetBlend::None);
-        let sky_hdr = if sky_radiance {
-            emits
-        } else {
-            hdr_target(rgba, TargetBlend::Keep)
-        };
         // Every pipeline writes motion and the G-buffer. The units write their slot, and the
         // terrain and the sky write 0 (their `*_ids` fragments), all with masks covering what
         // the shader writes. The foliage alone keeps an empty mask over an output it never
         // writes, so a unit under the brush keeps its slot: defined on a conformant device,
         // but not honoured on lavapipe, where that slot is undefined (amendment 1 item 16).
-        let sky_targets = with_hdr([motion, g0, g1, g2, id(rgba)], sky_hdr);
+        let sky_targets = with_hdr([motion, g0, g1, g2, id(rgba)], emits);
         let written = with_hdr([motion, g0, g1, g2, id(rgba)], no_hdr);
         let units = with_hdr([motion, g0, g1, g2, id(vk::ColorComponentFlags::R)], emits);
         let foliage_targets = with_hdr([motion, g0, g1, g2, id(none)], no_hdr);
@@ -1216,12 +1218,13 @@ impl ScenePipelines {
                 _ => unreachable!("no hdr permutation of {base}"),
             }
         };
-        let build = |layout,
-                     vertex_layout,
-                     vertex: vk::ShaderModule,
-                     fragment: vk::ShaderModule,
-                     colors: &[ColorTarget],
-                     depth_write| {
+        let build_specialized = |layout,
+                                 vertex_layout,
+                                 vertex: vk::ShaderModule,
+                                 fragment: vk::ShaderModule,
+                                 fragment_specialization: Option<&vk::SpecializationInfo<'_>>,
+                                 colors: &[ColorTarget],
+                                 depth_write| {
             pipeline::create_targets(
                 device,
                 &TargetsSpec {
@@ -1229,6 +1232,7 @@ impl ScenePipelines {
                     vertex_layout,
                     vertex,
                     fragment: Some(fragment),
+                    fragment_specialization,
                     colors,
                     depth_format,
                     depth_write,
@@ -1237,6 +1241,22 @@ impl ScenePipelines {
                 },
             )
             .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+        };
+        let build = |layout,
+                     vertex_layout,
+                     vertex: vk::ShaderModule,
+                     fragment: vk::ShaderModule,
+                     colors: &[ColorTarget],
+                     depth_write| {
+            build_specialized(
+                layout,
+                vertex_layout,
+                vertex,
+                fragment,
+                None,
+                colors,
+                depth_write,
+            )
         };
         let terrain = build(
             layout,
@@ -1326,8 +1346,24 @@ impl ScenePipelines {
             &foliage_targets[..count],
             true,
         )?;
-        // On the far plane, tested only: where nothing was drawn.
-        let sky = build(
+        // On the far plane, tested only: where nothing was drawn. With `hdr`, `sky_motion`'s
+        // constants choose what it writes there: `SKY_RADIANCE` (constant_id 0, a `VkBool32`)
+        // and, without it, the clear colour (constant_ids 1–4). Every background pixel is
+        // written by this draw, so `hdr` needs no clear (amendment 2 item 6).
+        let sky_constants = sky_clear.map_or([1, 0, 0, 0, 0], |[r, g, b, a]| {
+            [0, r.to_bits(), g.to_bits(), b.to_bits(), a.to_bits()]
+        });
+        let sky_data: [u8; 20] = bytemuck::cast(sky_constants);
+        let sky_entries: [vk::SpecializationMapEntry; 5] = core::array::from_fn(|index| {
+            vk::SpecializationMapEntry::default()
+                .constant_id(u32::try_from(index).expect("five constants"))
+                .offset(u32::try_from(4 * index).expect("five constants"))
+                .size(4)
+        });
+        let sky_specialization = vk::SpecializationInfo::default()
+            .map_entries(&sky_entries)
+            .data(&sky_data);
+        let sky = build_specialized(
             layout,
             None,
             module(depth.sky_vertex())?.handle(),
@@ -1337,6 +1373,7 @@ impl ScenePipelines {
                 "sky_motion.frag"
             }))?
             .handle(),
+            hdr.is_some().then_some(&sky_specialization),
             &sky_targets[..count],
             false,
         )?;
@@ -1384,6 +1421,7 @@ impl ScenePipelines {
                         vertex_layout: Some(vertex_layout),
                         vertex,
                         fragment: Some(fragment),
+                        fragment_specialization: None,
                         colors: &ids,
                         depth_format,
                         depth_write: true,
@@ -1524,6 +1562,8 @@ pub(crate) struct MainViewSpec {
     pub(crate) deferred: bool,
     /// The world draws the sky ([`SceneSetSpec::sky`]).
     pub(crate) sky: bool,
+    /// [`SceneSetSpec::clear_color`].
+    pub(crate) clear_color: [u32; 4],
 }
 
 impl MainViewSpec {
@@ -1540,6 +1580,7 @@ impl MainViewSpec {
             depth: self.depth,
             deferred: self.deferred && self.temporal && !msaa,
             sky: self.sky,
+            clear_color: self.clear_color,
         };
         let main = msaa.then_some(SceneSetSpec {
             samples: self.samples,
@@ -1552,6 +1593,7 @@ impl MainViewSpec {
             depth: self.depth,
             deferred: false,
             sky: self.sky,
+            clear_color: self.clear_color,
         });
         (base, main)
     }
@@ -2858,12 +2900,9 @@ impl ScenePass {
             .into_iter()
             .flatten()
             .map(|view| cleared(view).store_op(gbuffer_store));
-        let hdr_attachment = target.hdr.map(|(view, clear)| match clear {
-            Some(clear) => cleared(view).clear_value(vk::ClearValue {
-                color: vk::ClearColorValue { float32: clear },
-            }),
-            None => cleared(view).load_op(vk::AttachmentLoadOp::DONT_CARE),
-        });
+        let hdr_attachment = target
+            .hdr
+            .map(|view| cleared(view).load_op(vk::AttachmentLoadOp::DONT_CARE));
         let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 6];
         let mut color_count = 0;
         for attachment in motion_attachment

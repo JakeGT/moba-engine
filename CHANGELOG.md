@@ -149,8 +149,8 @@ the semver check):
     sharing the forward `shade()` through `include/lighting.glsl`) decodes the G-buffer,
     reconstructs each pixel from reversed-Z depth and applies sun, shadows, contact shadows,
     the column-grid point lights, ambient, AO, the map rim on units, fog of war and height
-    fog. The G-buffer pass also writes the sky's radiance and the units' emissive into
-    `hdr`, which is `RGBA16F` whenever the frame is deferred; on Low/Medium a `simple_water`
+    fog. The G-buffer pass also writes the sky's radiance (the clear colour with
+    `MOBA_SKY=off`, written by the sky's draw itself) and the units' emissive into `hdr`, which is `RGBA16F` whenever the frame is deferred; on Low/Medium a `simple_water`
     pass draws the simple water after the lighting. A device without 6 fragment outputs,
     256 compute invocations, compute subgroup arithmetic or the pass's descriptor budget
     lights forward, with one log line; debug views are a specialisation constant.
@@ -159,8 +159,9 @@ the semver check):
     `MOBA_STYLISATION=off` turns the map's wrap, rim, ramp and painted specular off on both.
   - **`MOBA_DEBUG_VIEW`** gains `tiles`, `light-count` and `lit-only`.
   - **Gates:** `scripts/deferred-parity.sh` (CI `tiered-temporal`) compares the two frames
-    (`image-check --parity`) and passes on the default scene, the R3b river and the
-    teamfight (worst pixel 5/255, locally and on CI), after the TAAU fix below.
+    (`image-check --parity`) and passes on the default scene (also with `MOBA_SKY=off`),
+    the R3b river and the teamfight (worst pixel 5/255, locally and on CI), after the TAAU
+    fix below.
     `gbuffer-smoke` also checks the GLSL decode. A CPU test holds that the forward and
     deferred light loops visit the same lights under every cap. On the RTX 5070 Ti the frame
     is 1.014–1.065× N1's forward frame (gate ≤ 1.10×) and 0.959–0.981× N2a's.

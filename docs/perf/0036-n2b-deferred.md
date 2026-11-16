@@ -21,7 +21,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | Gate | Result |
 |---|---|
 | 1. Encoding and interfaces | **Met.** `gbuffer-smoke` adds the GLSL decode; push blocks pinned by SPIR-V and reflection tests |
-| 2. Deferred–forward parity | **Met** locally and on CI after a TAAU fix (ADR-0021 amendment 7): worst pixel 2, 3 and 5/255 locally on the default scene, the river and the teamfight; on CI 4, 3 and 5, on an AMD and on an Intel runner. See [below](#gate-2-deferredforward-parity) |
+| 2. Deferred–forward parity | **Met** locally and on CI after a TAAU fix (ADR-0021 amendment 7): worst pixel 2, 3 and 5/255 locally on the default scene, the river and the teamfight (2 without the sky); on CI 4, 3 and 5, on an AMD and on an Intel runner. See [below](#gate-2-deferredforward-parity) |
 | 3. Light-set consistency | **Met** under all five caps |
 | 7. Performance (≤ 1.10× N1) | **Met**: GPU total 1.014–1.065× against `ab42718` (GPU span 1.031–1.078×), 0.959–0.981× against `790d9be`; Tiered Overdrive included |
 
@@ -50,25 +50,34 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 `MOBA_FOLIAGE=off` (`STANDARD` only), rims off (there are none before N2e), High (the default
 tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness 0.25),
 1280×720. `image-check --parity` takes the largest channel difference per pixel. The gate:
-within 2/255 on at least 99.5 % of pixels, and within 6/255 everywhere.
+within 2/255 on at least 99.5 % of pixels, and within 6/255 everywhere. The script also
+captures the default scene with `MOBA_SKY=off`, where the G-buffer pass's sky writes the clear
+colour into `hdr` (ADR-0023 amendment 2 item 6). Pixel counts below are pixels past 2/255,
+of 921,600.
 
 **Met**, with TAAU's history fix (ADR-0021 amendment 7), locally (Mesa 26.2.5, 0 validation
 messages) and on CI's lavapipe (Mesa 26.0.8, LLVM 21.1.8; `tiered-temporal` in run 43720150585 on an AMD EPYC 9V74 and in
 run 43724741928 on an Intel Xeon 6975P-C, byte for byte the same numbers):
 
-| Scene | Local: within 2/255 | Local: max | CI: within 2/255 | CI: max |
-|---|---|---|---|---|
-| Default (frame 90) | 100.000 % | 2 | 100.000 % | 4 (2 pixels past 2) |
-| R3b river (frame 90) | 100.000 % | 3 (3 pixels) | 100.000 % | 3 (2 pixels) |
-| R3b teamfight (tick 360) | 99.999 % | 5 (1 pixel) | 99.999 % | 5 (1 pixel) |
+| Scene | Local: within 2/255 | Local: max | Local: past 2 | CI: within 2/255 | CI: max | CI: past 2 |
+|---|---|---|---|---|---|---|
+| Default (frame 90) | 100.000 % | 2 | 0 | 100.000 % | 4 | 2 |
+| Default, `MOBA_SKY=off` (frame 90) | 100.000 % | 2 | 0 | — (added after these CI runs) | — | — |
+| R3b river (frame 90) | 100.000 % | 3 | 3 | 100.000 % | 3 | 2 |
+| R3b teamfight (tick 360) | 99.999 % | 5 | 9 | 99.999 % | 5 | 7 |
+
+Without the sky, the first build cleared `hdr` to the clear colour and relied on a (`ZERO`,
+`ONE`) blend on the sky's attachment to keep it; lavapipe did not honour that blend, and the
+sky-off frame measured 93.2 % within 2/255, max 140 (the sky's radiance where the clear
+colour belonged). The sky's draw now writes the clear colour itself.
 
 **The first build failed the river**, and on CI the teamfight, before the fix:
 
 | Scene | Local: within 2/255 | Local: max | CI: max (run 43693581282) |
 |---|---|---|---|
 | Default | 99.999 % | 3 | 6 |
-| R3b river | 99.966 % | **15** (7 pixels past 6) | **9** (11 pixels) |
-| R3b teamfight | 99.989 % | 6 | **7** (1 pixel) |
+| R3b river | 99.966 % | **15** (7 pixels past 6) | **9** (11 pixels past 6) |
+| R3b teamfight | 99.989 % | 6 | **7** (1 pixel past 6) |
 
 Every outlier was on the river's bank: the shoreline foam line and terrain cracks meeting
 it, seen through the refracting water.
@@ -88,9 +97,12 @@ against the gate's comparison, locally:
 | Deferred against a forward build that round-trips its terrain surface through `encode_gbuffer`/`decode_gbuffer` (river, frame 2) | 100.000 % | 2 |
 | The fixed TAAU (amendment 7), the gate's comparison (river, frame 90) | 100.000 % | **3** (3 pixels) |
 
-- **Before the upscaler the frames agree within 2/255 everywhere**, and every earlier
-  outlier is within 2 over its 7 × 7 neighbourhood: the deferred lighting computes what the
-  forward lighting computes, up to the G-buffer's quantisation (gate 2's second sentence).
+- **On the river, before the upscaler, the frames agree within 2/255 everywhere**, and every
+  earlier outlier is within 2 over its 7 × 7 neighbourhood: the deferred lighting computes
+  what the forward lighting computes, up to the G-buffer's quantisation (gate 2's second
+  sentence). The teamfight's raw passthrough (native scale) is max 8/255, at a cast shadow's
+  edge (744–747, 350–351) and a terrain crack (1180, 665), causes not isolated; through TAAU
+  both are within the gate.
 - **TAAU's clip amplified sub-step differences.** It scaled the history's whole offset by
   the most-violated axis of a box whose extent was floored at 1e-5; on flat chroma a change
   far below one 8-bit step rescaled the luma too. That is also why a 0.1 % albedo change
@@ -101,7 +113,11 @@ against the gate's comparison, locally:
   every box whose half-extent is at least 0.004 on every axis and clamps the narrower; it
   measures as the 0.004 floor does here, and fails safe if its constant is widened.
 - **The teamfight's worst pixel** (5/255, one pixel at (516, 475)) is on a unit's
-  silhouette edge, just inside its outline; its cause was not isolated.
+  silhouette edge, just inside its outline. Through the raw passthrough the 9 × 9 block
+  around it is within 1/255, and it is unchanged with sharpness 0 and with either RCAS
+  `hit_min` floor (ADR-0021 amendment 7 item 6): it is the TAAU clip's residual gain on a box
+  that is not degenerate,
+  which amendment 7 keeps.
 
 ## Gate 3: light-set consistency
 

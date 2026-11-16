@@ -26,10 +26,17 @@ layout(location = 3) out vec4 out_gb2;
 layout(location = 4) out uint out_id;
 #endif
 #ifdef GBUFFER_HDR
-// N2b (ADR-0023 §1a, §2, amendment 2 item 7): the light-accumulation target, after the outline
-// IDs when they are attached: the sky's radiance, which the deferred lighting never
-// overwrites (it skips the far plane). Without the world's sky the pipeline blends it
-// (ZERO, ONE), so the target keeps its clear colour.
+// N2b (ADR-0023 §1a, §2, amendment 2 items 6 and 7): the light-accumulation target, after the
+// outline IDs when they are attached: the sky's radiance, which the deferred lighting never
+// overwrites (it skips the far plane). Without the world's sky (`SKY_RADIANCE` false) the
+// shader writes the main view's clear colour itself, the forward frame's background. It is
+// not left to blending or an empty mask, which lavapipe does not honour (amendment 1 item
+// 16); `hdr` is not cleared, so this draw is the only writer of every background pixel.
+layout(constant_id = 0) const bool SKY_RADIANCE = true;
+layout(constant_id = 1) const float CLEAR_R = 0.0;
+layout(constant_id = 2) const float CLEAR_G = 0.0;
+layout(constant_id = 3) const float CLEAR_B = 0.0;
+layout(constant_id = 4) const float CLEAR_A = 1.0;
 #ifdef PREPASS_IDS
 layout(location = 5) out vec4 out_hdr;
 #else
@@ -52,6 +59,7 @@ void main() {
     out_id = 0u;
 #endif
 #ifdef GBUFFER_HDR
-    out_hdr = vec4(sky_radiance(in_ray), 1.0);
+    out_hdr = SKY_RADIANCE ? vec4(sky_radiance(in_ray), 1.0)
+                           : vec4(CLEAR_R, CLEAR_G, CLEAR_B, CLEAR_A);
 #endif
 }

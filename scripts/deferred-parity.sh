@@ -3,7 +3,9 @@
 # tiered forward frame (MOBA_DEFERRED=off, the same binary), on the default scene, the R3b
 # river close-up and the R3b teamfight replay, with the map stylisation off on both paths
 # (MOBA_STYLISATION=off: no wrap, rim, ramp or painted specular) and only STANDARD surfaces
-# (MOBA_FOLIAGE=off: the foliage is the only other model the G-buffer holds). Each pair must
+# (MOBA_FOLIAGE=off: the foliage is the only other model the G-buffer holds), plus the default
+# scene without the world's sky (MOBA_SKY=off: the deferred sky's draw writes the clear colour
+# into `hdr`, ADR-0023 amendment 2 item 6). Each pair must
 # agree within 2/255 on at least 99.5 % of the pixels and within 6/255 everywhere
 # (`image-check --parity`). Any validation message fails a capture.
 #
@@ -36,6 +38,7 @@ capture() {
 }
 scenes=(
   "default MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90"
+  "default-skyoff MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_SKY=off"
   "river MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_PREVIEW_CAMERA=0.9,0.3,14,4,-62"
   "teamfight MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330
    MOBA_CAMERA_DISTANCE=30 MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40"

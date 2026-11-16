@@ -445,9 +445,6 @@ pub(crate) enum TargetBlend {
     None,
     /// `MAX` of source and destination (the temporal masks, ADR-0021 §2d).
     Max,
-    /// Keep the destination (`ZERO`, `ONE`): the deferred G-buffer pass's sky over `hdr`'s
-    /// clear colour (N2b, ADR-0023 amendment 2).
-    Keep,
 }
 
 /// One colour attachment of a [`TargetsSpec`] pipeline.
@@ -470,6 +467,8 @@ pub(crate) struct TargetsSpec<'a> {
     pub(crate) vertex: vk::ShaderModule,
     /// `None`: depth only (every colour attachment then needs an empty write mask).
     pub(crate) fragment: Option<vk::ShaderModule>,
+    /// The fragment stage's specialisation constants (the deferred sky's background, N2b).
+    pub(crate) fragment_specialization: Option<&'a vk::SpecializationInfo<'a>>,
     /// At most six (the G-buffer prepass: motion, `gb0`–`gb2`, the unit IDs and, on the
     /// deferred frame, `hdr`).
     pub(crate) colors: &'a [ColorTarget],
@@ -499,10 +498,14 @@ pub(crate) fn create_targets(
     let mut stages = [vertex_stage, vertex_stage];
     let stage_count = match spec.fragment {
         Some(fragment) => {
-            stages[1] = vk::PipelineShaderStageCreateInfo::default()
+            let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(fragment)
                 .name(c"main");
+            stages[1] = match spec.fragment_specialization {
+                Some(specialization) => stage.specialization_info(specialization),
+                None => stage,
+            };
             2
         }
         None => 1,
@@ -546,7 +549,6 @@ pub(crate) fn create_targets(
         let (enable, source, op) = match target.blend {
             TargetBlend::None => (false, vk::BlendFactor::ONE, vk::BlendOp::MAX),
             TargetBlend::Max => (true, vk::BlendFactor::ONE, vk::BlendOp::MAX),
-            TargetBlend::Keep => (true, vk::BlendFactor::ZERO, vk::BlendOp::ADD),
         };
         attachments[index] = vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(enable)

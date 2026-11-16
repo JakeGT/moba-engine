@@ -1207,16 +1207,34 @@ clarifications:
    attachment is not loaded (`DONT_CARE`): every pixel is either the sky or lit. For a unit
    pixel (`GBUFFER_FLAG_UNIT`) `deferred_light` reads the emissive, shades, applies the fogs
    (in the forward order: emissive before fog, as `shade()` adds it) and stores the result;
-   any other lit pixel is stored without a read. An `UNLIT` pixel would keep what the G-buffer
-   pass wrote; no shipped surface but the sky is `UNLIT`. Lavapipe ignores the empty mask
-   (amendment 1 item 16) and stores the terrain's and foliage's zero, which nothing reads.
-   Without the world's sky (`MOBA_SKY=off`) `hdr` is cleared to the clear colour instead and
-   the G-buffer pass's sky keeps it (`TargetBlend::Keep`, `ZERO`, `ONE`).
+   any other lit pixel is stored without a read. An `UNLIT` pixel off the far plane keeps
+   what the G-buffer pass wrote (`deferred_light` returns early). No shipped surface but the
+   sky is `UNLIT`; the early return is sound only while the units, which write `hdr`, are the
+   only pipelines that may write `UNLIT` off the far plane. An `UNLIT` terrain or foliage
+   pixel would keep an undefined `hdr`, so a new `UNLIT` surface must write `hdr` too (a
+   comment at the return says so). Lavapipe ignores the empty mask (amendment 1 item 16) and stores the terrain's
+   and foliage's zero; that is safe only because nothing reads those texels before the
+   lighting overwrites them. Without the world's sky (`MOBA_SKY=off`) the sky's draw writes
+   the main view's clear colour itself: `sky_motion`'s `SKY_RADIANCE` specialisation
+   constant is false and constants 1–4 carry `RenderConfig::clear_color`, so `hdr` stays
+   `DONT_CARE` either way. (The first build cleared `hdr` and kept the clear colour with a
+   (`ZERO`, `ONE`) blend on the sky's attachment; lavapipe does not honour that blend and
+   stored the sky's radiance, so the sky-off frame was 93.2 % within 2/255, max 140. The
+   parity script now captures the default scene with `MOBA_SKY=off`: 100 % within 2, max 2.)
+   As with amendment 1 item 16's masks, lavapipe lost a state set on one attachment only
+   (the trigger is again not traced in Mesa). Within the G-buffer pass and the other
+   `TargetsSpec` pipelines nothing else depends on lavapipe honouring per-attachment state
+   (the VFX's per-attachment blends are honoured there, amendment 1 item 16). Every G-buffer
+   pipeline now blends nothing and writes every output with a mask covering it, except the
+   two empty `hdr` masks above (the terrain and the foliage, safe because unread) and the
+   foliage's unit ID (amendment 1 item 16's documented exception, whose texel lavapipe
+   leaves undefined). The other `TargetsSpec` pipelines (`tc_mask`'s `MAX`, the overlay
+   prepass's IDs) have a single attachment.
 7. **The sky is drawn once, by the G-buffer pass.** Its far-plane draw (§2a's "depth EQUAL
    far", through the sky's own vertex stage and compare) already wrote the background's
    motion and an `UNLIT` G-buffer; with `GBUFFER_HDR` it also writes the sky's radiance
-   (`include/sky_radiance.glsl`, shared with the forward `sky.frag`), and `deferred_light`
-   skips the far plane. On Low/Medium, where water is the simple, non-refracting draw, a
+   (`include/sky_radiance.glsl`, shared with the forward `sky.frag`) or, without the world's
+   sky, the clear colour (item 6), and `deferred_light` skips the far plane. On Low/Medium, where water is the simple, non-refracting draw, a
    `simple_water` pass after the lighting draws it (the forward `scene` did); with refraction,
    `water_copy → water` follows as in N1 and there is no pass between. (The first build drew
    the sky a second time in a `sky` pass after the lighting, with an `hdr` round trip between
@@ -1278,22 +1296,28 @@ clarifications:
     `scripts/deferred-parity.sh` (CI `tiered-temporal`) runs the gate as written: High (the
     default tier, Ultra configuration), TAAU Quality mode (render scale 0.667, sharpness
     0.25), 1280×720, stylisation and foliage off; within 2/255 on at least 99.5 % of pixels
-    and 6/255 everywhere.
+    and 6/255 everywhere. The script also captures the default scene without the world's sky
+    (`MOBA_SKY=off`, item 6). Each cell gives the share within 2/255, the worst pixel and the
+    number of pixels past 2/255 (of 921,600).
 
     | Scene | Local (Mesa 26.2.5) | CI (Mesa 26.0.8, LLVM 21.1.8; AMD EPYC 9V74 and Intel Xeon 6975P-C alike) |
     |---|---|---|
-    | Default | 100 % within 2, max 2 | 100.000 % within 2, max 4 (2 pixels past 2) |
-    | R3b river | 100.000 % within 2, max 3 (3 pixels) | 100.000 % within 2, max 3 (2 pixels) |
-    | R3b teamfight | 99.999 % within 2, max 5 (1 pixel) | 99.999 % within 2, max 5 (1 pixel) |
+    | Default | 100.000 %, max 2, 0 pixels past 2 | 100.000 %, max 4, 2 pixels past 2 |
+    | Default, `MOBA_SKY=off` | 100.000 %, max 2, 0 pixels past 2 | — (added after these CI runs) |
+    | R3b river | 100.000 %, max 3, 3 pixels past 2 | 100.000 %, max 3, 2 pixels past 2 |
+    | R3b teamfight | 99.999 %, max 5, 9 pixels past 2 | 99.999 %, max 5, 7 pixels past 2 |
 
     **The first build failed the river** (locally max 15/255 at 7 pixels; on CI max 9 at 11
     pixels, and the teamfight 7 at one pixel), all at high-contrast edges of the river's
     bank. The review found the cause in TAAU, not in the deferred frame:
-    - **Before the upscaler the two frames agree within 2/255 everywhere.** With TAAU
-      patched to output its nearest raw sample (no history, native scale, sharpness 0),
-      the river is 100 % within 2, max 2, and every earlier outlier is within 2 over its
-      7 × 7 neighbourhood. The lighting is exact up to the G-buffer's quantisation, which is
-      the case gate 2's second sentence allows.
+    - **On the river, before the upscaler, the two frames agree within 2/255 everywhere.**
+      With TAAU patched to output its nearest raw sample (no history, native scale,
+      sharpness 0), the river is 100 % within 2, max 2, and every earlier outlier is within
+      2 over its 7 × 7 neighbourhood. The lighting is exact up to the G-buffer's
+      quantisation, which is the case gate 2's second sentence allows. The teamfight is not:
+      through the same raw passthrough it is max 8/255, at a cast shadow's edge
+      ((744–747, 350–351)) and at a terrain crack ((1180, 665)); their cause was not
+      isolated, and through TAAU both are within the gate.
     - **TAAU's variance clip amplified sub-step differences.** It pulled the history toward
       the box centre along its whole offset, scaled by the most-violated axis
       (`h = centre + offset / largest`), with the box's extent floored at only 1e-5. On
@@ -1313,8 +1337,12 @@ clarifications:
       both), so the tiered hashes were retaken from CI.
 
     The teamfight's worst pixel (5/255, at (516, 475)) is on a unit's silhouette edge, just
-    inside its outline; its cause was not isolated. Native scale was not an option: on the
-    first build, at frame 90, it measured 7.
+    inside its outline. The review isolated it: through the raw passthrough the 9 × 9 block
+    around it is within 1/255, and the pixel is unchanged with sharpness 0 and with either
+    RCAS `hit_min` floor (ADR-0021 amendment 7 item 6), so it is the clip's residual gain
+    on a box that is not degenerate (wider than 0.004 at the silhouette), which amendment 7
+    deliberately keeps. Native scale was not an option: on the first build, at frame 90, it
+    measured 7.
 17. **A Tiered device that cannot run the deferred passes lights forward** (one log line,
     `[render] deferred lighting unavailable (…); lighting forward`): fewer than 6 fragment
     outputs (item 13), a compute-stage descriptor budget below the pass's sets (item 2),

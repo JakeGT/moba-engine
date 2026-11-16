@@ -1154,6 +1154,7 @@ impl Renderer {
                 depth: frame_spec.depth,
                 deferred: frame_spec.has_deferred(),
                 sky: world_config.sky,
+                clear_color: config.clear_color.map(f32::to_bits),
             },
             config.skinning,
             CullSettings {
@@ -2466,20 +2467,23 @@ impl Renderer {
         let contact = view(resources.contact);
         self.lighting
             .bind_transients(&self.device, shadow, contact, ao);
-        // N2b: the deferred passes' sets name the G-buffer, the depth and `hdr`.
-        if let (Some(pass), Some(temporal)) = (&self.deferred, resources.temporal) {
-            let gbuffer = temporal.gbuffer.map(|id| view(Some(id)));
-            if let ([Some(gb0), Some(gb1), Some(gb2)], Some(depth), Some(hdr)) = (
-                gbuffer,
-                view(Some(resources.depth)),
-                view(Some(resources.hdr)),
-            ) {
-                pass.bind_targets(&DeferredViews {
-                    gbuffer: [gb0, gb1, gb2],
-                    depth,
-                    hdr,
-                });
-            }
+        // N2b: the deferred passes' sets name the G-buffer, the depth and `hdr`. A deferred
+        // plan always places all five (the pass reads them), so a missing one is a planner
+        // bug: skipping the bind would leave sets naming no (or freed) views, which the
+        // frame's dispatches would then read.
+        if let Some(pass) = &self.deferred {
+            let temporal = resources
+                .temporal
+                .expect("the deferred frame is temporal (ADR-0023 §2)");
+            let placed = |resource, what| {
+                view(Some(resource)).unwrap_or_else(|| panic!("the deferred plan places {what}"))
+            };
+            let [gb0, gb1, gb2] = temporal.gbuffer;
+            pass.bind_targets(&DeferredViews {
+                gbuffer: [placed(gb0, "gb0"), placed(gb1, "gb1"), placed(gb2, "gb2")],
+                depth: placed(resources.depth, "the depth"),
+                hdr: placed(resources.hdr, "hdr"),
+            });
         }
         if let (Some(pass), Some(depth)) = (&self.contact, view(Some(resources.depth))) {
             pass.bind_depth(&self.device, depth);
@@ -3120,10 +3124,7 @@ impl Renderer {
                         gbuffer_store: deferred
                             || self.frame_spec.gbuffer_debug
                             || self.frame_spec.readback,
-                        hdr: deferred.then_some((
-                            hdr_view,
-                            (!self.world_config.sky).then_some(self.config.clear_color),
-                        )),
+                        hdr: deferred.then_some(hdr_view),
                         lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                     },

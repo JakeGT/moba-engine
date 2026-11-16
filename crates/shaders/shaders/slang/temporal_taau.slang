@@ -325,7 +325,8 @@ void main(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
     float3 h = rcas_in(resolved[(cell.y + 1) * BORDER_TILE + cell.x], ex);
     float3 mn4 = min(min(b, d), min(f, h));
     float3 mx4 = max(max(b, d), max(f, h));
-    float3 hit_min = mn4 / max(4.0 * mx4, float3(0.01, 0.01, 0.01));
+    // FSR 1's floor; `3131b7f` changed it to 0.01 by accident (ADR-0021 amendment 7 item 6).
+    float3 hit_min = mn4 / max(4.0 * mx4, float3(1e-5, 1e-5, 1e-5));
     float3 hit_max = (1.0 - mx4) / min(4.0 * mn4 - 4.0, float3(-1e-5, -1e-5, -1e-5));
     float3 lobe3 = max(-hit_min, hit_max);
     // The RCAS limit (0.25 - 1/16) keeps the kernel's centre weight positive.

@@ -110,7 +110,12 @@ void main() {
         texelFetch(gbuffer0, pixel, 0), texelFetch(gbuffer1, pixel, 0),
         texelFetch(gbuffer2, pixel, 0));
     if (s.model == GBUFFER_MODEL_UNLIT) {
-        return; // Emissive only: the G-buffer pass wrote it (no shipped surface is UNLIT).
+        // Emissive only: the G-buffer pass wrote it (no shipped surface is UNLIT). Sound only
+        // while the units (their `hdr` mask is RGBA) are the only UNLIT writers off the far
+        // plane: the terrain and the foliage have an empty `hdr` mask, so an UNLIT pixel of
+        // theirs would keep an undefined `hdr` (lavapipe's zero). A new UNLIT writer must
+        // write `hdr` too (ADR-0023 amendment 2 item 6).
+        return;
     }
     moba_pixel_center = vec2(pixel) + 0.5;
     // The scene renders with a flipped viewport: NDC +Y is the top of the image. The camera's
