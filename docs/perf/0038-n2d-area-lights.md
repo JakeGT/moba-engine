@@ -25,7 +25,15 @@ Captured 2026-11-17 for ADR-0023 (N2d) and its
 
 Every lavapipe and RTX run below printed no `[vulkan` line.
 
-[[SUMMARY]]
+## Summary
+
+| Gate | Result |
+|---|---|
+| 2. Deferred–forward parity | **Met** locally at 1280×720 on lavapipe, with the area-light sheet as a fifth scene lit with LTC on both paths: worst pixel 3, 3, 3, 6 and 3/255 (default, default without the sky, river, teamfight, area-light sheet), at least 99.999 % within 2/255; the same with `MOBA_PAINT_DECAL_PASS=1`, and on the RTX 5070 Ti |
+| 3. LTC | **Met** (the CPU twin of `ltc.glsl`): each shape within a recorded tolerance of a Monte Carlo reference (worst evaluation, diffuse and specular: sphere 0.058, 0.0002, 0.099; capsule 0.145, 0.042, 0.056; rect 0.116, 0.002, 0.105); `RGBA16F` kept (rounding ≤ 4.9e-4); a shrinking sphere tends to the point light (2.4e-4 diffuse, 6.6e-4 specular); the forward and deferred loops visit the same shaped lights; the white furnace unchanged (0.9861) |
+| 5. Goldens | **Met.** Compat byte-identical to `fa661a7` (11 scenes) and its SPIR-V unchanged; all fourteen tiered goldens two-run identical, the new `ltc` and `fsr3-ltc` among them; exact hashes from CI (only `decals` and `fsr3-decals` moved, the teamfight's bolts now being capsules) |
+| 7. Performance (≤ 1.10× N1) | **Met on the teamfight, every preset:** GPU total 1.020–1.067× `ab42718` (span 1.036–1.082×); N2d's budget met on p50 (+0.002 ms at Low, +0.004 at High; amendment 3: 0.005 and 0.008), +0.010–0.011 on p95 at High; Compat 1.003×; least headroom after N2e and N2f's budgets Tiered High, 0.0123 ms. Extended-model check +0.001 ms. **Not met on the area-light sheet at High:** LTC costs +0.046 ms (far) and +0.049 ms (close) over the same lights as points, 1.143× and 1.158× N1 (about 1.13× and 1.14× an estimate of N1 drawing the lights); Low (the representative point) 1.082×. Recorded in amendment 4 |
+| Validation | **Met:** 0 messages on lavapipe and on the RTX 5070 Ti (36 captures, both pipelines of the per-frame choice) |
 
 ## Gate 3: LTC against Monte Carlo
 
@@ -116,8 +124,7 @@ count alike).
   sorted with `LC_ALL=C`. Besides the new `ltc` and `fsr3-ltc`, only `decals` and
   `fsr3-decals` moved, in both sections: the teamfight's bolts are capsule lights now. `low`,
   `high`, `native`, `overlay` and `materials` (and their FSR 3.1 twins) keep N2c's hashes, so
-  the atlas and the per-frame mode-0 pipelines change no byte of a frame without a shaped
-  light. The `ltc` fingerprints pass on CI's Mesa (26.0.8). An earlier dispatch (run
+  the atlas and the per-frame mode-0 pipelines change no byte of those captures. The `ltc` fingerprints pass on CI's Mesa (26.0.8). An earlier dispatch (run
   44078987962, on `277c09e`) failed only because the `ltc` fingerprints were not committed
   yet.
 
@@ -176,7 +183,50 @@ Span headroom: Low +0.0100, High +0.0190, Ultra +0.0181, Overdrive +0.0352, Low 
 +0.0219, High FSR 3.1 +0.0310. N2e and N2f keep their amendment 3 budgets; the least
 headroom after them is Tiered High's 0.0123 ms of total.
 
-[[AREA]]
+### The area-light sheet: what LTC costs where it is used
+
+`MOBA_AREA_LIGHT_SHEET=1`: a sphere, a capsule and a rect light over open ground, on every
+frame (`area_lights_avg` 3.09, `area_frames` 3,000 of 3,000), from the material sheet's far and
+close cameras with no units. The baselines ignore the variable and draw the same ground with
+no light there, so the branch's `MOBA_AREA_LIGHTS=off` run (the three shapes as point lights
+at their centres) is the frame the feature is measured against. Two runs:
+
+- `r1/gate7/`, interleaved with the teamfight rows above (N1, N2c and the branch);
+- `r1/area/`, three more interleaved rounds of N2c and the branch with every area mode, so
+  that LTC, the representative point and off are compared within the same rounds. The LTC
+  rows reproduce across the two runs within 0.005 ms (0.760 and 0.760 far, 0.732 and 0.737
+  close).
+
+| Area-light sheet, `r1/area/` | N2c total (no light) | branch, off | branch, point | branch, LTC | `deferred_light` off → point → LTC | **LTC − off** | point − off |
+|---|---|---|---|---|---|---|---|
+| High, far | 0.704 | 0.714 | 0.721 | 0.760 | 0.065 → 0.072 → 0.111 | **+0.046** | +0.007 |
+| High, close | 0.678 | 0.688 | 0.696 | 0.737 | 0.059 → 0.066 → 0.107 | **+0.049** | +0.008 |
+| Low, far (the representative point) | 0.629 | 0.640 | 0.644 | — | 0.060 → 0.067 | — | +0.004 |
+
+(Low's row is `area-low`, which runs the representative point by default, against
+`areaoffsheet-low`; p95 moves with p50 in every row, within 0.003 ms.)
+
+- **The feature's cost is LTC minus off: +0.046 ms far and +0.049 ms close at High**, all of
+  it in `deferred_light` (0.065 → 0.111 ms far). It is LTC's arithmetic on the pixels inside
+  the three lights' radii (two quad integrals and a sphere's cubic per light per pixel), not
+  the registers: the mode-0 pipeline ran every off frame, and the LTC pipeline costs the
+  teamfight's frames without a shaped light nothing (above). The representative point costs
+  +0.007–0.008 ms at High and +0.004 ms at Low. Off itself is the three point lights the
+  baselines do not have: +0.010–0.011 ms over N2c.
+- **Against 1.10× N1** (`r1/gate7/`): N1 0.665 far and 0.632 close. The LTC sheet at High is
+  **1.143× N1 far and 1.158× close**, against N1 without the lights; against an estimate of N1
+  drawing them as points (N1 plus off's +0.010) it is about 1.126× far and 1.140× close.
+  **This is over gate 7's 1.10×**, and is recorded as an amendment 4 item. Low (the
+  representative point) is 1.082× N1 without the lights, and the point mode at High 1.081×:
+  both within.
+- **Per light:** the sheet's three lights each cover a few metres of open ground at both
+  cameras, so about 0.015 ms per large shaped light on screen at 1920×1080. The teamfight's
+  bolts (radius 0.06 m, on 11 % of its frames) cost +0.010 ms of p95 at High.
+- **The levers left** (not tried, "How the cost was recovered"): the scalarised light loop
+  and folding `light_classify` act on the whole pass, not on LTC's per-pixel work; the
+  levers that would act on it are LTC only within a shaped light's inner radius (the
+  representative point outside it), one integral for the diffuse of a small shape (the
+  sphere's form factor is already analytic), or a lower area mode at High. None is measured.
 
 ## How the cost was recovered
 

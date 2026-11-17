@@ -164,7 +164,11 @@ the semver check):
     `area_lights_avg` and `area_frames`; `MOBA_AREA_LIGHT_SHEET=1` draws a sphere, a capsule
     and a rect light at the material sheet's spot, the scene of the new deferred–forward
     parity case and the tiered `ltc` golden (Medium).
-  - [[CHANGELOG_GATES]]
+  - **Gates:** deferred–forward parity worst pixel 3/255 on the area-light sheet (6/255 on
+    the teamfight); Compat byte-identical; the teamfight on the RTX 5070 Ti 1.020–1.067× N1's
+    GPU total at every preset, +0.002 ms (Low) and +0.004 ms (High) over N2c on p50. **Not
+    met:** on the area-light sheet LTC at High costs +0.046–0.049 ms over the same lights as
+    points, 1.14–1.16× N1 (ADR-0023 amendment 4 item 14).
 - **The material model on Tiered (ADR-0023 N2c and amendment 3;
   [perf/0037](docs/perf/0037-n2c-materials.md)); the material spec is frozen for C1:**
   - **Shading models:** `CLEARCOAT`, `SHEEN`, `ANISOTROPIC` and `THIN_FILM` lit with their own

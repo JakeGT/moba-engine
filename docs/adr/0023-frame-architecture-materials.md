@@ -1863,7 +1863,57 @@ item here.
     sphere, a capsule and a rect light over open ground at the material sheet's spot, the
     scene gate 2, the `ltc` golden and gate 7's area-light rows use.
 
-[[GATES]]
+14. **LTC at High is over gate 7 where large shaped lights cover the screen** (departs from
+    §9b's 1.10×, on a scene the gate was not defined on). On the area-light sheet (item 13:
+    three lights each covering a few metres of ground, on every frame) LTC costs +0.046 ms
+    (far camera) and +0.049 ms (close) over the same lights as points, all in
+    `deferred_light`: the frame is 1.143× and 1.158× N1's (which has no light there), about
+    1.13× and 1.14× an estimate of N1 drawing them as point lights. The representative point
+    costs +0.007–0.008 ms at High and +0.004 ms at Low (1.082× N1 at Low). The teamfight,
+    the replay the gate is defined on, meets it at every preset. The amendment 3 levers (the
+    scalarised loop, the terrain without decal code per frame, `light_classify` folded in)
+    were not tried: the teamfight met its budget without them, and they act on the whole
+    pass rather than on LTC's per-pixel arithmetic. Levers that would act on it (LTC only
+    within a light's inner radius, or a lower area mode at High) are not measured. Until
+    then, an effect's shaped light should stay small or short-lived, as the bolts are; a
+    map or effect that keeps large shaped lights on screen should be timed against this
+    item before it ships.
+
+**Gates** ([perf/0038](../perf/0038-n2d-area-lights.md)):
+
+- **2. Parity:** `deferred-parity.sh` at 1280×720 on lavapipe, with the area-light sheet
+  (item 13) as a fifth scene lit with LTC on both paths: worst pixels 3 (default), 3 (sky
+  off), 3 (river), 6 (teamfight, whose bolts are capsule lights) and 3/255 (area-light
+  sheet), each within 2/255 on at least 99.999 % of pixels, alike with the decal pass forced
+  on. The forward Tiered stages light shapes as the deferred pass does (item 11's water
+  aside). Met.
+- **3. LTC** (the Rust twin of `ltc.glsl` against a fixed-seed Monte Carlo reference over
+  each true shape, 120 cases per shape): worst relative error of the evaluation, diffuse
+  and specular against GGX: sphere 0.058, 0.0002, 0.099; capsule 0.145, 0.042, 0.056; rect
+  0.116, 0.002, 0.105, each under its recorded tolerance (sphere 0.07, 0.002, 0.12; capsule
+  0.17, 0.05, 0.07; rect 0.13, 0.003, 0.12). `RGBA16F` is kept (item 6). A shrinking sphere of
+  the same power tends to the point light (diffuse 2.4e-4, specular 6.6e-4 from R/d 0.01
+  down to 5e-6, item 4). The light-set test gives every fourth light a shape and the forward
+  and deferred loops visit the same lights. The white furnace is unchanged (0.9861). Met; a
+  rendered comparison is not measured.
+- **5. Goldens:** Compat's 11 scenes byte-identical to `fa661a7` and its SPIR-V unchanged;
+  all fourteen tiered goldens two-run identical, the new `ltc` and `fsr3-ltc` among them;
+  exact hashes from CI, where only `decals` and `fsr3-decals` moved (the teamfight's bolts).
+  Validation and sync validation clean on lavapipe and on the RTX 5070 Ti (36 captures,
+  both pipelines of item 10's choice). Met.
+- **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay at
+  1920×1080, three interleaved rounds: GPU total 1.020–1.067× (Low, High, Ultra, Overdrive,
+  Low and High with FSR 3.1; span 1.036–1.082×), Compat Ultra 1.003×. Met. N2d's budget
+  against `fa661a7` (amendment 3: 0.005 ms at Low, 0.008 at High) is met on p50 (+0.002 at
+  Low, +0.004 at High and Ultra, +0.005 at Overdrive); on p95 High reads +0.010–0.011 ms,
+  from the 11 % of frames with a bolt. A shaped light was in the light list on 326 of
+  3,000 frames.
+  - **Headroom** against 1.10× N1 (`gpu_total`, ms): Low 0.0184, High 0.0253, Ultra 0.0254,
+    Overdrive 0.0435, Low with FSR 3.1 0.0282, High with FSR 3.1 0.0394. After N2e's and
+    N2f's amendment 3 budgets: Low 0.0134, High 0.0123.
+  - **The extended-model check** (the close material sheet at High): +0.001 ms over N2c on
+    p50 (+0.007 on p95), so amendment 3's 0.005 ms becomes about 0.004 ms.
+  - **The area-light sheet:** item 14. Not met at High with LTC.
 
 ## Corrections to the roadmap
 
