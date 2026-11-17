@@ -189,10 +189,12 @@ pub struct Light {
     pub shape: LightShape,
 }
 
-/// The pre-N2d name of [`Light`], kept for one release (ADR-0023 §4c): a point light.
+/// The pre-N2d name of [`Light`] (ADR-0023 §4c). It was never in a release (it came after
+/// 0.4.1), so it goes in the release after 0.5.0; until then code written against `main`
+/// keeps building.
 #[deprecated(
-    since = "0.4.0",
-    note = "use `Light` (ADR-0023 §4c); `PointLight` goes after one release"
+    since = "0.5.0",
+    note = "use `Light` (ADR-0023 §4c); `PointLight` goes in the release after 0.5.0"
 )]
 pub type PointLight = Light;
 

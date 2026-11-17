@@ -3,7 +3,7 @@
 //! Carlo reference.
 //!
 //! The table is `assets/ltc-ggx.bin`, baked once by `moba-tools ltc-bake` (a port of the LTC
-//! reference code's `fitLTC.cpp`, THIRD_PARTY.md): two `RGBA16F` 64 × 64 layers, layer 0 the
+//! reference code's `fitLTC.cpp`, `THIRD_PARTY.md`): two `RGBA16F` 64 × 64 layers, layer 0 the
 //! inverse matrix's four terms, layer 1 the lobe's magnitude, average Fresnel and the
 //! horizon-clipped sphere table. Its sampling and the evaluations follow the reference's
 //! WebGL demos `ltc_quad.fs` and `ltc_disk.fs` (Heitz, Dupuy, Hill and Neubelt 2016; Heitz

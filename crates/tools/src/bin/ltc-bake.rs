@@ -8,7 +8,7 @@
 //!
 //! A port of `fit/fitLTC.cpp` (with `fit/LTC.h`, `fit/brdf_ggx.h` and `fit/nelder_mead.h`) from
 //! the LTC reference code, <https://github.com/selfshadow/ltc_code> at commit
-//! `31e5e96b54f98f33098f8503003119ba2231a1c6` (THIRD_PARTY.md has the notice and the files'
+//! `31e5e96b54f98f33098f8503003119ba2231a1c6` (`THIRD_PARTY.md` has the notice and the files'
 //! SHA-256). The fit, its first guesses, its iteration order and its `f32` arithmetic are the
 //! upstream's; only the threading is new, and it does not change a value (below). Upstream's
 //! notice, which its licence asks to be kept with the source:
@@ -81,13 +81,17 @@ const N: usize = 64;
 const N_SAMPLE: usize = 32;
 /// Smallest GGX alpha (avoids singularities): upstream's `MIN_ALPHA`.
 const MIN_ALPHA: f32 = 0.00001;
-/// Upstream's literal `3.14159f`, used where it writes it instead of `pi`.
+/// Upstream's literal `3.14159f`, used where it writes it instead of `pi`: the table matches
+/// upstream's only with its rounding.
+#[allow(clippy::approx_constant)]
 const PI_LITERAL: f32 = 3.14159;
 
 /// The GGX BRDF times the cosine, with its sampling (`brdf_ggx.h`).
 struct BrdfGgx;
 
 impl BrdfGgx {
+    // Upstream's arithmetic, kept so that the table is upstream's bit for bit.
+    #[allow(clippy::manual_midpoint)]
     fn lambda(alpha: f32, cos_theta: f32) -> f32 {
         let a = 1.0 / alpha / cos_theta.acos().tan();
         if cos_theta < 1.0 {
@@ -261,6 +265,7 @@ fn apply(ltc: &mut Ltc, params: [f32; 3], isotropic: bool) {
 
 /// Downhill simplex (`nelder_mead.h`, `NelderMead<3>`): Nelder-Mead with the Numerical
 /// Recipes termination test.
+#[allow(clippy::many_single_char_names)] // The reference's names, kept for side-by-side reading.
 fn nelder_mead(
     start: [f32; 3],
     delta: f32,
