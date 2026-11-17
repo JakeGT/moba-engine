@@ -5,7 +5,9 @@
 # (MOBA_STYLISATION=off: no wrap, rim, ramp or painted specular) and only STANDARD surfaces
 # (MOBA_FOLIAGE=off: the foliage is the only other model the G-buffer holds), plus the default
 # scene without the world's sky (MOBA_SKY=off: the deferred sky's draw writes the clear colour
-# into `hdr`, ADR-0023 amendment 2 item 6). Each pair must
+# into `hdr`, ADR-0023 amendment 2 item 6), and (N2d) the area-light sheet
+# (MOBA_AREA_LIGHT_SHEET=1: a sphere, a capsule and a rect light over open ground, so both
+# paths light every shape the same way; the teamfight's bolts are capsule lights). Each pair must
 # agree within 2/255 on at least 99.5 % of the pixels and within 6/255 everywhere
 # (`image-check --parity`). Any validation message fails a capture.
 #
@@ -14,7 +16,7 @@
 # QUALITY picks the tier (default high: the Ultra configuration on Tiered, with full water)
 # and UPSCALER the back end (default taau). PARITY_FOLIAGE=1 also captures the three scenes
 # with the foliage (FOLIAGE, the extended tiles) and reports their parity without failing.
-# PARITY_SCENES (space-separated names, default all four) limits the scenes. With
+# PARITY_SCENES (space-separated names, default all five) limits the scenes. With
 # MOBA_PAINT_DECAL_PASS=1 in the environment the deferred frame draws the `Paint` decals as
 # the G-buffer decal pass (ADR-0023 amendment 3 item 31): each deferred capture must log
 # that the pass was built, and the teamfight's (the scene with `Paint` decals) that its
@@ -59,6 +61,8 @@ scenes=(
   "river MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_PREVIEW_CAMERA=0.9,0.3,14,4,-62"
   "teamfight MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330
    MOBA_CAMERA_DISTANCE=30 MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40"
+  "area-lights MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_AREA_LIGHT_SHEET=1
+   MOBA_PREVIEW_CAMERA=1.5708,0.45,11,0,-12"
 )
 status=0
 run_scene() {

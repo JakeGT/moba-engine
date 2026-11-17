@@ -12,7 +12,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use moba_core::math::{Mat4, Vec3, look_at_rh, perspective_rh};
-use moba_render::PointLight;
+use moba_render::Light;
 use moba_render::bench_support::LightBinning;
 use std::hint::black_box;
 
@@ -22,13 +22,13 @@ fn player_camera() -> Mat4 {
 }
 
 /// `count` lights of `radius` on a deterministic scatter over ±30 m × ±20 m.
-fn lights(count: usize, radius: f32) -> Vec<PointLight> {
+fn lights(count: usize, radius: f32) -> Vec<Light> {
     (0..count)
         .map(|index| {
             let i = index as f32;
             let x = (i * 7.31).sin() * 30.0;
             let z = (i * 3.17).cos() * 20.0;
-            PointLight::new(Vec3::new(x, 1.0, z), radius, Vec3::new(4.0, 2.0, 1.0))
+            Light::new(Vec3::new(x, 1.0, z), radius, Vec3::new(4.0, 2.0, 1.0))
         })
         .collect()
 }

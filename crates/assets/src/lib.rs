@@ -172,8 +172,9 @@ pub use vfx::{
     MAX_VFX_LIGHT_RADIUS, MAX_VFX_NAME, MAX_VFX_RATE, STAMP_LATCH_SECONDS, VFX_ATLAS_CELL,
     VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES, VfxAbilityBinding, VfxAnchor, VfxBindings,
     VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle, VfxDirReport, VfxDirection, VfxDistortion,
-    VfxEffect, VfxEmitter, VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape, VfxSprite,
-    VfxUnitEffects, check_vfx_dir, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
+    VfxEffect, VfxEmitter, VfxError, VfxImportance, VfxLight, VfxLightShape, VfxPrimitive,
+    VfxShape, VfxSprite, VfxUnitEffects, check_vfx_dir, procedural_atlas, valid_vfx_name, vfx_path,
+    vfx_sprite,
 };
 pub use water::{MAX_WATER_MESH_VERTICES, WaterMesh, WaterVertex, generate_water};
 

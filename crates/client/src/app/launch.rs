@@ -341,7 +341,7 @@ pub(crate) fn compressed_textures() -> bool {
 /// `MOBA_SHADOW_SIZE`, `MOBA_IBL` and `MOBA_SPECULAR_IBL` (`0` turns either off) overrides,
 /// and the R2b switches (ADR-0016): `MOBA_LIGHTS=off|<global cap>`,
 /// `MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and
-/// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
+/// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`, and N2d's `MOBA_AREA_LIGHTS=off|point|ltc`.
 /// The render path the client builds its configuration for (ADR-0020 §2b, §5e), probed once
 /// at start with the renderer's own device ranking.
 #[derive(Clone, Debug)]
@@ -497,6 +497,13 @@ fn lighting_config_from(
             Err(_) => eprintln!(
                 "MOBA_CONTACT_SHADOWS={value:?} is not off or a step count; using the tier's"
             ),
+        }
+    }
+    // N2d (ADR-0023 §4a): shaped lights as points, at the representative point, or LTC.
+    if let Some(value) = var("MOBA_AREA_LIGHTS") {
+        match moba_render::AreaLights::from_name(&value) {
+            Some(mode) => config = config.with_area_lights(mode),
+            None => eprintln!("MOBA_AREA_LIGHTS={value:?} is not off/point/ltc; using the tier's"),
         }
     }
     config
@@ -1403,7 +1410,8 @@ impl Drop for ClientApp {
             format!(
                 "{} cull={} cull_candidates={} cull_drawn={} cull_casters={} cull_dropped={} \
                  terrain_chunks={}/{} lod_instances={lods} paint_decals_avg={:.2} \
-                 tiles_standard_avg={:.1} tiles_extended_avg={:.1} extended_frames={}/{} ",
+                 tiles_standard_avg={:.1} tiles_extended_avg={:.1} extended_frames={}/{} \
+                 area_lights_avg={:.2} area_frames={}/{} ",
                 memory_summary(&renderer.memory_stats()),
                 cull.mode,
                 cull.candidates,
@@ -1417,6 +1425,9 @@ impl Drop for ClientApp {
                 per(exercise.extended_tiles, exercise.lit_frames),
                 exercise.extended_frames,
                 exercise.lit_frames,
+                per(exercise.area_lights, exercise.frames),
+                exercise.area_frames,
+                exercise.frames,
             )
         });
         // ADR-0021 §6b: the latency back end, who paced the frames, and Reflex's timings.
@@ -1948,6 +1959,28 @@ mod tests {
         assert_eq!(r2b.outlines, moba_render::OutlineMode::Hull);
         assert!(!r2b.baked_ao);
         assert_eq!(r2b.contact_shadow_steps, 0);
+        // N2d: the area-light mode; Low's default is the representative point.
+        assert_eq!(
+            LightingConfig::for_tier(QualityTier::Low).area_lights,
+            moba_render::AreaLights::RepresentativePoint
+        );
+        let modes: [(&'static [(&'static str, &'static str)], _); 3] = [
+            (&[("MOBA_AREA_LIGHTS", "off")], moba_render::AreaLights::Off),
+            (
+                &[("MOBA_AREA_LIGHTS", "Point")],
+                moba_render::AreaLights::RepresentativePoint,
+            ),
+            (
+                &[("MOBA_AREA_LIGHTS", " ltc ")],
+                moba_render::AreaLights::Ltc,
+            ),
+        ];
+        for (pairs, mode) in modes {
+            assert_eq!(
+                lighting_config_from(QualityTier::Low, env(pairs)).area_lights,
+                mode
+            );
+        }
         let capped = lighting_config_from(
             QualityTier::Low,
             env(&[("MOBA_LIGHTS", "8"), ("MOBA_CONTACT_SHADOWS", "12")]),
@@ -1961,6 +1994,7 @@ mod tests {
                 ("MOBA_OUTLINES", "glow"),
                 ("MOBA_BAKED_AO", "1"),
                 ("MOBA_CONTACT_SHADOWS", "many"),
+                ("MOBA_AREA_LIGHTS", "disk"),
             ]),
         );
         assert_eq!(ignored, LightingConfig::for_tier(QualityTier::Ultra));

@@ -1187,8 +1187,8 @@ gradient a painterly terminator.
 whether the specular cube is sampled and (R2b, [ADR-0016](adr/0016-lights-outlines-ao.md)) the
 dynamic-light caps, the outline method and contact shadows; `MOBA_SHADOWS=off|hard|pcf|pcss`,
 `MOBA_SHADOW_SIZE=<256..8192>`, `MOBA_IBL=0`, `MOBA_SPECULAR_IBL=0`, `MOBA_LIGHTS=off|<cap>`,
-`MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and `MOBA_CONTACT_SHADOWS=off|<steps>`
-override them:
+`MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off`, `MOBA_CONTACT_SHADOWS=off|<steps>` and
+(Tiered, N2d) `MOBA_AREA_LIGHTS=off|point|ltc` override them:
 
 | Tier | Shadows | Shadow map | Specular IBL | Lights (all / per column) | Outlines | Contact shadows |
 |---|---|---|---|---|---|---|
@@ -1330,6 +1330,11 @@ fade_out = 0.2            # seconds to ramp down after it ends (default 0.2)
 flicker = 0.3             # 0..=1 random dimming
 team_tint = 0.0           # pull towards the team colour, 0..=1
 scale_with_radius = false # multiply radius by the event's radius (zones)
+shape = "point"           # point | sphere | capsule | rect (N2d, ADR-0023 §4; default point)
+source_radius = 0.1       # sphere and capsule: 0.01..=2 m (default 0.1)
+length = 0.8              # capsule (end to end, along the travel direction) and rect (tall):
+                          #   required, 0.01..=8 m
+width = 1.0               # rect: required, 0.01..=8 m across the travel direction
 ```
 
 - **Primitives.** `sprite` and `flipbook` are camera-facing quads (a flipbook plays a
@@ -1444,6 +1449,15 @@ stamp = false             # persist after the effect (scorch marks), for `lifeti
   before an enemy's. A light belongs to an effect the client already
   plays, so it never reveals anything the client was not sent. `MOBA_LIGHTS=off` turns
   them off.
+- **Light shapes** (N2d, [ADR-0023 §4](adr/0023-frame-architecture-materials.md)). A `sphere`
+  (orbs, cores), a `capsule` (beams, bolts, trails: along the effect's travel direction, a
+  projectile's flight or source to target) or a one-sided `rect` (panels, facing the travel
+  direction) spreads the same total power as the point light of that colour over its shape:
+  a broader, softer highlight, never a brighter light. Tiered lights shapes with LTC from
+  Medium and at their representative point (the shape's point nearest the reflection) on
+  Low; Compat lights them as points. The light's `radius` is raised to hold its shape.
+  Each key is accepted only with the shapes that use it. `MOBA_AREA_LIGHTS=off|point|ltc`
+  overrides the tier.
 - **Budgets.** Each quality tier caps live particles (Low 4,096 … Ultra 49,152) and an overdraw
   estimate (particle pixels per screen pixel); as either fills, new `low` effects are dropped
   first (at 50 %), then `normal` (80 %), then `high` (95 %). Effects farther than the tier's

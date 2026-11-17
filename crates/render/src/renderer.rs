@@ -595,6 +595,11 @@ pub struct ExerciseStats {
     pub extended_tiles: u64,
     /// Frames with at least one extended tile.
     pub extended_frames: u64,
+    /// Shaped lights ([`LightShape`](crate::LightShape) other than a point) binned, summed
+    /// over the frames (N2d records what it lights, ADR-0023 amendment 3).
+    pub area_lights: u64,
+    /// Frames that binned at least one shaped light.
+    pub area_frames: u64,
 }
 
 /// How the renderer's pipelines were built ([`Renderer::pipeline_stats`]).
@@ -1291,6 +1296,7 @@ impl Renderer {
                     lighting.set_layout(),
                     swapchain.extent,
                     config.debug_view.deferred_view(),
+                    lighting_config.area_lights.shader_mode(),
                 )
             })
             .transpose()?;
@@ -2893,7 +2899,8 @@ impl Renderer {
         let mut frame_lighting = self
             .frame_lighting(scene)
             .with_lights(grid)
-            .with_baked_ao(self.lighting.baked_ao(), self.lighting_config);
+            .with_baked_ao(self.lighting.baked_ao(), self.lighting_config)
+            .with_area_lights(self.lighting_config);
         if self.contact.is_some() {
             frame_lighting = frame_lighting.with_contact_shadows(self.lighting_config);
         }
@@ -2929,6 +2936,9 @@ impl Renderer {
         self.lighting.write_decals(frame_index, &self.decal_upload);
         self.exercise.frames += 1;
         self.exercise.paint_decals += built.paint as u64;
+        let area = self.lighting.light_stats().area;
+        self.exercise.area_lights += u64::from(area);
+        self.exercise.area_frames += u64::from(area > 0);
         // ADR-0023 §1c: what the GPU reconstructs from depth is in the depth convention.
         let depth = self.frame_spec.depth;
         let (near, far) = (scene.camera.near, scene.camera.far);

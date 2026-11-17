@@ -191,6 +191,84 @@ adapted code is `model_f0_between`, `model_sensitivity` and `model_thin_film_fre
 GLSL evaluated once per pixel at N·V (ADR-0023 amendment 3), the Rust written per channel, and
 both files carry a notice of their origin. The Apache License 2.0 text is `LICENSE-APACHE`.
 
+## LTC reference code (linearly transformed cosines)
+
+ADR-0023's area lights (N2d) use the LTC reference code, <https://github.com/selfshadow/ltc_code>,
+pinned at commit `31e5e96b54f98f33098f8503003119ba2231a1c6` (2019-04-15). Ported:
+
+- `moba-tools ltc-bake` (`crates/tools/src/bin/ltc-bake.rs`) is a Rust port of the fitting code,
+  `fit/fitLTC.cpp`, `fit/LTC.h`, `fit/brdf.h`, `fit/brdf_ggx.h` and `fit/nelder_mead.h`; it
+  bakes `crates/render/assets/ltc-ggx.bin` (the only generated file committed, 2 × 64 × 64
+  `RGBA16F`, 64 KiB; the upstream's own tables are not shipped).
+- `crates/shaders/shaders/include/ltc.glsl` and its Rust twin `crates/render/src/ltc/twin.rs`
+  adapt the evaluation of the WebGL demos `webgl/shaders/ltc/ltc_quad.fs` (the clipless
+  polygon, `IntegrateEdgeVec`) and `webgl/shaders/ltc/ltc_disk.fs` (the ellipse's form factor
+  and `SolveCubic`, which the demo credits to Christoph Peters, "How to solve a cubic equation,
+  revisited"). `webgl/shaders/ltc/ltc_line.fs` was read and measured against (the capsule is
+  our own quad), not shipped.
+
+Changes: translated to Rust and GLSL and renamed; the fit's threads split by view angle (same
+results as the upstream's order); the table written as one little-endian `RGBA16F` file of two
+layers; the evaluation reads Tiered's LUT atlas, turns each polygon's form factor toward the
+light instead of tracking a winding, and takes the sphere as the disk spanning its cone
+(ADR-0023 §4a and amendment 4). Each ported file carries a notice of its origin.
+
+SHA-256 of the files used, at that commit: `LICENSE`
+`692a54e97fcadd0f04b14027386e53809c1dcf96de3e15b15af15731b15c1e94`, `fit/fitLTC.cpp`
+`441fcfaa8500ec831966ac485e3772155ace9d08c30a5ff010da1ec3eb373b94`, `fit/LTC.h`
+`167ed9b61c9a35400de9b804280c5adaabb1cd8e67e89daeb62ad2da3dee2d92`, `fit/brdf.h`
+`7389ff0efafd8575d15ce14b44c4dfb49611fa194d46323d671959fee62c4290`, `fit/brdf_ggx.h`
+`9999c0d474c211b2e8f33cde8949429e176c319d8b212df6de625202e4c2d24f`, `fit/nelder_mead.h`
+`cbe672b436bbcd8a6cadbb0b86a353ca943a065cfe8c04e40c40bfe27ee3ef1a`,
+`webgl/shaders/ltc/ltc_quad.fs`
+`ee7718f16873e21906f2b7b6f0632e0f37e18db34a0a4486777c6b250ffecca5`,
+`webgl/shaders/ltc/ltc_disk.fs`
+`7a11a84db2ec9fd9f4c8d619b8e69530787e525be7fa1926de62e1aca98af6a9`,
+`webgl/shaders/ltc/ltc_line.fs`
+`c43e0eb8d3c2671e76e3bc8c90bd7cca3fe00e02061fe25dd7bb3ddd2a217678`. The baked table was checked
+against the upstream's `fit/results/ltc_1.dds` and `ltc_2.dds` (median difference 0 per
+channel; not committed).
+
+Papers (cited as the licence asks): Eric Heitz, Jonathan Dupuy, Stephen Hill and David
+Neubelt, "Real-Time Polygonal-Light Shading with Linearly Transformed Cosines", ACM
+Transactions on Graphics (Proceedings of ACM SIGGRAPH 2016) 35(4), 2016,
+<https://eheitzresearch.wordpress.com/415-2/>; Eric Heitz and Stephen Hill, "Real-Time Line-
+and Disk-Light Shading with Linearly Transformed Cosines", ACM SIGGRAPH 2017 course.
+
+```text
+Copyright (c) 2017, Eric Heitz, Jonathan Dupuy, Stephen Hill and David Neubelt.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* If you use (or adapt) the source code in your own work, please include a
+  reference to the paper:
+
+  Real-Time Polygonal-Light Shading with Linearly Transformed Cosines.
+  Eric Heitz, Jonathan Dupuy, Stephen Hill and David Neubelt.
+  ACM Transactions on Graphics (Proceedings of ACM SIGGRAPH 2016) 35(4), 2016.
+  Project page: https://eheitzresearch.wordpress.com/415-2/
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
 ## Sample textures and material
 
 `content/textures/sentinel-{base,normal,mr,mask}.ktx2` (and the copy in `fuzz/corpus/ktx2/`)

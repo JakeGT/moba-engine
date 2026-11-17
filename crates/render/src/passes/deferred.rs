@@ -157,6 +157,9 @@ pub(crate) struct DeferredPass {
     /// The lighting pipelines' `DEBUG_VIEW` specialisation constant (0 off;
     /// [`crate::post::TemporalDebugView::deferred_view`]).
     debug: u32,
+    /// Their `AREA_MODE` constant ([`crate::AreaLights`], N2d): the value the forward stages
+    /// read from the camera's `occlusion.z`.
+    area_mode: u32,
 }
 
 /// Why the deferred lighting cannot run on a device admitted to Tiered: the frame then
@@ -254,6 +257,7 @@ impl DeferredPass {
         lighting_layout: vk::DescriptorSetLayout,
         extent: vk::Extent2D,
         debug: u32,
+        area_mode: u32,
     ) -> RenderResult<Self> {
         let compute = vk::ShaderStageFlags::COMPUTE;
         // The renderer checked [`unsupported`] before choosing the deferred frame.
@@ -308,7 +312,7 @@ impl DeferredPass {
             shaders,
             classify_layout.handle(),
             light_layout.handle(),
-            debug,
+            [debug, area_mode],
         )?;
         let layout = TileLayout::for_extent(extent);
         let tiles = Self::tile_buffer(device, layout)?;
@@ -337,6 +341,7 @@ impl DeferredPass {
             counts,
             layout,
             debug,
+            area_mode,
         })
     }
 
@@ -359,15 +364,24 @@ impl DeferredPass {
         shaders: &ShaderSource,
         classify_layout: vk::PipelineLayout,
         light_layout: vk::PipelineLayout,
-        debug: u32,
+        [debug, area_mode]: [u32; 2],
     ) -> RenderResult<[GraphicsPipeline; 3]> {
-        // `deferred_light.comp`'s `DEBUG_VIEW` (constant_id 0); `light_classify` has none, and
-        // an unused entry is ignored.
-        let entries = [vk::SpecializationMapEntry::default()
-            .constant_id(0)
-            .offset(0)
-            .size(core::mem::size_of::<u32>())];
-        let data = debug.to_ne_bytes();
+        // `deferred_light.comp`'s `DEBUG_VIEW` (constant_id 0) and `AREA_MODE` (constant_id 1,
+        // N2d); `light_classify` has neither, and unused entries are ignored.
+        let size = core::mem::size_of::<u32>();
+        let entries = [
+            vk::SpecializationMapEntry::default()
+                .constant_id(0)
+                .offset(0)
+                .size(size),
+            vk::SpecializationMapEntry::default()
+                .constant_id(1)
+                .offset(size as u32)
+                .size(size),
+        ];
+        let mut data = [0u8; 8];
+        data[..4].copy_from_slice(&debug.to_ne_bytes());
+        data[4..].copy_from_slice(&area_mode.to_ne_bytes());
         let specialization = vk::SpecializationInfo::default()
             .map_entries(&entries)
             .data(&data);
@@ -418,7 +432,7 @@ impl DeferredPass {
             shaders,
             self.classify_layout.handle(),
             self.light_layout.handle(),
-            self.debug,
+            [self.debug, self.area_mode],
         )
     }
 
@@ -819,15 +833,21 @@ mod tests {
     }
 
     /// The debug views are `deferred_light.comp`'s specialisation constant 0 (the pipelines
-    /// are built with `constant_id` 0 = the view), not a push-constant branch.
+    /// are built with `constant_id` 0 = the view), not a push-constant branch; N2d's area
+    /// mode is constant 1, which the forward stages read from the camera's `occlusion.z`
+    /// (`lighting.glsl`'s `MOBA_AREA_MODE`), both from `LightingConfig::area_lights`.
     #[test]
-    fn debug_views_are_a_specialisation_constant() {
-        // OpDecorate <id> SpecId 0 in both permutations.
+    fn debug_views_and_the_area_mode_are_specialisation_constants() {
+        // OpDecorate <id> SpecId n in both permutations.
         const OP_DECORATE: u32 = 71;
         const SPEC_ID: u32 = 1;
         let light = include_str!("../../../shaders/shaders/deferred_light.comp");
         assert!(light.contains("layout(constant_id = 0) const uint DEBUG_VIEW = 0u;"));
+        assert!(light.contains("layout(constant_id = 1) const uint AREA_MODE = 0u;"));
+        assert!(light.contains("#define MOBA_AREA_MODE AREA_MODE"));
         assert!(!light.contains("push.debug"));
+        let lighting = include_str!("../../../shaders/shaders/include/lighting.glsl");
+        assert!(lighting.contains("#define MOBA_AREA_MODE uint(camera.occlusion.z)"));
         for spirv in [
             moba_shaders::DEFERRED_LIGHT_COMP,
             moba_shaders::DEFERRED_LIGHT_EXTENDED_COMP,
@@ -835,19 +855,32 @@ mod tests {
             let (chunks, _) = spirv.as_chunks::<4>();
             let words: Vec<u32> = chunks.iter().map(|&w| u32::from_le_bytes(w)).collect();
             let mut index = 5;
-            let mut found = false;
+            let mut found = [false; 2];
             while index < words.len() {
                 let count = (words[index] >> 16) as usize;
                 if words[index] & 0xFFFF == OP_DECORATE
                     && count >= 4
                     && words[index + 2] == SPEC_ID
-                    && words[index + 3] == 0
+                    && words[index + 3] < 2
                 {
-                    found = true;
+                    found[words[index + 3] as usize] = true;
                 }
                 index += count.max(1);
             }
-            assert!(found, "SpecId 0 decorated");
+            assert_eq!(found, [true; 2], "SpecId 0 and 1 decorated");
+        }
+        for tier in crate::QualityTier::ALL {
+            let config = crate::LightingConfig::for_tier(*tier);
+            let uniform = crate::lighting::FrameLighting::new(
+                &crate::SceneLighting::DEFAULT,
+                config,
+                1024,
+                None,
+                &crate::lighting::EnvironmentState::NONE,
+            )
+            .with_area_lights(config)
+            .occlusion[2];
+            assert_eq!(uniform, config.area_lights.shader_mode() as f32, "{tier:?}");
         }
     }
 
@@ -957,7 +990,7 @@ mod tests {
     #[allow(clippy::too_many_lines)] // The scene, the reconstruction and the comparison.
     fn forward_and_deferred_visit_the_same_lights() {
         use crate::depth::DepthConvention;
-        use crate::lights::{CELL_WORDS, GRID, LIGHT_VEC4S, MAX_LIGHTS, PointLight};
+        use crate::lights::{CELL_WORDS, GRID, LIGHT_LIST_VEC4S, Light, LightShape};
         use moba_core::math::{Vec3, Vec4};
 
         let (width, height) = (320u32, 180u32);
@@ -978,11 +1011,7 @@ mod tests {
         for centre in [Vec3::new(0.0, 1.0, 0.0), Vec3::new(9.0, 1.0, -6.0)] {
             for _ in 0..30 {
                 let offset = Vec3::new(random() - 0.5, random(), random() - 0.5) * 3.0;
-                lights.push(PointLight::new(
-                    centre + offset,
-                    4.0 + random() * 4.0,
-                    Vec3::ONE,
-                ));
+                lights.push(Light::new(centre + offset, 4.0 + random() * 4.0, Vec3::ONE));
             }
         }
         for _ in 0..180 {
@@ -991,7 +1020,24 @@ mod tests {
                 random() * 3.0,
                 random() * 50.0 - 27.0,
             );
-            lights.push(PointLight::new(position, 2.0 + random() * 10.0, Vec3::ONE));
+            lights.push(Light::new(position, 2.0 + random() * 10.0, Vec3::ONE));
+        }
+        // Every shape (ADR-0023 gate 3): the shapes are binned and early-outed by the same
+        // sphere as points, so the sets must still agree. Small shapes keep the radii.
+        for (index, light) in lights.iter_mut().enumerate() {
+            light.shape = match index % 4 {
+                0 => LightShape::Point,
+                1 => LightShape::Sphere { radius: 0.3 },
+                2 => LightShape::Capsule {
+                    axis: Vec3::new(0.8, 0.1, -0.4),
+                    radius: 0.2,
+                },
+                _ => LightShape::Rect {
+                    normal: Vec3::new(0.0, -1.0, 0.2),
+                    half_width: 0.6,
+                    half_height: 0.4,
+                },
+            };
         }
         // Surface points: the ground (y = 0) and a slope (y = 0.3 x + 1), through pixel
         // centres of a `width` x `height` render with the scene's flipped viewport.
@@ -1026,7 +1072,7 @@ mod tests {
         let mut worst = 0.0_f32;
         for &tier in crate::QualityTier::ALL {
             let config = crate::LightingConfig::for_tier(tier);
-            let mut light_words = vec![[0.0; 4]; MAX_LIGHTS * LIGHT_VEC4S];
+            let mut light_words = vec![[0.0; 4]; LIGHT_LIST_VEC4S];
             let mut cell_words = vec![0u32; GRID * GRID * CELL_WORDS];
             let mut counts = [0u8; GRID * GRID];
             let (params, stats) = crate::lights::bin(
@@ -1038,7 +1084,7 @@ mod tests {
                 &mut cell_words,
                 &mut counts,
             );
-            assert!(stats.binned > 0, "{tier:?}");
+            assert!(stats.binned > 0 && stats.area > 0, "{tier:?}");
             assert!(
                 stats.cell_overflows > 0,
                 "{tier:?}: the clusters overflow a column"

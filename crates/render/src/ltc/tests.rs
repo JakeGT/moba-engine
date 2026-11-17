@@ -5,7 +5,9 @@
 // The reference's (and the maths') single-letter names, kept for side-by-side reading.
 #![allow(clippy::many_single_char_names)]
 
-use super::*;
+use super::twin::*;
+use super::{LTC_LAYER_BYTES, LTC_SIZE, LTC_TABLE};
+use moba_core::math::Vec3;
 
 const PI: f32 = core::f32::consts::PI;
 
@@ -464,5 +466,53 @@ fn the_table_is_well_formed() {
             );
             assert!((0.0..=1.0001).contains(&t2[3]), "{x},{y}: {t2:?}");
         }
+    }
+}
+
+/// The shaders' constants match the Rust ones: the atlas size `ltc.glsl` divides by, the
+/// split-sum LUT's corner of it, and where the shapes start in the light list.
+#[test]
+fn the_shader_constants_match() {
+    let lighting = include_str!("../../../shaders/shaders/include/lighting.glsl");
+    let ltc = include_str!("../../../shaders/shaders/include/ltc.glsl");
+    let [width, height] = super::LUT_ATLAS_EXTENT;
+    assert!(lighting.contains(&format!(
+        "#define MOBA_LUT_ATLAS vec2({width}.0, {height}.0)"
+    )));
+    assert_eq!(
+        width as usize,
+        crate::lighting::BRDF_LUT_SIZE as usize + 2 * LTC_SIZE
+    );
+    assert!(ltc.contains(&format!("#define MOBA_LTC_SIZE {LTC_SIZE}.0")));
+    assert!(lighting.contains(&format!(
+        "#define MOBA_LIGHT_SHAPE_BASE {}u",
+        crate::lights::SHAPE_BASE
+    )));
+}
+
+/// The atlas holds the split-sum LUT at its origin and the two layers side by side, texel
+/// for texel.
+#[test]
+fn the_atlas_holds_both_tables() {
+    let lut = crate::lighting::brdf_lut_tiered();
+    let size = crate::lighting::BRDF_LUT_SIZE as usize;
+    let atlas = super::lut_atlas(lut, size);
+    let width = super::LUT_ATLAS_EXTENT[0] as usize;
+    assert_eq!(atlas.len(), width * LTC_SIZE * 8);
+    let at = |x: usize, y: usize| &atlas[(y * width + x) * 8..(y * width + x) * 8 + 8];
+    for (x, y) in [(0, 0), (31, 31), (5, 17)] {
+        assert_eq!(
+            &at(x, y)[..4],
+            &lut[(y * size + x) * 4..(y * size + x) * 4 + 4]
+        );
+        assert_eq!(&at(x, y)[4..], &[0; 4]);
+    }
+    assert_eq!(at(3, 40), &[0; 8]);
+    for (layer, x, y) in [(0, 0, 0), (0, 63, 63), (1, 0, 0), (1, 63, 63), (1, 17, 42)] {
+        let from = layer * LTC_LAYER_BYTES + (y * LTC_SIZE + x) * 8;
+        assert_eq!(
+            at(size + layer * LTC_SIZE + x, y),
+            &LTC_TABLE[from..from + 8]
+        );
     }
 }

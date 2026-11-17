@@ -39,6 +39,11 @@ vec2 moba_pixel_center;
 // N2c (ADR-0023 §6b): the Tiered BRDF core (multiscatter, the stored F0), and in the
 // extended permutation the other shading models (§6c).
 #define MOBA_TIERED_SHADING
+// N2d (ADR-0023 §4): how shaped lights are lit (`LightingConfig::area_lights`: 0 points, 1
+// the representative point, 2 LTC), the value the forward stages read from the camera's
+// `occlusion.z`. A constant, so Low's pipelines carry no LTC code.
+layout(constant_id = 1) const uint AREA_MODE = 0u;
+#define MOBA_AREA_MODE AREA_MODE
 #ifdef DEFERRED_EXTENDED
 #define MOBA_SHADING_MODELS
 #endif
