@@ -241,11 +241,11 @@ const MATRIX: [(&str, [Cell; 5]); 16] = [
     (
         "Materials",
         [
-            ("multi-layer PBR", Planned(N2)),
-            ("multi-layer PBR", Planned(N2)),
-            ("multi-layer PBR", Planned(N2)),
-            ("multi-layer PBR", Planned(N2)),
-            ("multi-layer PBR", Planned(N2)),
+            ("multi-layer PBR", Built),
+            ("multi-layer PBR", Built),
+            ("multi-layer PBR", Built),
+            ("multi-layer PBR", Built),
+            ("multi-layer PBR", Built),
         ],
     ),
     (

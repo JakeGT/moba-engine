@@ -3,8 +3,10 @@
 **Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-02)). N2a is recorded in
-[Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built) and N2b in
-[Amendment 2](#amendment-2-2026-11-15-n2b-deferred-lighting-for-standard-as-built).
+[Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built), N2b in
+[Amendment 2](#amendment-2-2026-11-15-n2b-deferred-lighting-for-standard-as-built) and N2c, with the
+frozen material spec, in
+[Amendment 3](#amendment-3-2026-11-17-n2c-the-material-model-as-built-and-the-frozen-material-spec).
 Proposed 2026-11-02. This is phase N2 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§3, §4, §5.2, §6.2, §6.6, §8
 and §12), written before the code.
@@ -1353,26 +1355,185 @@ clarifications:
     (`vulkan-probe --json`) do not record them, so an admission test could not hold them;
     they can join `REQUIRED_LIMITS` when the fixtures are re-recorded on #9/#127's devices.
 
-### Amendment 3 (2026-11-16, N2c): the material model as built
+### Amendment 3 (2026-11-17, N2c): the material model as built, and the frozen material spec
 
-<!-- N2C-LEDGER: running list while N2c is built; rewritten before the PR. -->
+N2c builds §6 (the shading models past `STANDARD`, multiscatter, the material table and the
+content format with its Compat fallbacks), §7 (`Paint` decals in the G-buffer), §10's
+`content-check` rules and gate 1's GLSL-vertex / Slang-fragment interface test. It **freezes the
+material spec** (below, and `docs/content-authoring.md`, Materials and textures), which unblocks
+C1. Every departure from §1–§12 is an item here.
 
-1. Content format (§6f) parsed and validated by `moba_assets::MaterialDesc`: `model`, a table
-   named after the model (`[clearcoat]`, `[sheen]`, `[anisotropic]`, `[thin_film]`,
-   `[foliage]`), `ior`, `dust`, `emissive_texture`, `model_texture`, `[transmission]`,
-   `[compat]`. Dielectric F0 above 0.16 is an error (the G-buffer's range).
-2. `model_texture` (linear, per-texel model data in rgb) is added: §6d's record lists a
-   model-texture handle that §6f did not name.
-3. Compat collapse: `MaterialDesc::compat_fallback()`; the UBO of every textured material is
-   built from it (identical for `STANDARD` content).
-4. Emissive mask in `metallic_roughness.b` on both paths only when the texture has a third
-   channel (BC7/RGBA8); BC5/RG8 maps keep a full mask.
-5. Multiscatter and the stored F0 (`MOBA_TIERED_SHADING`) on every Tiered lighting module,
-   forward and deferred; Compat expansion unchanged (SPIR-V byte-identical).
-6. Per-material style overrides stay out of the tiered frame (corrects amendment 2 item 9's
-   "N2c's material table carries them": §6b removes stylisation from Tiered).
-7. Alpha cutoff: no key and no record word (no shipped cutout material); reserved.
-8. Dust colour is a constant (ash) until a map has a dust colour.
+**The frozen material spec** (C1's contract, §10). A change to any of this from now on is an
+amendment that names C1's consequence.
+
+- **Descriptor:** `<root>/materials/<model>.toml`, at most 4 KiB, unknown keys rejected, every
+  number range-checked. The ADR-0010/0011 keys are unchanged. The material-model keys, all
+  optional and for `shader = "textured"` only:
+
+  | Key | Range (default) | Meaning |
+  |---|---|---|
+  | `model` | one of §6c's eight names, `thin_film` and `transmissive` spelled so (`standard`) | the shading model |
+  | `ior` | 1..=2.5 (1.5) | dielectric F0 = `((ior − 1)/(ior + 1))² × specular`; above 0.16 is an error |
+  | `dust` | 0..=1 (0) | world-space dust on up-facing surfaces, Tiered only |
+  | `emissive_texture` | a texture name | full-colour emissive, sRGB `bc7-srgb`/`rgba8-srgb`, times `emissive`, Tiered only |
+  | `model_texture` | a texture name | linear `bc7`/`rgba8`; R, G and B scale the model's three data channels per texel (thin film: R picks the thickness between min and max), Tiered only |
+  | `[clearcoat]` | `weight` 0..=1 (1), `roughness` 0..=1 (0) | `KHR_materials_clearcoat` |
+  | `[sheen]` | `weight` 0..=1 (1), `roughness` 0..=1 (0.5), `tint` 0..=1 (0 white, 1 base colour) | `KHR_materials_sheen` |
+  | `[anisotropic]` | `strength` 0..=1 (0.5), `rotation` −π..=π rad (0) | `KHR_materials_anisotropy`, angle in the normal's basis |
+  | `[thin_film]` | `thickness_min`, `thickness_max` 100..=400 nm (100, 400; max ≥ min), `ior` 1..=2 (1.3) | `KHR_materials_iridescence` |
+  | `[foliage]` | `translucency` 0..=1 (0.35) | `KHR_materials_diffuse_transmission` |
+  | `[transmission]` | `transmission` 0..=1 (1), `thickness` 0..=10 m (0), `attenuation_color` 0..=1 (white), `attenuation_distance` 0.001..=1000 m (infinite) | `model = "transmissive"` only; parsed now, drawn by N2f |
+  | `[compat]` | `base_color_factor`, `metallic`, `roughness` 0..=1; `emissive` 0..=16 | overrides of the Compat fallback |
+
+  A model table that is not the material's model is an error, as is any model key on a
+  `vertex-color` material.
+- **The emissive mask** is `metallic_roughness.b`, on both paths, when the bound map has a third
+  channel (`bc7` or `rgba8`, `moba_assets::has_emissive_mask`); a `bc5`/`rg8` map keeps the
+  full emissive. `metallic_roughness` therefore accepts `bc7` and `rgba8` as well as `bc5`/`rg8`.
+- **The Compat fallback** is `MaterialDesc::compat_fallback()`, computed at load, then the
+  `[compat]` overrides:
+
+  | Model | Compat (and the forward Tiered frame) draws |
+  |---|---|
+  | `standard`, `sheen`, `foliage`, `transmissive` | the base as it is (`transmissive`: opaque, with the emissive mask) |
+  | `clearcoat` | roughness `mix(base, coat, 0.5 × weight)` |
+  | `anisotropic` | isotropic GGX at `sqrt((α + α_t) / 2)`, `α_t = mix(α, 1, strength²)` |
+  | `thin_film` | base colour × the film's Fresnel at normal incidence (at `thickness_max`) over its F0, per channel, clamped to 0..=1 |
+  | `unlit` | base colour 0, metallic 0, painted specular and rim 0, the emissive |
+
+- **`content-check` rules** (both evaluators, gate 8): the collapsed values are finite and in
+  range; an `unlit` material has a non-zero Compat emissive and no `model_texture`; an
+  `emissive_texture` with a non-zero `emissive` on a lit model has the mask or a
+  `[compat] emissive`. Every descriptor under `materials/` and one level of subdirectories is
+  checked, named by a unit or not (`moba_assets::check_material_dir`). The report counts the
+  units' materials per model: text `models     standard 1`, JSON `"material_models"`.
+- **The record and the table** (Tiered only): `MaterialRecord`, 64 bytes, as
+  `shaders/slang/lib/material.slang`; 64 records (`MAX_MATERIALS`), host-written at load.
+
+**Items.**
+
+1. **`model_texture` is added** (§6d lists a model-texture handle that §6f did not name).
+2. **The emissive mask is read on Compat now**, not from C1 (§10): `unit_textured.frag`'s
+   SPIR-V changes. No Compat pixel moves for content whose `metallic_roughness` has two
+   channels, which is all shipped content but the N2c samples (gate 5, measured below).
+3. **The Compat collapse is computed at load** by `compat_fallback()` and fills the UBO of
+   every textured material; `STANDARD`'s is its own factors (a unit test). Departures from §10's
+   table: `THIN_FILM`'s tint is computed there, not baked into the albedo by `content-check`;
+   `FOLIAGE` on a unit material is the base under the unit shader (the map's foliage keeps
+   `foliage.frag`); `UNLIT` is a black dielectric plus its emissive, so Compat still adds the
+   0.04 specular of a black base: Compat's `shade()` has no unlit branch, and adding one would
+   move Compat SPIR-V for every textured unit. C1 adds it.
+4. **`specular` is reused.** It is ADR-0011's painted-specular scale on Compat and
+   `KHR_materials_specular`'s factor in Tiered's F0 (§6b): one key, as §6f lists it. Content
+   that sets it for the painted highlight also scales its Tiered F0.
+5. **`deferred_light` stays GLSL** (§6d's `deferred_light.slang` with `IShadingModel` generics
+   is not built, as amendment 2 item 1 began). The models past `STANDARD` are
+   `include/shading_models.glsl`, compiled only into `deferred_light_extended.comp`
+   (`MOBA_SHADING_MODELS`), with a `switch` on the model; `shade()` calls `model_direct` per
+   light and `model_ambient` once, so a `STANDARD` pixel in an extended tile shades as in a
+   standard one.
+6. **The first Slang fragment stage is the textured units' G-buffer stage**
+   (`slang/unit_material_gbuffer.slang`, four permutations: plain, `PREPASS_IDS`,
+   `GBUFFER_HDR`, both), behind the GLSL `unit_textured_gbuffer.vert` and
+   `skinned_textured_gbuffer.vert`. Vertex-colour units, terrain, walls, props, foliage and the
+   forward Tiered frame stay GLSL. The interface test
+   (`glsl_vertex_and_slang_fragment_interfaces_match`) reflects both stages' SPIR-V: every
+   location the fragment reads is written by the vertex stage with the same type, integer
+   inputs are `Flat`, and the fragment reads at least locations 0, 1, 3, 4, 14 and 15 (13 in the
+   `_ids` permutations). Slang strips unread varyings, so the test does not require equal sets.
+7. **Bindless materials.** The material table is read by device address; the draw's material
+   index is a push constant (`MaterialPush`, 32 bytes: the vertex stage's 16-byte skin words,
+   the table address, the index, a reserved word), **per mesh, not per instance** (§6d): a
+   material belongs to a model today (item 20's gap). Textures are `BindlessTable` handles in
+   set 2 of the stage's layout (samplers at binding 0, textures at binding 2). The material
+   sampler is bindless sampler slot 12 (`MATERIAL_SAMPLER`, after the 12-entry palette): the
+   Compat `Materials` sampler (repeat, trilinear, the tier's anisotropy). Empty slots point at
+   the default textures (white, flat, metallic 0 / roughness 1, full mask, white emissive and
+   model data). Only the textured units read the table.
+8. **The record has no alpha cutoff and no style words.** No shipped material is a cutout
+   (reserved for when one is); per-material wrap, rim and ramp stay off Tiered (§6b), which
+   corrects amendment 2 item 9's "N2c's material table carries them".
+9. **Multiscatter and the stored F0** (`MOBA_TIERED_SHADING`) are in every Tiered lighting
+   module, forward and deferred; Compat's expansion is unchanged (its SPIR-V is byte-identical
+   but for item 2).
+10. **Tiered gets its own split-sum LUT and an extrapolating fetch** (§6b said no new LUT).
+    With the 128-sample LUT and a fetch clamped at the last row's centre, the `E_ss` read near
+    roughness 1 was far enough from the lobe's integral that the white furnace read 0.93.
+    Tiered bakes the same `(A, B)` table with 1024 samples (`brdf_lut_tiered`), and
+    `brdf_lut_sample` reads past the last roughness row's centre by linear extrapolation from
+    the last two rows instead of clamping. Compat keeps its 128-sample table and fetch. **C1 must
+    adopt both** when it brings multiscatter to Compat, or its furnace will fail the same way.
+    Gate 3's furnace is a CPU model of the shader's fetch (below).
+11. **`FOLIAGE` and `TRANSMISSIVE_FALLBACK` are lit in the standard tiles** (reverses amendment 2
+    item 10). The foliage's back light needs no model code beyond `STANDARD`'s, and the map's
+    foliage covers much of the frame: in the extended class it pushed gate 7 to 1.108× at Low.
+    The extended class is now only `CLEARCOAT`, `SHEEN`, `ANISOTROPIC` and `THIN_FILM`.
+12. **The roughness floor** (`MOBA_MIN_ROUGHNESS`, 0.045) applies to every lobe, the coat's
+    included.
+13. **The dust colour is a constant** (ash, `(0.30, 0.28, 0.25)`) until a map has a dust colour.
+14. **`UNLIT` is unfogged** on both Tiered frames: the deferred pass leaves its `hdr` (amendment 2
+    item 6) and the forward Tiered frame writes the emissive alone, before height fog.
+15. **No scalarised light loop yet** (amendment 2 item 5 stands).
+16. **G-buffer decals as built** (departs from §7a):
+    - **GLSL** (`decal_gbuffer.vert`, `decal_gbuffer.frag`), sharing `decals.glsl` with the
+      forward path, not a Slang port.
+    - **The receivers are the terrain only.** Foliage is drawn after the decals, in the rest, as
+      the forward frame draws grass over the terrain's inlined decals. The passes are
+      `prepass` (receivers; the lane keeps N2b's name), `gbuffer_decals` and `gbuffer_rest`.
+    - **Depth is sampled, not attached.** The pass has no depth attachment and depth is in
+      `SHADER_READ_ONLY_OPTIMAL` for it; it reconstructs the ground from depth and tests
+      nothing.
+    - **Base colour only**, blended `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` into `gb0`'s sRGB view,
+      so the blend is linear as in the forward `apply_paint_decals`; the write mask is RGB, so
+      `gb0.a` (metallic) is kept. `gb0` gains
+      `MUTABLE_FORMAT` with a two-format list (UNORM, sRGB). `gb1.b` (roughness) is not
+      blended: the forward path changes only albedo, and gate 2 compares with it. So
+      `independentBlend` is not needed for decals.
+    - **The 32 × 32 grid is still read per fragment.** A pixel is shaded only when its forward
+      grid cell lists the decal, so a decal clips where the forward terrain clips it. Without
+      it, splat droplets outside their cell drew in deferred only (teamfight parity max 28/255).
+      The grid bins a decal by its radius, so droplets past it are clipped at cell edges on both
+      paths: a known R3b limit, kept so the two frames agree.
+    - **No culling and no depth test; front faces terminate**, so each covered pixel blends
+      once, with the camera inside a box too.
+    - **`terminateInvocation`, not `discard`**: glslc maps `discard` to
+      `OpDemoteToHelperInvocation` under SPIR-V 1.6, which validation rejects without the
+      demote feature.
+    - `Glow` decals in the same buffer are skipped (they are N1's overlay, §7b).
+    - `MOBA_DECALS=off` (§11) keeps one G-buffer pass, as in N2b, and no sRGB view on `gb0`.
+17. **The graph's largest tiered topology is 41 resources** (of `MAX_RESOURCES` 48; no `u128`
+    mask). The frame log has the lanes `prepass`, `gbuffer_decals` and `gbuffer_rest` (38
+    lanes in all).
+18. **Samples and the sheet.** `content/materials/samples/` holds one material per model
+    (textures `material-sample-*`, baked by `texture-bake generate material-sample`; the MR and
+    model maps are `rgba8`, so the mask is exercised). `MOBA_MATERIAL_SHEET=<set>` draws one
+    sphere per descriptor in `materials/<set>/` (client-only instances, at most 16). The tiered
+    goldens gain `materials` (the sheet) and `decals` (the teamfight replay).
+19. **Not built in N2c** (still in §6f's scope): the `mesh-bake`/glTF importer's mapping of
+    `KHR_materials_*` to these keys. One material per model (item 7) leaves nowhere to put a
+    glTF file's per-primitive materials, so the mapping waits for multi-material models
+    (item 20).
+20. **Art-slice gaps** (art-source `PIPELINE.md` §6 and `export/structures/HOOKS.md`):
+    - **Closed:** the emissive slot (`emissive_texture`, and the mask in `metallic_roughness.b`;
+      an asset whose MR is `bc5` must bake it as `bc7`/`rgba8` to carry the mask, or use
+      `emissive_texture` with a `[compat] emissive`); the dust part of weathering (`dust`).
+    - **Open, with owners:**
+      - **Weathering masks** on a second UV (the structures' unique masks): need `TEXCOORD_1`
+        (ADR-0007's vertex format) and a material key; a later ADR-0023 amendment with the
+        asset track.
+      - **`TEXCOORD_1`:** ADR-0007 (the loader and the vertex layout).
+      - **One material per model** (`<asset>-glass`, `-emit`, `-crystal` slots): the loader's
+        per-primitive split plus item 19; an asset-track (ADR-0007) change, needed before N2f
+        can draw a model's glass slot.
+      - **Props cannot take a material:** the map-visuals descriptor (ADR-0014); the material
+        table can index them once it has a per-instance index.
+      - **VAT has no faction key:** ADR-0012.
+      - **Terrain import and wall tiling** (walls stretch `wall_mesh` along a segment):
+        ADR-0014.
+      - **FX hooks:** ADR-0013.
+      - **N6's wetness** (§6a): N6.
+
+**Gates.** (filled from the measurements)
 
 ## Corrections to the roadmap
 

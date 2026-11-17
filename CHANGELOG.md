@@ -140,6 +140,31 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **The material model on Tiered (ADR-0023 N2c and amendment 3;
+  [perf/0037](docs/perf/0037-n2c-materials.md)); the material spec is frozen for C1:**
+  - **Shading models:** `CLEARCOAT`, `SHEEN`, `ANISOTROPIC` and `THIN_FILM` lit with their own
+    lobes in `deferred_light`'s extended tiles (`include/shading_models.glsl`); `FOLIAGE` and
+    `TRANSMISSIVE_FALLBACK` moved to the standard tiles; `UNLIT` is the emissive alone. Every
+    Tiered lighting module adds multiscatter energy compensation and the material's dielectric
+    F0, with a 1024-sample split-sum LUT and an extrapolating fetch (white furnace within 2 %).
+  - **Material table and bindless materials:** textured units are written into the G-buffer by
+    `unit_material_gbuffer.slang`, the first Slang fragment stage, which reads 64-byte
+    `MaterialRecord`s by device address and bindless textures; a reflection test pins the
+    record and the push block, and an interface test checks the GLSL vertex stages' outputs
+    against the Slang fragment's inputs.
+  - **Content format:** `model` with a table of its parameters, `ior`, `dust`,
+    `emissive_texture`, `model_texture`, `[transmission]` and `[compat]`; the emissive mask in
+    `metallic_roughness.b` (a 3- or 4-channel map) on both paths; each model's Compat fallback
+    (`MaterialDesc::compat_fallback`). `content-check` checks every descriptor under
+    `materials/` against both evaluators and reports `material_models`.
+    `content/materials/samples/` has one material per model, and `MOBA_MATERIAL_SHEET=samples`
+    draws them as a sphere sheet.
+  - **G-buffer decals:** the G-buffer pass is split into `prepass` (the terrain),
+    `gbuffer_decals` (`Paint` decals blended into `gb0` from the sampled depth) and
+    `gbuffer_rest`; new frame-log lanes `gpu_gbuffer_decals` and `gpu_gbuffer_rest`.
+  - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
+    (PARITY); Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the
+    emissive mask, which no shipped material has). On the RTX 5070 Ti the frame is PERF.
 - **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
   [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
   Compat is byte-identical (its images; every Compat SPIR-V module but `sky.frag`, whose body

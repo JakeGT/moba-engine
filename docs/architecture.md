@@ -175,7 +175,15 @@ reconstructs each pixel's position from depth and shades it with the forward `sh
 G-buffer pass draws the sky's radiance, and on Low/Medium a `simple_water` pass draws the
 simple water. Refracting water and the transparents follow as before.
 `MOBA_DEFERRED=off` runs N1's forward frame, and `scripts/deferred-parity.sh` holds the two
-to ADR-0023's parity gate. Depth on Tiered is **reversed-Z**: cleared to 0, tested `GREATER_OR_EQUAL`, with a
+to ADR-0023's parity gate. Since N2c (amendment 3) the G-buffer pass is three passes:
+`prepass` (the terrain, the decals' receivers), `gbuffer_decals` (each `Paint` decal's box,
+blended into `gb0`'s sRGB view from the sampled depth) and `gbuffer_rest` (units, walls,
+props, minions, foliage, sky). Textured units are written by a Slang fragment stage that reads
+the **material table** (64-byte `MaterialRecord`s by device address, the draw's index in the
+push constants) and bindless textures, and encodes one of ADR-0023 §6c's eight shading models;
+`deferred_light`'s extended permutation lights the models with their own lobes
+(`include/shading_models.glsl`), and every Tiered lighting module adds multiscatter and the
+material's F0. Compat draws each material's fallback (`MaterialDesc::compat_fallback`). Depth on Tiered is **reversed-Z**: cleared to 0, tested `GREATER_OR_EQUAL`, with a
 finite far plane. The reversal is applied only where matrices reach the GPU
 (`crates/render/src/depth.rs`), and shadow maps stay forward. `temporal` then upscales to
 output resolution, the post chain runs there, and the gameplay overlay draws after it.

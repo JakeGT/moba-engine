@@ -240,7 +240,7 @@ impl MaterialData {
 
 /// `MaterialBlock` in `shaders/include/material.glsl` (std140, 80 bytes).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 struct MaterialParamsGpu {
     base_color_factor: [f32; 4],
     params: [f32; 4],
@@ -924,6 +924,65 @@ mod tests {
         assert_eq!(styled.emissive[3], 2.0);
         assert_eq!(material.texture(TextureSlot::Mask), Some(TextureId(3)));
         assert_eq!(material.texture(TextureSlot::Normal), None);
+    }
+
+    /// ADR-0023 verification gate 8: each shading model's sample material
+    /// (`content/materials/samples/`, the material sheet's) loads and builds its Compat
+    /// parameter block from its Compat fallback, in range and finite; `STANDARD`'s block is
+    /// its own factors' (Compat pixels unchanged for `STANDARD` content).
+    #[test]
+    fn every_sample_material_loads_on_compat() {
+        use moba_assets::{MaterialDesc, ShadingModel};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/materials/samples");
+        let mut models = Vec::new();
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the sample set")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "toml")
+                    && path.file_stem().is_some_and(|stem| stem != "provenance")
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            let desc = MaterialDesc::load_file(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let model = desc.shading_model();
+            let fallback = desc
+                .check_evaluators(true)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            assert_eq!(fallback, desc.compat_fallback());
+            let block = MaterialParamsGpu::from(&MaterialData::from_desc(&desc), true);
+            let floats = [
+                block.base_color_factor,
+                block.params,
+                block.emissive,
+                block.style,
+                block.specular_tint,
+            ];
+            assert!(floats.iter().flatten().all(|value| value.is_finite()));
+            assert_eq!(block.base_color_factor, fallback.base_color_factor);
+            assert_eq!(block.params[..2], [fallback.metallic, fallback.roughness]);
+            assert_eq!(block.emissive[..3], fallback.emissive);
+            let flags = block.style[3] as u32;
+            assert_eq!(
+                flags & super::MATERIAL_FLAG_UNLIT != 0,
+                model == ShadingModel::Unlit
+            );
+            if model == ShadingModel::Unlit {
+                assert!(block.emissive[..3].iter().any(|&value| value > 0.0));
+            }
+            if model == ShadingModel::Standard {
+                let mut plain = MaterialData::from_desc(&desc);
+                plain.compat = None;
+                assert_eq!(MaterialParamsGpu::from(&plain, true), block, "{model:?}");
+            }
+            models.push(model);
+        }
+        models.sort_by_key(|model| model.gbuffer_id());
+        models.dedup();
+        assert_eq!(models, ShadingModel::ALL);
     }
 
     /// The record's model word: the model data as UNORM8 channels (§6c), the G-buffer

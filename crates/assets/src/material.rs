@@ -1282,14 +1282,16 @@ impl MaterialDesc {
                 .all(|&value| in_range(value, 0.0, 16.0))
         {
             return Err(MaterialError::Invalid(
-                "the Compat fallback leaves its range (base colour, metallic and roughness                  0..=1, emissive 0..=16)",
+                "the Compat fallback leaves its range (base colour, metallic and roughness \
+                 0..=1, emissive 0..=16)",
             ));
         }
         let lit = |emissive: [f32; 3]| emissive.iter().any(|&value| value > 0.0);
         if self.shading_model() == ShadingModel::Unlit {
             if !lit(compat.emissive) {
                 return Err(MaterialError::Invalid(
-                    "an unlit material draws its emissive alone: Compat's emissive is zero, so it is black there",
+                    "an unlit material draws its emissive alone: Compat's emissive is zero, so it \
+                     is black there",
                 ));
             }
             if self.texture(TextureSlot::Model).is_some() {
@@ -1305,7 +1307,9 @@ impl MaterialDesc {
             && !emissive_mask
         {
             return Err(MaterialError::Invalid(
-                "emissive_texture needs an emissive mask (a 3- or 4-channel                  metallic_roughness) or a [compat] emissive: Compat ignores the texture and                  would glow over the whole surface",
+                "emissive_texture needs an emissive mask (a 3- or 4-channel metallic_roughness) \
+                 or a [compat] emissive: Compat ignores the texture and would glow over the \
+                 whole surface",
             ));
         }
         Ok(compat)
