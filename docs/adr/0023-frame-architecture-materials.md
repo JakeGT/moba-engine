@@ -1863,21 +1863,25 @@ item here.
     sphere, a capsule and a rect light over open ground at the material sheet's spot, the
     scene gate 2, the `ltc` golden and gate 7's area-light rows use.
 
-14. **LTC at High is over gate 7 where large shaped lights cover the screen** (departs from
-    §9b's 1.10×, on a scene the gate was not defined on). On the area-light sheet (item 13:
+14. **Gate 7 is not met with LTC at High where large shaped lights cover the screen, and
+    the levers were not tried** (departs from §9b's 1.10×). On the area-light sheet (item 13:
     three lights each covering a few metres of ground, on every frame) LTC costs +0.046 ms
     (far camera) and +0.049 ms (close) over the same lights as points, all in
-    `deferred_light`: the frame is 1.143× and 1.158× N1's (which has no light there), about
-    1.13× and 1.14× an estimate of N1 drawing them as point lights. The representative point
-    costs +0.007–0.008 ms at High and +0.004 ms at Low (1.082× N1 at Low). The teamfight,
-    the replay the gate is defined on, meets it at every preset. The amendment 3 levers (the
-    scalarised loop, the terrain without decal code per frame, `light_classify` folded in)
-    were not tried: the teamfight met its budget without them, and they act on the whole
-    pass rather than on LTC's per-pixel arithmetic. Levers that would act on it (LTC only
-    within a light's inner radius, or a lower area mode at High) are not measured. Until
-    then, an effect's shaped light should stay small or short-lived, as the bolts are; a
-    map or effect that keeps large shaped lights on screen should be timed against this
-    item before it ships.
+    `deferred_light`. Against an estimate of N1 drawing the lights as points (N1's frame of
+    the view plus the points' +0.010 ms; not a measurement) the frame is about 1.126× far
+    and 1.140× close, **over by about 0.018 and 0.026 ms** (1.143× and 1.158× N1's frame
+    without the lights, over by 0.029 and 0.037 ms). N2e and N2f have no headroom on this
+    scene at High. The cost mixes LTC's arithmetic on the pixels the shapes reach with the
+    LTC pipeline's occupancy on every pixel (117 registers against mode 0's 74; 0.009 ms of
+    `deferred_light` at 1280×720 on the teamfight, item 10); the split at 1920×1080 is not
+    measured. The representative point costs +0.007–0.008 ms at High and +0.004 ms at Low
+    (Low 1.082× N1). The teamfight, the replay the gate is defined on, meets it at every
+    preset. Untried: amendment 3's levers (the scalarised loop, the terrain without decal
+    code per frame, `light_classify` folded in), which act on the whole pass and so on the
+    occupancy share, and for the arithmetic LTC only within a light's inner radius or a
+    lower area mode at High. Until one is measured, an effect's shaped light should stay
+    small or short-lived, as the bolts are, and a map or effect that keeps large shaped
+    lights on screen should be timed against this item before it ships.
 
 **Gates** ([perf/0038](../perf/0038-n2d-area-lights.md)):
 
@@ -1913,7 +1917,7 @@ item here.
     N2f's amendment 3 budgets: Low 0.0134, High 0.0123.
   - **The extended-model check** (the close material sheet at High): +0.001 ms over N2c on
     p50 (+0.007 on p95), so amendment 3's 0.005 ms becomes about 0.004 ms.
-  - **The area-light sheet:** item 14. Not met at High with LTC.
+  - **The area-light sheet:** not met at High with LTC, levers untried (item 14).
 
 ## Corrections to the roadmap
 

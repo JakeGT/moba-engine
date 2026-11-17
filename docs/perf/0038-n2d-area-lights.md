@@ -32,7 +32,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | 2. Deferred–forward parity | **Met** locally at 1280×720 on lavapipe, with the area-light sheet as a fifth scene lit with LTC on both paths: worst pixel 3, 3, 3, 6 and 3/255 (default, default without the sky, river, teamfight, area-light sheet), at least 99.999 % within 2/255; the same with `MOBA_PAINT_DECAL_PASS=1`, and on the RTX 5070 Ti |
 | 3. LTC | **Met** (the CPU twin of `ltc.glsl`): each shape within a recorded tolerance of a Monte Carlo reference (worst evaluation, diffuse and specular: sphere 0.058, 0.0002, 0.099; capsule 0.145, 0.042, 0.056; rect 0.116, 0.002, 0.105); `RGBA16F` kept (rounding ≤ 4.9e-4); a shrinking sphere tends to the point light (2.4e-4 diffuse, 6.6e-4 specular); the forward and deferred loops visit the same shaped lights; the white furnace unchanged (0.9861) |
 | 5. Goldens | **Met.** Compat byte-identical to `fa661a7` (11 scenes) and its SPIR-V unchanged; all fourteen tiered goldens two-run identical, the new `ltc` and `fsr3-ltc` among them; exact hashes from CI (only `decals` and `fsr3-decals` moved, the teamfight's bolts now being capsules) |
-| 7. Performance (≤ 1.10× N1) | **Met on the teamfight, every preset:** GPU total 1.020–1.067× `ab42718` (span 1.036–1.082×); N2d's budget met on p50 (+0.002 ms at Low, +0.004 at High; amendment 3: 0.005 and 0.008), +0.010–0.011 on p95 at High; Compat 1.003×; least headroom after N2e and N2f's budgets Tiered High, 0.0123 ms. Extended-model check +0.001 ms. **Not met on the area-light sheet at High:** LTC costs +0.046 ms (far) and +0.049 ms (close) over the same lights as points, 1.143× and 1.158× N1 (about 1.13× and 1.14× an estimate of N1 drawing the lights); Low (the representative point) 1.082×. Recorded in amendment 4 |
+| 7. Performance (≤ 1.10× N1) | **Met on the teamfight, every preset:** GPU total 1.020–1.067× `ab42718` (span 1.036–1.082×); N2d's budget met on p50 (+0.002 ms at Low, +0.004 at High; amendment 3: 0.005 and 0.008), +0.010–0.011 on p95 at High; Compat 1.003×; least headroom after N2e and N2f's budgets Tiered High, 0.0123 ms. Extended-model check +0.001 ms. **Not met on the area-light sheet at High, with the levers untried:** LTC costs +0.046 ms (far) and +0.049 ms (close) over the same lights as points; about 1.126× and 1.140× an estimate of N1 drawing the lights (over by 0.018 and 0.026 ms; 1.143× and 1.158× N1's frame without them); how much is occupancy and how much arithmetic is not measured; N2e and N2f have no headroom there. Low (the representative point) 1.082×. Amendment 4 item 14 |
 | Validation | **Met:** 0 messages on lavapipe and on the RTX 5070 Ti (36 captures, both pipelines of the per-frame choice) |
 
 ## Gate 3: LTC against Monte Carlo
@@ -207,26 +207,35 @@ at their centres) is the frame the feature is measured against. Two runs:
 `areaoffsheet-low`; p95 moves with p50 in every row, within 0.003 ms.)
 
 - **The feature's cost is LTC minus off: +0.046 ms far and +0.049 ms close at High**, all of
-  it in `deferred_light` (0.065 → 0.111 ms far). It is LTC's arithmetic on the pixels inside
-  the three lights' radii (two quad integrals and a sphere's cubic per light per pixel), not
-  the registers: the mode-0 pipeline ran every off frame, and the LTC pipeline costs the
-  teamfight's frames without a shaped light nothing (above). The representative point costs
-  +0.007–0.008 ms at High and +0.004 ms at Low. Off itself is the three point lights the
-  baselines do not have: +0.010–0.011 ms over N2c.
-- **Against 1.10× N1** (`r1/gate7/`): N1 0.665 far and 0.632 close. The LTC sheet at High is
-  **1.143× N1 far and 1.158× close**, against N1 without the lights; against an estimate of N1
-  drawing them as points (N1 plus off's +0.010) it is about 1.126× far and 1.140× close.
-  **This is over gate 7's 1.10×**, and is recorded as an amendment 4 item. Low (the
-  representative point) is 1.082× N1 without the lights, and the point mode at High 1.081×:
-  both within.
+  it in `deferred_light` (0.065 → 0.111 ms far). Two causes are mixed in it, and **the split
+  is not measured**: LTC's arithmetic on the pixels inside the three lights' radii (two quad
+  integrals and a sphere's cubic per light per pixel), and the LTC pipeline's occupancy on
+  every pixel of the pass (117 registers against the mode-0 pipeline's 74, which ran every
+  off frame). The probe that ran the LTC pipeline on every teamfight frame, where almost no
+  pixel is inside a shaped light, put the occupancy alone at 0.009 ms of `deferred_light` at
+  1280×720 ("How the cost was recovered"); it was not measured at 1920×1080 (with the lights
+  culled out of view the frame switches to the mode-0 pipeline). The representative point
+  costs +0.007–0.008 ms at High and +0.004 ms at Low. Off itself is the three point lights
+  the baselines do not have: +0.010–0.011 ms over N2c.
+- **Against 1.10× N1** (`r1/gate7/`): N1 cannot draw the lights, so, as N2c's
+  extended-model check did, the criterion is an estimate of N1 drawing them, here as point
+  lights: N1's frame of the same view (0.665 ms far, 0.632 close) plus what the three point
+  lights cost the branch (off − N2c, +0.010), so 0.675 and 0.642 ms. The estimate is not a
+  measurement. **The LTC sheet at High is about 1.126× it far and 1.140× close (1.143× and
+  1.158× N1's frame without the lights): over gate 7's 1.10× by about 0.018 ms far and
+  0.026 ms close** (0.029 and 0.037 ms against N1 without the lights). It is recorded as
+  amendment 4 item 14, with the levers below untried. Low (the representative point) is
+  1.082× N1's frame without the lights, and the point mode at High 1.081×: both within.
+  N2e and N2f have no headroom on this scene at High.
 - **Per light:** the sheet's three lights each cover a few metres of open ground at both
-  cameras, so about 0.015 ms per large shaped light on screen at 1920×1080. The teamfight's
+  cameras, so about 0.015 ms per large shaped light on screen at 1920×1080, both causes
+  together. The teamfight's
   bolts (radius 0.06 m, on 11 % of its frames) cost +0.010 ms of p95 at High.
-- **The levers left** (not tried, "How the cost was recovered"): the scalarised light loop
-  and folding `light_classify` act on the whole pass, not on LTC's per-pixel work; the
-  levers that would act on it are LTC only within a shaped light's inner radius (the
-  representative point outside it), one integral for the diffuse of a small shape (the
-  sphere's form factor is already analytic), or a lower area mode at High. None is measured.
+- **The levers left, none tried or measured:** amendment 3's (the scalarised light loop,
+  the terrain without decal code per frame, `light_classify` folded into the dispatch;
+  "How the cost was recovered"), which act on the whole pass and so on the occupancy share;
+  and, for the arithmetic, LTC only within a shaped light's inner radius (the representative
+  point beyond it) or a lower area mode at High.
 
 ## How the cost was recovered
 
@@ -262,9 +271,9 @@ of GPU total against `fa661a7`, although only 11 % of its frames hold a shaped l
 - **The amendment 3 levers were not tried:** the scalarised light loop (amendment 2 item 5);
   the terrain without decal code on frames without a live `Paint` decal (the teamfight has
   about 3.3 per frame, so it would rarely run there); `light_classify` (0.005 ms) folded into
-  the dispatch. The teamfight met the budget without them; on the area-light sheet the cost
-  is LTC's arithmetic on the pixels the shapes reach (below). They stay open for N2e and
-  N2f; what they would recover on the area-light sheet is not measured.
+  the dispatch. The teamfight met the budget without them; the area-light sheet does not
+  meet gate 7 at High (above), and what they would recover there is not measured. They stay
+  open for N2e and N2f.
 
 ## Register counts on the RTX 5070 Ti
 

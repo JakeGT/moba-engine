@@ -46,8 +46,8 @@ pub(crate) const MAX_LIGHT_COLOR: f32 = 256.0;
 /// reflection ray) and Compat as a point at the light's position; every shape has the same
 /// total power as the point light of the same colour, so a shaped light is never brighter or
 /// dimmer overall, only spread out. Lengths are metres; a shape is sanitised with its light
-/// (non-finite or negative sizes make it a point, sizes are clamped to
-/// [`MAX_LIGHT_SHAPE`]), and the light's radius is raised to cover it.
+/// (a non-finite size or one under 1 mm makes it a point, and sizes are clamped to 16 m),
+/// and the light's radius is raised to cover it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub enum LightShape {
