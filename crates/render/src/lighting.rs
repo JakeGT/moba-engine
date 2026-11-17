@@ -616,7 +616,12 @@ fn orthographic(radius: f32, far: f32) -> Mat4 {
 
 /// Edge of the split-sum BRDF LUT (`R16G16_SFLOAT`, 4 KiB).
 pub(crate) const BRDF_LUT_SIZE: u32 = 32;
+/// Samples per texel of Compat's LUT (unchanged: Compat's pixels are frozen until C1).
 const BRDF_LUT_SAMPLES: u32 = 128;
+/// Samples per texel of Tiered's LUT (N2c, ADR-0023 amendment 3): the multiscatter
+/// compensation divides by the LUT's albedo, so its noise (about 3 % at 128 samples on rough
+/// lobes) would show in the white furnace; 1024 keeps it below 0.5 %.
+const BRDF_LUT_TIERED_SAMPLES: u32 = 1024;
 
 fn radical_inverse(bits: u32) -> f32 {
     bits.reverse_bits() as f32 * (1.0 / 4_294_967_296.0)
@@ -664,15 +669,79 @@ pub(crate) fn integrate_brdf(n_dot_v: f32, roughness: f32, samples: u32) -> (f32
 
 /// The LUT texels, `R16G16_SFLOAT` row-major: `u` = N·V, `v` = roughness (texel centres).
 pub(crate) fn brdf_lut() -> Vec<u8> {
-    let mut bytes = Vec::with_capacity((BRDF_LUT_SIZE * BRDF_LUT_SIZE * 4) as usize);
-    for row in 0..BRDF_LUT_SIZE {
-        let roughness = (row as f32 + 0.5) / BRDF_LUT_SIZE as f32;
-        for column in 0..BRDF_LUT_SIZE {
-            let n_dot_v = (column as f32 + 0.5) / BRDF_LUT_SIZE as f32;
-            let (scale, bias) = integrate_brdf(n_dot_v, roughness, BRDF_LUT_SAMPLES);
-            bytes.extend_from_slice(&moba_assets::f16_from_f32(scale).to_le_bytes());
-            bytes.extend_from_slice(&moba_assets::f16_from_f32(bias).to_le_bytes());
-        }
+    brdf_lut_with(BRDF_LUT_SAMPLES, |index| {
+        (index as f32 + 0.5) / BRDF_LUT_SIZE as f32
+    })
+}
+
+/// Tiered's LUT (ADR-0023 amendment 3): [`BRDF_LUT_TIERED_SAMPLES`] samples per texel and the
+/// texel centres on the end points, texel `i` at `i / (size − 1)` on both axes, so
+/// `brdf_lut_sample` in `lighting.glsl` reads 0..=1 with one bilinear fetch. Integrated once
+/// per process, on scoped threads, and kept (a renderer re-created on a settings change
+/// reuses it).
+pub(crate) fn brdf_lut_tiered() -> &'static [u8] {
+    static LUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        brdf_lut_with(BRDF_LUT_TIERED_SAMPLES, |index| {
+            index as f32 / (BRDF_LUT_SIZE - 1) as f32
+        })
+    })
+}
+
+/// The LUT with `samples` per texel, texel `i` of either axis at `coordinate(i)`; the rows
+/// are integrated in parallel (each texel is independent, so the bytes do not depend on the
+/// thread count).
+fn brdf_lut_with(samples: u32, coordinate: impl Fn(u32) -> f32 + Sync) -> Vec<u8> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, core::num::NonZeroUsize::get)
+        .clamp(1, BRDF_LUT_SIZE as usize);
+    brdf_lut_rows(samples, &coordinate, threads - 1)
+}
+
+/// [`brdf_lut_with`] on the calling thread and up to `helpers` scoped threads, which take rows
+/// from one queue until it is empty. A helper the system refuses to start leaves its rows to
+/// the others (the caller drains the queue too), so a refused spawn costs time, not the
+/// renderer's creation.
+fn brdf_lut_rows(
+    samples: u32,
+    coordinate: &(impl Fn(u32) -> f32 + Sync),
+    helpers: usize,
+) -> Vec<u8> {
+    let row_bytes = (BRDF_LUT_SIZE * 4) as usize;
+    let mut bytes = vec![0_u8; row_bytes * BRDF_LUT_SIZE as usize];
+    {
+        let rows = std::sync::Mutex::new(bytes.chunks_mut(row_bytes).enumerate());
+        let work = || {
+            loop {
+                // A helper that panicked poisons the lock; the scope re-raises its panic.
+                let next = rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .next();
+                let Some((row_index, row)) = next else {
+                    break;
+                };
+                let roughness = coordinate(row_index as u32);
+                for (column, texel) in row.chunks_mut(4).enumerate() {
+                    let n_dot_v = coordinate(column as u32);
+                    let (scale, bias) = integrate_brdf(n_dot_v, roughness, samples);
+                    texel[..2].copy_from_slice(&moba_assets::f16_from_f32(scale).to_le_bytes());
+                    texel[2..].copy_from_slice(&moba_assets::f16_from_f32(bias).to_le_bytes());
+                }
+            }
+        };
+        std::thread::scope(|scope| {
+            for _ in 0..helpers {
+                if std::thread::Builder::new()
+                    .name(String::from("brdf-lut"))
+                    .spawn_scoped(scope, work)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            work();
+        });
     }
     bytes
 }
@@ -1084,13 +1153,14 @@ impl LightingResources {
     /// The set layout, samplers, default images, the BRDF LUT, the light buffers and the
     /// sets. `shadow_format` is the shadow map's format (or the depth format when shadows are
     /// off), `shadow_filter_linear` whether it can be sampled with linear filtering and
-    /// `anisotropy` the terrain layers' maximum anisotropy.
+    /// `anisotropy` the terrain layers' maximum anisotropy; `tiered` picks Tiered's BRDF LUT.
     #[allow(clippy::too_many_lines)] // Layout, samplers, default images and buffers, in order.
     pub(crate) fn new(
         device: &DeviceContext,
         shadow_format: vk::Format,
         shadow_filter_linear: bool,
         anisotropy: Option<f32>,
+        tiered: bool,
     ) -> RenderResult<Self> {
         let bindings = set_layout_bindings();
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &bindings)?;
@@ -1188,7 +1258,13 @@ impl LightingResources {
                 bytes: &[0, 0, 0, 255].repeat(6),
             },
         )?;
-        let lut = brdf_lut();
+        let compat_lut;
+        let lut: &[u8] = if tiered {
+            brdf_lut_tiered()
+        } else {
+            compat_lut = brdf_lut();
+            &compat_lut
+        };
         let brdf_lut = texture::upload_raw(
             device,
             "brdf-lut",
@@ -1200,7 +1276,7 @@ impl LightingResources {
                 },
                 layers: texture::RawLayers::Plain,
                 levels: &[(0, lut.len())],
-                bytes: &lut,
+                bytes: lut,
             },
         )?;
         let default_ramp = texture::upload_rgba(device, "default-ramp", 1, 1, &[255; 4])?;
@@ -1745,6 +1821,91 @@ mod tests {
         assert!(scale + bias < 0.9 && scale + bias > 0.3, "{scale} {bias}");
         let lut = brdf_lut();
         assert_eq!(lut.len(), (BRDF_LUT_SIZE * BRDF_LUT_SIZE * 4) as usize);
+    }
+
+    /// The LUT's bytes do not depend on how many threads integrate it: the caller alone (as
+    /// when no helper thread can start) gives the same bytes as several.
+    #[test]
+    fn brdf_lut_bytes_do_not_depend_on_the_threads() {
+        let coordinate = |index: u32| index as f32 / (BRDF_LUT_SIZE - 1) as f32;
+        let alone = brdf_lut_rows(16, &coordinate, 0);
+        assert_eq!(alone, brdf_lut_rows(16, &coordinate, 3));
+        assert_eq!(alone, brdf_lut_rows(16, &coordinate, 64));
+    }
+
+    /// `lighting.glsl`'s `MOBA_BRDF_LUT_SIZE`, which `brdf_lut_sample` scales the fetch by, is
+    /// the size of the LUT Rust uploads.
+    #[test]
+    fn shader_brdf_lut_size_is_the_uploaded_size() {
+        let glsl = include_str!("../../shaders/shaders/include/lighting.glsl");
+        let defines: Vec<&str> = glsl
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("#define MOBA_BRDF_LUT_SIZE "))
+            .collect();
+        assert_eq!(defines.len(), 1, "one MOBA_BRDF_LUT_SIZE define");
+        let size: f32 = defines[0].trim().parse().expect("a number");
+        assert!(
+            (size - BRDF_LUT_SIZE as f32).abs() < f32::EPSILON,
+            "{size} vs {BRDF_LUT_SIZE}"
+        );
+    }
+
+    /// ADR-0023 gate 3, white furnace: a metal with F0 = 1 under a uniform white
+    /// environment returns 1 ± 0.02 at every roughness with multiscatter on. The
+    /// single-scatter albedo is a 4096-sample integral of the GGX lobe (the direct lights'
+    /// lobe over a white hemisphere); the compensation is `lighting.glsl`'s
+    /// `multiscatter_compensation` (1 + F0 (1 / E − 1)), with E read from Tiered's
+    /// `R16G16_SFLOAT` LUT as `brdf_lut_sample` reads it. The ambient's own split sum,
+    /// `(F0 A + B)` times the same compensation, is 1 by construction at F0 = 1.
+    #[test]
+    fn white_furnace_with_multiscatter_is_one() {
+        let lut = brdf_lut_tiered();
+        let size = BRDF_LUT_SIZE as usize;
+        let texel = |x: usize, y: usize| {
+            let at = (y * size + x) * 4;
+            let half = |i: usize| {
+                moba_assets::f32_from_f16(u16::from_le_bytes([lut[at + i], lut[at + i + 1]]))
+            };
+            half(0) + half(2)
+        };
+        // `brdf_lut_sample` in lighting.glsl: one bilinear fetch, texel `i` at `i / (size − 1)`
+        // on both axes.
+        let sample = |n_dot_v: f32, roughness: f32| {
+            let p = n_dot_v.clamp(0.0, 1.0) * (size - 1) as f32;
+            let x = (p.floor() as usize).min(size - 2);
+            let fx = p - x as f32;
+            let q = roughness.clamp(0.0, 1.0) * (size - 1) as f32;
+            let y = (q.floor() as usize).min(size - 2);
+            let fy = q - y as f32;
+            let top = texel(x, y) * (1.0 - fx) + texel(x + 1, y) * fx;
+            let bottom = texel(x, y + 1) * (1.0 - fx) + texel(x + 1, y + 1) * fx;
+            top * (1.0 - fy) + bottom * fy
+        };
+        let mut worst = (1.0_f32, 0.0, 0.0);
+        for r in 0..=20 {
+            let roughness = r as f32 / 20.0;
+            for v in 1..=20 {
+                let n_dot_v = v as f32 / 20.0;
+                let (scale, bias) = integrate_brdf(n_dot_v, roughness, 4096);
+                let single = scale + bias;
+                let compensated =
+                    single * (1.0 + (1.0 / sample(n_dot_v, roughness).max(1e-4) - 1.0));
+                assert!(
+                    compensated.is_finite(),
+                    "roughness {roughness} N·V {n_dot_v}"
+                );
+                if (compensated - 1.0).abs() > (worst.0 - 1.0).abs() {
+                    worst = (compensated, roughness, n_dot_v);
+                }
+            }
+        }
+        assert!(
+            (worst.0 - 1.0).abs() <= 0.02,
+            "furnace {:.4} at roughness {} N·V {}",
+            worst.0,
+            worst.1,
+            worst.2
+        );
     }
 
     #[test]

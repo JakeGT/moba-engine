@@ -747,18 +747,20 @@ interpolated frames, `High`/`Ultra` interpolated and crossfaded; all cast shadow
 
 ### Materials and textures
 
-A hero model can have a **material** (ADR-0010): a shader permutation, a parameter block and a
-texture set. A model named `sentinel` uses `<root>/materials/sentinel.toml` if the file
-exists; without one it keeps the vertex-colour look. Like map visuals and animation sets,
-materials are client-local and cosmetic: they are not part of the content hash, the signature
-or the wire, and two players with different files see different shading in the same match.
+A hero model can have a **material** (ADR-0010): a shader permutation, a parameter block, a
+texture set and a **shading model** (ADR-0023 §6). A model named `sentinel` uses
+`<root>/materials/sentinel.toml` if the file exists; without one it keeps the vertex-colour
+look. Like map visuals and animation sets, materials are client-local and cosmetic: they are
+not part of the content hash, the signature or the wire, and two players with different files
+see different shading in the same match.
 [`content/materials/sentinel.toml`](../content/materials/sentinel.toml) is the example:
 
 ```toml
 shader = "textured"                  # "vertex-color" (the default look) or "textured"
 base_color = "sentinel-base"         # <root>/textures/sentinel-base.ktx2
 normal = "sentinel-normal"           # optional
-metallic_roughness = "sentinel-mr"   # optional: R metallic, G roughness (times the factors)
+metallic_roughness = "sentinel-mr"   # optional: R metallic, G roughness (times the factors);
+                                     # a 3- or 4-channel map's B is the emissive mask
 mask = "sentinel-mask"               # optional: where the unit's team colour tints
 base_color_factor = [1.0, 1.0, 1.0, 1.0]   # optional, linear RGBA, 0..=1 (default 1)
 metallic = 0.0                       # optional, 0..=1 (default 0)
@@ -766,11 +768,11 @@ roughness = 1.0                      # optional, 0..=1 (default 1)
 normal_scale = 1.0                   # optional, 0..=2 (default 1)
 team_tint = 1.0                      # optional, 0..=1 (default 1)
 emissive = [0.0, 0.0, 0.0]           # optional, linear RGB, 0..=16 (default 0), added unlit
-# Stylisation (ADR-0011), all optional; they refine the map's [lighting] values:
+# Stylisation (ADR-0011), all optional; they refine the map's [lighting] values (Compat only):
 wrap = 0.3                           # 0..=1 wrap lighting (default: the map's)
 rim = 1.0                            # 0..=4, multiplies the map's rim strength (default 1)
 ramp = 1.0                           # 0..=1, multiplies the map's ramp strength (default 1)
-specular = 1.0                       # 0..=2 specular scale (default 1)
+specular = 1.0                       # 0..=2 specular scale (default 1); also the F0 factor below
 specular_tint = [1.0, 1.0, 1.0]      # linear RGB 0..=1, painted-specular tint (default 1)
 ```
 
@@ -784,6 +786,60 @@ team-coloured areas large and readable: the mask is how a textured hero still re
 or red at gameplay zoom. A `vertex-color` material takes no textures. A textured one needs a
 `base_color`, and the model needs texture coordinates (`TEXCOORD_0` in the `.glb`).
 
+**The material model** (ADR-0023 §6, frozen in N2c by
+[amendment 3](adr/0023-frame-architecture-materials.md#amendment-3-2026-11-17-n2c-the-material-model-as-built-and-the-frozen-material-spec);
+the contract Compat's C1 implements). These keys are optional and need `shader = "textured"`:
+
+```toml
+model = "clearcoat"                  # standard (default), clearcoat, sheen, anisotropic,
+                                     # thin_film, foliage, unlit, transmissive
+ior = 1.5                            # 1..=2.5, standard and transmissive only; dielectric
+                                     # F0 = ((ior - 1)/(ior + 1))^2 * specular, at most 0.16
+dust = 0.0                           # 0..=1, dust on up-facing surfaces (Tiered)
+emissive_texture = "x-emissive"      # sRGB colour, times `emissive` (Tiered)
+model_texture = "x-model"            # linear RGBA: R, G, B scale the model's data and AO (Tiered)
+[clearcoat]                          # the table named after `model`, with its parameters
+weight = 1.0
+roughness = 0.1
+[compat]                             # overrides of the Compat fallback
+roughness = 0.3
+```
+
+| `model` | Table and keys (default) | Tiered draws | Compat draws (the fallback) |
+|---|---|---|---|
+| `standard` | none | GGX + Lambert + multiscatter, F0 from `ior` and `specular` | the same surface, today's `shade()` |
+| `clearcoat` | `weight` 0..=1 (1), `roughness` 0..=1 (0) | the base plus one GGX coat lobe (IOR 1.5) | roughness `mix(base, coat, 0.5 × weight)` |
+| `sheen` | `weight` 0..=1 (1), `roughness` 0..=1 (0.5), `tint` 0..=1 (0: white, 1: base colour) | the base plus Charlie sheen | the base |
+| `anisotropic` | `strength` 0..=1 (0.5), `rotation` −π..=π radians (0) | anisotropic GGX along the mesh's tangent turned by `rotation` about the normal | isotropic GGX at the mean roughness |
+| `thin_film` | `thickness_min`, `thickness_max` 100..=400 nm (100, 400), `ior` 1..=2 (1.3) | GGX with the thin-film Fresnel (at N·V); `model_texture` R picks the thickness, G scales the film's IOR, B is the AO | a metal's base colour tinted by the film at normal incidence (`thickness_max`); a dielectric's is kept |
+| `foliage` | `translucency` 0..=1 (0.35) | two-sided Lambert, light through the leaf | the base |
+| `unlit` | none | the emissive alone, unlit and unfogged | a black base plus the emissive |
+| `transmissive` | `[transmission]`: `transmission` 0..=1 (1), `thickness` 0..=10 m (0), `attenuation_color` 0..=1 (white), `attenuation_distance` 0.001..=1000 m (infinite) | opaque until the glass pass (N2f) | the base, opaque |
+
+`[compat]` takes `base_color_factor`, `metallic`, `roughness` (0..=1) and `emissive`
+(0..=16), and replaces the collapsed value. A model table other than the material's model, or
+`[transmission]` on another model, is an error. `ior` and `specular` shape only a `standard`
+or `transmissive` material's F0: every other model's base layer is F0 0.04 (IOR 1.5) on both
+paths, which ignore either key there, and `content-check` rejects setting either on it.
+
+**Emission.** `emissive` is the colour; on **both** paths it is masked by
+`metallic_roughness.b` when that map has a third channel (bake it with `--kind weights
+--format rgba8`, or `bc7`); a two-channel map (`bc5`, `rg8`) keeps the whole surface emissive.
+`emissive_texture` multiplies it on Tiered only, so a lit material with an emissive texture
+and a non-zero `emissive` needs the mask or a `[compat] emissive`, or it would glow all over on
+Compat. An `unlit` material is all emissive and needs a non-zero `emissive` (Tiered) and a
+non-zero Compat emissive.
+
+**`model_texture` channels.** R, G and B scale the model's data per texel. The material AO is G
+on `standard`, `transmissive` and `foliage` and B on `clearcoat`, `anisotropic` and
+`thin_film`; `sheen` has none.
+
+**The material sheet.** `content/materials/samples/` has one material per model, on the
+`material-sample-*` textures (`texture-bake generate material-sample`).
+`MOBA_MATERIAL_SHEET=samples` draws one sphere per descriptor in `materials/samples/` (any
+`materials/<set>/` works, at most 16), in a row beside the mid lane: client-only, nothing else
+changes. The tiered goldens capture it with `MOBA_PREVIEW_CAMERA=1.5708,0.45,11,0,-12`.
+
 **Textures** are KTX 2.0 files at `<root>/textures/<name>.ktx2`; names follow the model-name
 rules (1..=32 of `[A-Za-z0-9_-]`). Each slot takes only its own formats, so sRGB and linear
 data cannot be mixed up:
@@ -792,8 +848,10 @@ data cannot be mixed up:
 |---|---|---|---|
 | `base_color` | `--kind color` | `bc7-srgb` (`rgba8-srgb`) | sRGB |
 | `normal` | `--kind normal` | `bc5` (`rg8`) | linear tangent-space X/Y, +Y up |
-| `metallic_roughness` | `--kind data` | `bc5` (`rg8`) | linear, R metallic, G roughness |
+| `metallic_roughness` | `--kind data`, or `--kind weights` for the emissive mask | `bc5` (`rg8`), or `bc7` (`rgba8`) | linear, R metallic, G roughness, B the emissive mask (3- or 4-channel only) |
 | `mask` | `--kind mask` | `bc4` (`r8`) | linear, R |
+| `emissive_texture` | `--kind color` | `bc7-srgb` (`rgba8-srgb`) | sRGB, Tiered only |
+| `model_texture` | `--kind weights` | `bc7` (`rgba8`) | linear RGBA, Tiered only |
 | terrain `splat`, `splat2` | `--kind weights` | `bc7` (`rgba8`) | linear RGBA, one layer weight per channel; the PNG needs alpha; `bc7` is mode 6 only and loses a lot on splats (about 17 dB on hard junctions, about 24 dB on wavy blends; only smooth two-layer ramps reach 35 dB), so a bake under 35 dB warns: use `rgba8` for any painted splat |
 
 Bake them from PNG with mips:
@@ -820,14 +878,22 @@ one 2D image, no supercompression. A renderer holds 64 materials and 256 texture
 **Checks.** `content-check` loads the material next to every `[[assets.units]]` model
 (`materials/<stem>.toml`, where `models/<stem>.glb` is the unit path) and every texture it
 names, enforces the slot formats, reports each problem as an error, and prints the counts (one
-descriptor set per textured material):
+descriptor set per textured material) and the units' materials per model:
 
 ```text
 materials  1 (1 textured, 1 descriptor sets)
+models     standard 1
 textures   4 (4 bindings, 299 KiB)
 ```
 
-The JSON output adds `materials`, `textured_materials`, `textures` and `texture_bytes`.
+It also checks every descriptor under the pack's `materials/` and one level of subdirectories
+(such as `materials/samples/`), named by a unit or not. Each material is checked against both
+evaluators (ADR-0023 §10): the Compat fallback, `[compat]` overrides included, is finite and in
+range; an `unlit` material has a non-zero `emissive` and Compat emissive and no
+`model_texture`; `ior` and `specular` keep their defaults on every model but `standard` and
+`transmissive`; and the emission rule above holds. The art bible's per-class ranges are not checked yet (the bible is not approved).
+The JSON output adds `materials`, `textured_materials`, `material_models` (an object from model
+name to count), `textures` and `texture_bytes`.
 
 **Fallback.** Any problem logs one `[assets] material for model '<name>': ...` line and keeps
 that model on the vertex-colour look: a missing, oversized or invalid descriptor, a missing or

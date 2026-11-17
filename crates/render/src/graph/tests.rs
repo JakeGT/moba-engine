@@ -13,6 +13,7 @@ const HDR: ImageDesc = ImageDesc {
     size: ImageSize::Output { shift: 0 },
     samples: vk::SampleCountFlags::TYPE_1,
     extra_usage: vk::ImageUsageFlags::empty(),
+    srgb_view: false,
 };
 
 const DEPTH: ImageDesc = ImageDesc {
@@ -21,6 +22,7 @@ const DEPTH: ImageDesc = ImageDesc {
     size: ImageSize::Output { shift: 0 },
     samples: vk::SampleCountFlags::TYPE_1,
     extra_usage: vk::ImageUsageFlags::SAMPLED,
+    srgb_view: false,
 };
 
 fn swapchain<T: Copy>(graph: &mut GraphBuilder<T>) -> super::ResourceId {

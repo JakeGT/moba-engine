@@ -265,14 +265,6 @@ pub const UNIT_GBUFFER_FRAG: &[u8] =
 /// Units into the G-buffer, motion and the outline IDs (ADR-0023 §1e).
 pub const UNIT_GBUFFER_IDS_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer_ids.frag.spv"));
-/// Textured units into the G-buffer and motion (ADR-0023 §1e).
-pub const UNIT_TEXTURED_GBUFFER_FRAG: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured_gbuffer.frag.spv"));
-/// Textured units into the G-buffer, motion and the outline IDs (ADR-0023 §1e).
-pub const UNIT_TEXTURED_GBUFFER_IDS_FRAG: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/unit_textured_gbuffer_ids.frag.spv"
-));
 /// The terrain into the G-buffer and motion (ADR-0023 §1e).
 pub const TERRAIN_GBUFFER_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer.frag.spv"));
@@ -320,16 +312,6 @@ pub const UNIT_GBUFFER_HDR_FRAG: &[u8] =
 /// As [`UNIT_GBUFFER_HDR_FRAG`], with the outline slot.
 pub const UNIT_GBUFFER_IDS_HDR_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/unit_gbuffer_ids_hdr.frag.spv"));
-/// Textured units into the G-buffer, motion and `hdr` (N2b).
-pub const UNIT_TEXTURED_GBUFFER_HDR_FRAG: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/unit_textured_gbuffer_hdr.frag.spv"
-));
-/// As [`UNIT_TEXTURED_GBUFFER_HDR_FRAG`], with the outline slot.
-pub const UNIT_TEXTURED_GBUFFER_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/unit_textured_gbuffer_ids_hdr.frag.spv"
-));
 /// The terrain into the G-buffer, motion and `hdr` (N2b).
 pub const TERRAIN_GBUFFER_HDR_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/terrain_gbuffer_hdr.frag.spv"));
@@ -337,6 +319,17 @@ pub const TERRAIN_GBUFFER_HDR_FRAG: &[u8] =
 pub const TERRAIN_GBUFFER_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/terrain_gbuffer_ids_hdr.frag.spv"
+));
+/// As [`TERRAIN_GBUFFER_HDR_FRAG`] without the `Paint` decals, which the `gbuffer_decals` pass
+/// draws instead (N2c, ADR-0023 §7a, amendment 3 item 31).
+pub const TERRAIN_GBUFFER_NODECALS_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/terrain_gbuffer_nodecals_hdr.frag.spv"
+));
+/// As [`TERRAIN_GBUFFER_NODECALS_HDR_FRAG`], with the ID 0.
+pub const TERRAIN_GBUFFER_NODECALS_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/terrain_gbuffer_nodecals_ids_hdr.frag.spv"
 ));
 /// Foliage into the G-buffer, motion and `hdr` (N2b).
 pub const FOLIAGE_GBUFFER_HDR_FRAG: &[u8] =
@@ -363,6 +356,45 @@ pub const DEFERRED_LIGHT_EXTENDED_COMP: &[u8] = include_bytes!(concat!(
 /// The deferred lighting's tile classification (N2b, ADR-0023 §2a).
 pub const LIGHT_CLASSIFY_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/light_classify.slang.spv"));
+
+/// N2c (ADR-0023 §6b): `unit.frag` with the Tiered BRDF core (`MOBA_TIERED_SHADING`), the
+/// tiered forward frame's untextured units.
+pub const UNIT_TIERED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_tiered.frag.spv"));
+/// As [`UNIT_TIERED_FRAG`], textured (`MATERIAL_TEXTURED`).
+pub const UNIT_TEXTURED_TIERED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured_tiered.frag.spv"));
+/// The tiered terrain without decals (`MOBA_DECALS=off`), with the Tiered BRDF core.
+pub const TERRAIN_NODECALS_TIERED_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/terrain_nodecals_tiered.frag.spv"
+));
+/// N2c (ADR-0023 §6d): the textured units' G-buffer fragment stage (Slang; the material
+/// table and bindless textures).
+pub const UNIT_MATERIAL_GBUFFER_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_material_gbuffer.slang.spv"));
+/// As [`UNIT_MATERIAL_GBUFFER_SLANG`], with the outline slot (`PREPASS_IDS`).
+pub const UNIT_MATERIAL_GBUFFER_IDS_SLANG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_material_gbuffer_ids.slang.spv"
+));
+/// As [`UNIT_MATERIAL_GBUFFER_SLANG`], with the emissive into `hdr` (`GBUFFER_HDR`).
+pub const UNIT_MATERIAL_GBUFFER_HDR_SLANG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_material_gbuffer_hdr.slang.spv"
+));
+/// As [`UNIT_MATERIAL_GBUFFER_HDR_SLANG`], with the outline slot.
+pub const UNIT_MATERIAL_GBUFFER_IDS_HDR_SLANG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/unit_material_gbuffer_ids_hdr.slang.spv"
+));
+/// N2c (ADR-0023 §7): the `Paint` decals' G-buffer pass, one box per decal.
+pub const DECAL_GBUFFER_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/decal_gbuffer.vert.spv"));
+/// The `Paint` decals' G-buffer fragment stage: the ground from the depth, the shape from
+/// `decals.glsl`, blended into `gb0`'s sRGB view.
+pub const DECAL_GBUFFER_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/decal_gbuffer.frag.spv"));
 
 include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
 
@@ -723,14 +755,6 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: UNIT_GBUFFER_IDS_FRAG,
     },
     ShaderModule {
-        name: "unit_textured_gbuffer.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_FRAG,
-    },
-    ShaderModule {
-        name: "unit_textured_gbuffer_ids.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_IDS_FRAG,
-    },
-    ShaderModule {
         name: "terrain_gbuffer.frag",
         spirv: TERRAIN_GBUFFER_FRAG,
     },
@@ -787,20 +811,20 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: UNIT_GBUFFER_IDS_HDR_FRAG,
     },
     ShaderModule {
-        name: "unit_textured_gbuffer_hdr.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_HDR_FRAG,
-    },
-    ShaderModule {
-        name: "unit_textured_gbuffer_ids_hdr.frag",
-        spirv: UNIT_TEXTURED_GBUFFER_IDS_HDR_FRAG,
-    },
-    ShaderModule {
         name: "terrain_gbuffer_hdr.frag",
         spirv: TERRAIN_GBUFFER_HDR_FRAG,
     },
     ShaderModule {
         name: "terrain_gbuffer_ids_hdr.frag",
         spirv: TERRAIN_GBUFFER_IDS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_nodecals_hdr.frag",
+        spirv: TERRAIN_GBUFFER_NODECALS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_nodecals_ids_hdr.frag",
+        spirv: TERRAIN_GBUFFER_NODECALS_IDS_HDR_FRAG,
     },
     ShaderModule {
         name: "foliage_gbuffer_hdr.frag",
@@ -830,6 +854,42 @@ pub const MODULES: &[ShaderModule] = &[
         name: "light_classify.slang",
         spirv: LIGHT_CLASSIFY_SLANG,
     },
+    ShaderModule {
+        name: "unit_tiered.frag",
+        spirv: UNIT_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "unit_textured_tiered.frag",
+        spirv: UNIT_TEXTURED_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_nodecals_tiered.frag",
+        spirv: TERRAIN_NODECALS_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_SLANG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer_ids.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_IDS_SLANG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer_hdr.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_HDR_SLANG,
+    },
+    ShaderModule {
+        name: "unit_material_gbuffer_ids_hdr.slang",
+        spirv: UNIT_MATERIAL_GBUFFER_IDS_HDR_SLANG,
+    },
+    ShaderModule {
+        name: "decal_gbuffer.vert",
+        spirv: DECAL_GBUFFER_VERT,
+    },
+    ShaderModule {
+        name: "decal_gbuffer.frag",
+        spirv: DECAL_GBUFFER_FRAG,
+    },
 ];
 
 /// The module called `name` (for example `"unit_textured.frag"`), if it exists.
@@ -845,6 +905,7 @@ pub fn module(name: &str) -> Option<&'static [u8]> {
 mod tests {
     use super::*;
     use std::borrow::Cow;
+    use std::collections::BTreeMap;
 
     const SPIRV_MAGIC: u32 = 0x0723_0203;
 
@@ -921,12 +982,49 @@ mod tests {
         Block { set: u64 },
         /// Push constants.
         PushConstants,
+        /// A specialisation constant (`[vk::constant_id(id)]`), which the pipeline that uses
+        /// the module must supply (`unit_material_gbuffer`'s sampler slot and table length).
+        SpecConstant { id: u64 },
     }
 
     /// Every parameter of every Slang module, with its set and binding. ADR-0020 §4c wants
     /// explicit layouts; `slangc` has no flag that rejects implicit bindings, so the
     /// reflected layout must match this table exactly. A new module, resource or binding
     /// change is a deliberate edit here (and in the Rust descriptor layout that mirrors it).
+    /// `unit_material_gbuffer*.slang` (N2c, ADR-0023 §5): the camera at set 0, the bindless
+    /// table's samplers and sampled images at set 2 (`bindless.rs`), the material push, and
+    /// the material sampler's slot and the table's length as specialisation constants 0 and 1
+    /// (set by `passes/scene.rs` from `bindless::MATERIAL_SAMPLER` and `MAX_MATERIALS`).
+    const MATERIAL_GBUFFER: &[(&str, Slot)] = &[
+        (
+            "camera",
+            Slot::Descriptor {
+                set: 0,
+                binding: 0,
+                ty: Cow::Borrowed("constantBuffer"),
+            },
+        ),
+        (
+            "bindless_samplers",
+            Slot::Descriptor {
+                set: 2,
+                binding: 0,
+                ty: Cow::Borrowed("[0]samplerState"),
+            },
+        ),
+        (
+            "bindless_textures",
+            Slot::Descriptor {
+                set: 2,
+                binding: 2,
+                ty: Cow::Borrowed("[0]texture2D:read"),
+            },
+        ),
+        ("push", Slot::PushConstants),
+        ("MATERIAL_SAMPLER", Slot::SpecConstant { id: 0 }),
+        ("MAX_MATERIALS", Slot::SpecConstant { id: 1 }),
+    ];
+
     const SLANG_BINDINGS: &[(&str, &[(&str, Slot)])] = &[
         (
             "toolchain_smoke.slang",
@@ -1203,6 +1301,10 @@ mod tests {
                 ("push", Slot::PushConstants),
             ],
         ),
+        ("unit_material_gbuffer.slang", MATERIAL_GBUFFER),
+        ("unit_material_gbuffer_ids.slang", MATERIAL_GBUFFER),
+        ("unit_material_gbuffer_hdr.slang", MATERIAL_GBUFFER),
+        ("unit_material_gbuffer_ids_hdr.slang", MATERIAL_GBUFFER),
     ];
 
     /// The slot of one reflected parameter, or why it is not allowed.
@@ -1229,10 +1331,7 @@ mod tests {
                 "a loose `uniform` global lands in an implicit globals uniform buffer; \
                  declare it inside a ConstantBuffer with [[vk::binding(binding, set)]]",
             )),
-            (Some("specializationConstant"), _) => Err(String::from(
-                "specialization constants ([vk::constant_id]) are not in the table yet; add \
-                 a Slot for them with the first module that needs one",
-            )),
+            (Some("specializationConstant"), Some(id)) => Ok(Slot::SpecConstant { id }),
             _ => Err(format!("unexpected binding {binding}")),
         }
     }
@@ -1425,6 +1524,128 @@ mod tests {
                      RowMajor {row}, ColMajor {column}",
                     module.name
                 );
+            }
+        }
+    }
+
+    /// One stage's location-decorated `Input` or `Output` variables: location -> (the
+    /// pointee's scalar kind and component count, whether it is `Flat`). Built-ins carry no
+    /// location and are skipped.
+    fn interface(spirv: &[u8], storage_class: u32) -> BTreeMap<u32, ((u32, u32), bool)> {
+        const OP_TYPE_INT: u32 = 21;
+        const OP_TYPE_FLOAT: u32 = 22;
+        const OP_TYPE_VECTOR: u32 = 23;
+        const OP_TYPE_POINTER: u32 = 32;
+        const OP_VARIABLE: u32 = 59;
+        const OP_DECORATE: u32 = 71;
+        const DECORATION_FLAT: u32 = 14;
+        const DECORATION_LOCATION: u32 = 30;
+        let words: Vec<u32> = spirv
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        // id -> (kind, components): 0 float, 1 int.
+        let mut types: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+        let mut pointers: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+        let mut variables: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut locations: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut flat = std::collections::BTreeSet::new();
+        let mut at = 5;
+        while at < words.len() {
+            let count = (words[at] >> 16) as usize;
+            assert!(count > 0, "malformed SPIR-V");
+            let op = &words[at..at + count];
+            match op[0] & 0xffff {
+                OP_TYPE_FLOAT => {
+                    types.insert(op[1], (0, 1));
+                }
+                OP_TYPE_INT => {
+                    types.insert(op[1], (1, 1));
+                }
+                OP_TYPE_VECTOR => {
+                    if let Some(&(kind, _)) = types.get(&op[2]) {
+                        types.insert(op[1], (kind, op[3]));
+                    }
+                }
+                OP_TYPE_POINTER => {
+                    pointers.insert(op[1], (op[2], op[3]));
+                }
+                OP_VARIABLE => {
+                    variables.insert(op[2], op[1]);
+                }
+                OP_DECORATE if op[2] == DECORATION_LOCATION => {
+                    locations.insert(op[1], op[3]);
+                }
+                OP_DECORATE if op[2] == DECORATION_FLAT => {
+                    flat.insert(op[1]);
+                }
+                _ => {}
+            }
+            at += count;
+        }
+        variables
+            .into_iter()
+            .filter_map(|(variable, pointer)| {
+                let &(class, pointee) = pointers.get(&pointer)?;
+                let &location = locations.get(&variable)?;
+                (class == storage_class).then(|| {
+                    let ty = *types
+                        .get(&pointee)
+                        .expect("interface variables are scalars or vectors");
+                    (location, (ty, flat.contains(&variable)))
+                })
+            })
+            .collect()
+    }
+
+    /// ADR-0023 gate 1 (moved to N2c by amendment 2): the textured units' G-buffer stage is
+    /// GLSL vertex (`unit_textured_gbuffer.vert`, `skinned_textured_gbuffer.vert`) and Slang
+    /// fragment (`unit_material_gbuffer*.slang`), linked by location only. Every fragment
+    /// input must be a vertex output at the same location with the same scalar type and
+    /// width, and integer inputs must be `Flat`.
+    #[test]
+    fn glsl_vertex_and_slang_fragment_interfaces_match() {
+        const INPUT: u32 = 1;
+        const OUTPUT: u32 = 3;
+        let fragments = [
+            "unit_material_gbuffer.slang",
+            "unit_material_gbuffer_ids.slang",
+            "unit_material_gbuffer_hdr.slang",
+            "unit_material_gbuffer_ids_hdr.slang",
+        ];
+        for vertex in [
+            "unit_textured_gbuffer.vert",
+            "skinned_textured_gbuffer.vert",
+        ] {
+            let outputs = interface(module(vertex).expect("vertex module"), OUTPUT);
+            for fragment in fragments {
+                let inputs = interface(module(fragment).expect("fragment module"), INPUT);
+                // Slang drops the inputs a permutation does not read (`world_pos`, and the
+                // outline slot without `PREPASS_IDS`); the rest must be there.
+                let mut read: Vec<u32> = vec![0, 1, 3, 4, 14, 15];
+                if fragment.contains("_ids") {
+                    read.push(13);
+                }
+                for location in read {
+                    assert!(
+                        inputs.contains_key(&location),
+                        "{fragment}: input location {location} is found ({inputs:?})"
+                    );
+                }
+                for (location, ((kind, width), is_flat)) in inputs {
+                    let output = outputs.get(&location);
+                    assert_eq!(
+                        output.map(|(ty, _)| *ty),
+                        Some((kind, width)),
+                        "{vertex} -> {fragment}: location {location}"
+                    );
+                    assert!(
+                        kind == 0 || is_flat,
+                        "{fragment}: integer input at location {location} is not Flat"
+                    );
+                }
             }
         }
     }

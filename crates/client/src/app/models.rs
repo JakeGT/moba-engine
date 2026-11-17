@@ -42,6 +42,7 @@ use moba_assets::{AnimationGraph, AnimationSet, MAX_SOCKETS, Skeleton, SkinLod, 
 use moba_core::math::{Mat4, Vec3};
 use moba_render::{MeshData, MeshId};
 
+use crate::app::material_sheet::MaterialSheet;
 use crate::app::materials::{MaterialLibrary, MaterialSink, ModelMeshes};
 
 /// Environment variable naming the client-local asset root.
@@ -247,6 +248,8 @@ pub(crate) struct ModelLibrary {
     skinning: bool,
     /// Client-local materials of the loaded models (`materials/<model>.toml`, ADR-0010).
     materials: MaterialLibrary,
+    /// The material-model sheet (`MOBA_MATERIAL_SHEET`, ADR-0023 gate 5), when asked for.
+    sheet: Option<MaterialSheet>,
 }
 
 impl ModelLibrary {
@@ -260,7 +263,15 @@ impl ModelLibrary {
         library.skinning = skinning_enabled_from_env();
         library.animation_sets = crate::app::animation::animation_sets_enabled_from_env();
         library.show_attachments = attachments_enabled_from_env();
+        library.sheet = MaterialSheet::from_env();
         library
+    }
+
+    /// Pushes the material sheet's spheres, if there is a sheet (see [`MaterialSheet::push`]).
+    pub(crate) fn push_sheet(&self, units: &mut Vec<moba_render::UnitInstance>) {
+        if let Some(sheet) = &self.sheet {
+            sheet.push(units);
+        }
     }
 
     /// Enables or disables the reduced bone-LOD skins for later binds (`MOBA_BONE_LOD=off`).
@@ -297,6 +308,7 @@ impl ModelLibrary {
     pub(crate) fn new(root: PathBuf, bindings: ModelBindings) -> Self {
         Self {
             materials: MaterialLibrary::new(root.clone()),
+            sheet: None,
             root,
             bindings,
             loaded: Vec::new(),
@@ -347,6 +359,9 @@ impl ModelLibrary {
     /// files would fail again and were already logged.
     pub(crate) fn renderer_recreated(&mut self) {
         self.materials.renderer_recreated();
+        if let Some(sheet) = self.sheet.as_mut() {
+            sheet.renderer_recreated();
+        }
         self.loaded.retain(|(_, model)| model.is_none());
         self.heroes.clear();
         self.rigs.clear();
@@ -690,6 +705,14 @@ pub(crate) fn bind_hero_models<'a>(
         }
         .map_err(|error| error.to_string())
     });
+    if let Some(sheet) = models.sheet.as_mut() {
+        let files = sheet.upload(&models.root, |data| {
+            renderer
+                .register_mesh(data)
+                .map_err(|error| error.to_string())
+        });
+        models.materials.bind_files(renderer, files);
+    }
     models.bind_materials(renderer);
 }
 

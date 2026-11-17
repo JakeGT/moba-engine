@@ -30,6 +30,8 @@ use crate::shaders::ShaderSource;
 
 /// The tile edge, in pixels (`numthreads` of both shaders).
 pub(crate) const TILE: u32 = 16;
+/// Frame slots of the tile counts' readback (the frames in flight).
+const COUNT_SLOTS: usize = crate::renderer::FRAMES_IN_FLIGHT;
 
 /// The tile classes `light_classify` sorts into (`CLASS_*` in `light_classify.slang`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,7 +63,6 @@ impl TileLayout {
     /// Words before the lists (`TILE_HEADER_WORDS` in `light_classify.slang`).
     pub(crate) const HEADER_WORDS: u32 = 12;
     /// The word of the sky class's tile count (`TILE_COUNT_WORD`); the others follow.
-    #[cfg(test)]
     pub(crate) const COUNT_WORD: u32 = 9;
     /// What `mask_clear` writes over the header each frame: every class's dispatch is
     /// `(0, 0, 1)` and its count 0; `light_classify` raises `x` and `y` with atomic maxima.
@@ -148,6 +149,10 @@ pub(crate) struct DeferredPass {
     classify_set: vk::DescriptorSet,
     light_set: vk::DescriptorSet,
     tiles: GpuBuffer,
+    /// Host-readable copies of the classes' tile counts, one 16-byte slot per frame slot
+    /// ([`Self::record_reset`] copies the previous frame's before resetting them), for the
+    /// frame log's record of what a run lit (N2c).
+    counts: GpuBuffer,
     layout: TileLayout,
     /// The lighting pipelines' `DEBUG_VIEW` specialisation constant (0 off;
     /// [`crate::post::TemporalDebugView::deferred_view`]).
@@ -307,6 +312,14 @@ impl DeferredPass {
         )?;
         let layout = TileLayout::for_extent(extent);
         let tiles = Self::tile_buffer(device, layout)?;
+        let counts = GpuBuffer::new(
+            device.device.clone(),
+            device.allocator(),
+            "deferred tile counts",
+            COUNT_SLOTS as u64 * 16,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuToCpu,
+        )?;
         Ok(Self {
             device: device.device.clone(),
             classify,
@@ -321,6 +334,7 @@ impl DeferredPass {
             classify_set,
             light_set,
             tiles,
+            counts,
             layout,
             debug,
         })
@@ -334,6 +348,7 @@ impl DeferredPass {
             layout.bytes(),
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::INDIRECT_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC
                 | vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuOnly,
         )
@@ -370,11 +385,25 @@ impl DeferredPass {
             )?;
             Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
         };
-        Ok([
+        let pipelines = [
             pipeline("light_classify.slang", classify_layout)?,
             pipeline("deferred_light.comp", light_layout)?,
             pipeline("deferred_light_extended.comp", light_layout)?,
-        ])
+        ];
+        // `RenderConfig::pipeline_stats`: the permutations' registers (amendment 3 item 32).
+        for (name, pipeline) in [
+            "light_classify",
+            "deferred_light",
+            "deferred_light_extended",
+        ]
+        .iter()
+        .zip(&pipelines)
+        {
+            for line in device.pipeline_statistics(pipeline.handle()) {
+                eprintln!("[render] pipeline-stats {name} {line}");
+            }
+        }
+        Ok(pipelines)
     }
 
     /// Debug builds' shader hot reload: new pipelines from `shaders` (installed with
@@ -423,11 +452,26 @@ impl DeferredPass {
         self.tiles.handle()
     }
 
-    /// Records `mask_clear`'s part: every class's dispatch arguments back to `(0, 0, 1)` and
-    /// its count to 0 ([`TileLayout::RESET`]). The graph moved the buffer to a transfer write.
-    pub(crate) fn record_reset(&self, cmd: vk::CommandBuffer) {
+    /// Records `mask_clear`'s part: with `counts`, the previous frame's tile counts copied
+    /// into frame slot `slot`'s host-readable record ([`Self::tile_counts`]); then every
+    /// class's dispatch arguments back to `(0, 0, 1)` and its count to 0
+    /// ([`TileLayout::RESET`]). The graph moved the buffer to a transfer write; the copy's own
+    /// barriers are recorded here: the classification's writes to the copy's read, that read
+    /// before the reset's write, and the copy's write to the host. The copy costs about
+    /// 0.005 ms (the barriers drain the queue), so it runs only for the frame log's counts.
+    pub(crate) fn record_reset(
+        &self,
+        device: &DeviceContext,
+        cmd: vk::CommandBuffer,
+        slot: usize,
+        counts: bool,
+    ) {
+        if counts {
+            self.record_count_copy(device, cmd, slot);
+        }
         // SAFETY: the buffer is live and at least the header long; the graph ordered the
-        // previous frame's reads before this transfer write.
+        // previous frame's reads before this transfer write, and the copy's read (when
+        // recorded) is ordered before it.
         unsafe {
             self.device.cmd_update_buffer(
                 cmd,
@@ -436,6 +480,93 @@ impl DeferredPass {
                 bytemuck::cast_slice(&TileLayout::RESET),
             );
         }
+    }
+
+    /// The tile counts' copy and its barriers ([`Self::record_reset`]).
+    fn record_count_copy(&self, device: &DeviceContext, cmd: vk::CommandBuffer, slot: usize) {
+        use vk::{AccessFlags2 as A, PipelineStageFlags2 as S};
+        let tiles = |src_stage, src_access, dst_stage, dst_access| {
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(src_stage)
+                .src_access_mask(src_access)
+                .dst_stage_mask(dst_stage)
+                .dst_access_mask(dst_access)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.tiles.handle())
+                .offset(0)
+                .size(u64::from(TileLayout::HEADER_WORDS) * 4)
+        };
+        let to_copy = [tiles(
+            S::COMPUTE_SHADER,
+            A::SHADER_STORAGE_WRITE,
+            S::COPY,
+            A::TRANSFER_READ,
+        )];
+        device.cmd_pipeline_barrier2(
+            cmd,
+            &vk::DependencyInfo::default().buffer_memory_barriers(&to_copy),
+        );
+        let slot = (slot % COUNT_SLOTS) as u64;
+        let region = vk::BufferCopy::default()
+            .src_offset(u64::from(TileLayout::COUNT_WORD) * 4)
+            .dst_offset(slot * 16)
+            .size(12);
+        // SAFETY: both buffers are live, the source has TRANSFER_SRC and the destination
+        // TRANSFER_DST, and both ranges lie inside them (the header; one 16-byte slot).
+        unsafe {
+            self.device.cmd_copy_buffer(
+                cmd,
+                self.tiles.handle(),
+                self.counts.handle(),
+                core::slice::from_ref(&region),
+            );
+        }
+        // One array: a second `buffer_memory_barriers` call would replace the first.
+        // `vkCmdUpdateBuffer` runs in the transfer (clear) stage, so the copy's read is
+        // ordered before it with `ALL_TRANSFER`.
+        let barriers = [
+            tiles(
+                S::COPY,
+                A::TRANSFER_READ,
+                S::ALL_TRANSFER,
+                A::TRANSFER_WRITE,
+            ),
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(S::COPY)
+                .src_access_mask(A::TRANSFER_WRITE)
+                .dst_stage_mask(S::HOST)
+                .dst_access_mask(A::HOST_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.counts.handle())
+                .offset(slot * 16)
+                .size(16),
+        ];
+        device.cmd_pipeline_barrier2(
+            cmd,
+            &vk::DependencyInfo::default().buffer_memory_barriers(&barriers),
+        );
+    }
+
+    /// The `[standard, extended]` tile counts `record_reset` copied in frame slot `slot`
+    /// (the frame before that slot's last one), once the slot's fence has signalled; `None`
+    /// before any copy or if the buffer cannot be read.
+    pub(crate) fn tile_counts(&self, slot: usize) -> Option<[u32; 2]> {
+        let mut bytes = [0_u8; 12];
+        let offset = (slot % COUNT_SLOTS) * 16;
+        if !self.counts.read_bytes(offset, &mut bytes) {
+            return None;
+        }
+        let word = |index: usize| {
+            u32::from_le_bytes([
+                bytes[4 * index],
+                bytes[4 * index + 1],
+                bytes[4 * index + 2],
+                bytes[4 * index + 3],
+            ])
+        };
+        Some([word(1), word(2)])
     }
 
     /// Points both passes' sets at the current transients and the tile buffer. Called at

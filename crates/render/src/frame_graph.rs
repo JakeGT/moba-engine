@@ -188,6 +188,12 @@ pub(crate) enum PassKind {
     LightClassify,
     /// The deferred lighting, one indirect dispatch per tile class (ADR-0023 §2).
     DeferredLight,
+    /// N2c (ADR-0023 §7a): the `Paint` decals blended into `gb0` between the G-buffer's
+    /// receivers ([`Self::Prepass`], the terrain) and [`Self::GBufferRest`].
+    GBufferDecals,
+    /// The rest of the G-buffer pass after the decals: the units, walls, props, minions,
+    /// foliage and sky, over the receivers' targets (loaded).
+    GBufferRest,
     /// The simple (non-refracting) water after the deferred lighting, where there is no full
     /// water pass (ADR-0023 §11, amendment 2 item 7).
     SimpleWater,
@@ -407,6 +413,11 @@ pub(crate) struct FrameSpec {
     /// With [`Self::temporal`] only (its prepass is the G-buffer pass), never with MSAA; see
     /// [`Self::has_deferred`]. `MOBA_DEFERRED=off` turns it off.
     pub(crate) deferred: bool,
+    /// N2c (ADR-0023 §7a): with [`Self::has_deferred`], the `Paint` decals are a raster pass
+    /// (`gbuffer_decals`) between the G-buffer's receivers (`prepass`: the terrain) and the
+    /// rest (`gbuffer_rest`), and `gb0` has an sRGB view. Off with the decals
+    /// (`MOBA_DECALS=off`): one G-buffer pass, as in N2b.
+    pub(crate) gbuffer_decals: bool,
 }
 
 impl FrameSpec {
@@ -443,6 +454,7 @@ impl FrameSpec {
             depth: DepthConvention::Forward,
             gbuffer_debug: false,
             deferred: false,
+            gbuffer_decals: false,
         }
     }
 
@@ -478,6 +490,11 @@ impl FrameSpec {
         self.deferred && self.temporal && !self.msaa
     }
 
+    /// Whether the G-buffer pass is split around `gbuffer_decals` (N2c, ADR-0023 §7a).
+    pub(crate) const fn has_gbuffer_decals(&self) -> bool {
+        self.gbuffer_decals && self.has_deferred()
+    }
+
     /// Whether the bloom down-chain runs (bloom, or metering for auto exposure).
     pub(crate) const fn bloom_chain(&self) -> bool {
         self.bloom || self.auto_exposure
@@ -500,6 +517,7 @@ const fn image(format: vk::Format, size: ImageSize) -> ImageDesc {
         size,
         samples: vk::SampleCountFlags::TYPE_1,
         extra_usage: vk::ImageUsageFlags::empty(),
+        srgb_view: false,
     }
 }
 
@@ -510,12 +528,14 @@ pub(crate) fn build(
     capture: bool,
     offscreen: usize,
 ) -> Result<FramePlan, GraphError> {
-    build_variant(spec, capture, offscreen, true)
+    build_variant(spec, capture, offscreen, true, true)
 }
 
 /// Builds and compiles the frame graph for `spec`. Bit `s` of `offscreen` adds the pass that
 /// renders offscreen image `s` this frame; `capture` adds the readback; `haze` runs the heat
-/// haze's two passes (ADR-0019), which a frame without haze on screen only reserves. Every
+/// haze's two passes (ADR-0019), which a frame without haze on screen only reserves; `paint`
+/// runs the G-buffer decals' two passes (N2c, ADR-0023 §7a), which a frame without a `Paint`
+/// decal only reserves (its G-buffer pass then draws everything, as N2b's). Every
 /// variant of one renderer passes the same `spec` (shadows, the fog of war's texture edge,
 /// the post chain), so they share transients.
 ///
@@ -528,6 +548,7 @@ pub(crate) fn build_variant(
     capture: bool,
     offscreen: usize,
     haze: bool,
+    paint: bool,
 ) -> Result<FramePlan, GraphError> {
     let render = ImageSize::Render { shift: 0 };
     let half = ImageSize::Render { shift: 1 };
@@ -565,6 +586,7 @@ pub(crate) fn build_variant(
             } else {
                 vk::ImageUsageFlags::SAMPLED
             },
+            srgb_view: false,
         },
     );
     let msaa = spec.msaa.then(|| MsaaResources {
@@ -585,6 +607,7 @@ pub(crate) fn build_variant(
                 size: render,
                 samples: vk::SampleCountFlags::TYPE_4,
                 extra_usage: vk::ImageUsageFlags::empty(),
+                srgb_view: false,
             },
         ),
     });
@@ -623,6 +646,7 @@ pub(crate) fn build_variant(
                 },
                 samples: vk::SampleCountFlags::TYPE_1,
                 extra_usage: vk::ImageUsageFlags::empty(),
+                srgb_view: false,
             },
         )
     });
@@ -769,6 +793,8 @@ pub(crate) fn build_variant(
                     } else {
                         vk::ImageUsageFlags::empty()
                     },
+                    // N2c: the G-buffer decals blend `gb0` through an sRGB view.
+                    srgb_view: name == "gb0" && spec.has_gbuffer_decals(),
                     ..image(format, render)
                 },
             )
@@ -787,6 +813,7 @@ pub(crate) fn build_variant(
                     size: ImageSize::Output { shift: 0 },
                     samples: vk::SampleCountFlags::TYPE_1,
                     extra_usage: vk::ImageUsageFlags::SAMPLED,
+                    srgb_view: false,
                 },
             ),
             graph.transient_image(
@@ -928,6 +955,36 @@ pub(crate) fn build_variant(
         } else {
             pass
         };
+        // N2c (ADR-0023 §7a): the `Paint` decals between the receivers (the pass above draws
+        // the terrain alone) and the rest, which loads every target and draws the rest. The
+        // decals attach the depth read-only, test their back faces against it and sample it
+        // in the same layout. Without a `Paint` decal both passes are only reserved and the
+        // pass above draws everything: the same transients, no split, no barriers.
+        if let Some(temporal) = temporal.filter(|_| spec.has_gbuffer_decals()) {
+            let decals = graph
+                .pass("gbuffer_decals", PassKind::GBufferDecals)
+                .access(temporal.gbuffer[0], Access::ColorReadWrite)
+                .access(depth, Access::DepthReadSampled);
+            if !paint {
+                let _ = decals.reserved();
+            }
+            let rest = graph
+                .pass("gbuffer_rest", PassKind::GBufferRest)
+                .access(bones, Access::VertexStorageRead)
+                .access(depth, Access::DepthReadWrite)
+                .access(temporal.motion, Access::ColorReadWrite);
+            let rest = temporal.gbuffer.iter().fold(rest, |pass, &target| {
+                pass.access(target, Access::ColorReadWrite)
+            });
+            let rest = match outline_ids {
+                Some(OutlineIdResources { ids, .. }) => rest.access(ids, Access::ColorReadWrite),
+                None => rest,
+            };
+            let rest = rest.access(hdr, Access::ColorReadWrite);
+            if !paint {
+                let _ = rest.reserved();
+            }
+        }
     }
     if let Some(temporal) = temporal {
         // ADR-0021 §2d: both masks start at 0 every frame; the distortion, the particles and
@@ -2356,7 +2413,7 @@ mod tests {
                 for (capture, offscreen) in [(false, 0), (true, OFFSCREEN_VARIANTS - 1)] {
                     // Without haze on screen: the same transients, neither pass, and the
                     // particles straight after the water (or the scene).
-                    let idle = build_variant(&spec, capture, offscreen, false)
+                    let idle = build_variant(&spec, capture, offscreen, false, true)
                         .expect("the hazeless variant compiles");
                     assert!(idle.graph.shares_transients_with(&plain.graph), "{spec:?}");
                     assert_eq!(idle.graph.culled(), [] as [&str; 0]);
@@ -2447,22 +2504,42 @@ mod tests {
     fn the_deferred_frame_classifies_then_lights() {
         let mut largest = 0;
         for spec in tiered_specs() {
-            for gbuffer_debug in [false, true] {
+            for (gbuffer_debug, gbuffer_decals) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
                 let spec = FrameSpec {
                     deferred: true,
                     gbuffer_debug,
+                    gbuffer_decals,
                     ..spec
                 };
                 assert!(spec.has_deferred());
+                assert_eq!(spec.has_gbuffer_decals(), gbuffer_decals);
                 let base = build(&spec, false, 0).expect("compiles");
                 for haze in [false, true] {
                     for capture in [false, true] {
                         for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
-                            let frame = build_variant(&spec, capture, offscreen, haze)
-                                .expect("variant compiles");
-                            assert!(frame.graph.shares_transients_with(&base.graph));
-                            assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
-                            largest = largest.max(frame.graph.passes().len());
+                            for paint in [false, true] {
+                                let frame = build_variant(&spec, capture, offscreen, haze, paint)
+                                    .expect("variant compiles");
+                                assert!(frame.graph.shares_transients_with(&base.graph));
+                                assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
+                                largest = largest.max(frame.graph.passes().len());
+                                // N2c (§7a): without a `Paint` decal the split is reserved,
+                                // so the frame records one G-buffer pass.
+                                let frame_kinds = kinds(&frame);
+                                let split = gbuffer_decals && paint;
+                                assert_eq!(
+                                    frame_kinds.contains(&PassKind::GBufferDecals),
+                                    split,
+                                    "{spec:?}"
+                                );
+                                assert_eq!(
+                                    frame_kinds.contains(&PassKind::GBufferRest),
+                                    split,
+                                    "{spec:?}"
+                                );
+                            }
                         }
                     }
                 }
@@ -2506,6 +2583,35 @@ mod tests {
                 };
                 let tiles = base.resources.tiles.expect("the tile buffer");
                 let temporal = base.resources.temporal.expect("temporal");
+                // N2c (§7a): the G-buffer pass split around the decals, the receivers first;
+                // the decals blend into gb0 (sRGB view) with the depth sampled, and the rest
+                // loads everything and tests the depth again.
+                let decals = at(PassKind::GBufferDecals);
+                let rest = at(PassKind::GBufferRest);
+                assert_eq!(decals.is_some(), gbuffer_decals, "{spec:?}");
+                assert_eq!(rest.is_some(), gbuffer_decals, "{spec:?}");
+                if let (Some(decals), Some(rest)) = (decals, rest) {
+                    assert_eq!((decals, rest), (prepass + 1, prepass + 2), "{spec:?}");
+                    assert!(rest < classify);
+                    let gb0 = temporal.gbuffer[0];
+                    assert!(graph[decals].uses(gb0));
+                    assert_eq!(layout(decals, gb0), L::COLOR_ATTACHMENT_OPTIMAL);
+                    assert_eq!(
+                        layout(decals, base.resources.depth),
+                        L::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                    );
+                    assert_eq!(
+                        layout(rest, base.resources.depth),
+                        L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                    );
+                    for gb in temporal.gbuffer {
+                        assert_eq!(layout(rest, gb), L::COLOR_ATTACHMENT_OPTIMAL);
+                    }
+                    assert_eq!(
+                        layout(rest, base.resources.hdr),
+                        L::COLOR_ATTACHMENT_OPTIMAL
+                    );
+                }
                 // The G-buffer pass writes `hdr`; the lighting reads the G-buffer and the depth
                 // sampled, and `hdr` as a storage image; the sky draws over it.
                 assert_eq!(
@@ -2599,8 +2705,9 @@ mod tests {
         }
         assert!(largest <= crate::graph::MAX_PASSES, "{largest} passes");
         // The largest deferred frame: a G-buffer debug view with everything on (the full
-        // water, so no `simple_water`), one pass more than the forward one.
-        assert_eq!(largest, 39);
+        // water, so no `simple_water`) and the G-buffer decals (N2c: two passes more, the
+        // decals and the rest), three passes more than the forward one.
+        assert_eq!(largest, 41);
     }
 
     /// A G-buffer debug view (ADR-0023 §1f) runs after `temporal` and before the post chain,
@@ -2616,7 +2723,7 @@ mod tests {
             for haze in [false, true] {
                 for capture in [false, true] {
                     for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
-                        let frame = build_variant(&spec, capture, offscreen, haze)
+                        let frame = build_variant(&spec, capture, offscreen, haze, true)
                             .expect("variant compiles");
                         assert!(frame.graph.shares_transients_with(&base.graph), "{spec:?}");
                         assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
@@ -2655,7 +2762,7 @@ mod tests {
             for haze in [false, true] {
                 for capture in [false, true] {
                     for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
-                        let frame = build_variant(&spec, capture, offscreen, haze)
+                        let frame = build_variant(&spec, capture, offscreen, haze, true)
                             .expect("variant compiles");
                         assert!(frame.graph.shares_transients_with(&base.graph), "{spec:?}");
                         assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");

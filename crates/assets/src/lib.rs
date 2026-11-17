@@ -123,8 +123,10 @@ pub use map_visuals::{
     MapTerrain, MapVisuals, MapVisualsError, MapWater, TerrainLayer, valid_mesh_name,
 };
 pub use material::{
-    MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
-    texture_path,
+    CompatMaterial, CompatOverride, DEFAULT_DIELECTRIC_F0, MAX_DIELECTRIC_F0, MAX_MATERIAL_BYTES,
+    MaterialDesc, MaterialError, MaterialShader, ModelParams, ShadingModel, THIN_FILM_IOR,
+    THIN_FILM_THICKNESS_NM, TextureSlot, Transmission, has_emissive_mask, ior_to_f0, material_path,
+    texture_path, thin_film_reflectance,
 };
 pub use mesh::{MeshData, MeshError, bounding_sphere};
 #[cfg(feature = "glb")]
@@ -489,6 +491,12 @@ impl AssetManifest {
             };
             report.materials += 1;
             report.textured += usize::from(stats.textured);
+            if let Some(slot) = ShadingModel::ALL
+                .iter()
+                .position(|model| *model == stats.model)
+            {
+                report.models[slot] += 1;
+            }
             report.bound_textures += stats.textures.len();
             for (name, bytes) in stats.textures {
                 if !seen.contains(&name) {
@@ -580,10 +588,13 @@ pub struct MaterialReport {
     pub bound_textures: usize,
     /// Texel bytes of the distinct textures, every mip level, as stored on disk.
     pub texture_bytes: usize,
+    /// Materials per shading model, in [`ShadingModel::ALL`] order (ADR-0023 §6c).
+    pub models: [usize; ShadingModel::ALL.len()],
 }
 
 struct MaterialStats {
     textured: bool,
+    model: ShadingModel,
     /// `(texture name, texel bytes)` per bound texture.
     textures: Vec<(String, usize)>,
 }
@@ -607,6 +618,71 @@ fn check_material(
     if !path.exists() {
         return Ok(None);
     }
+    check_material_file(
+        root,
+        canonical_root,
+        &path,
+        &format!("materials/{model}.toml"),
+    )
+    .map(Some)
+}
+
+/// Every material descriptor under `root/materials/`, bound to a model or not: the
+/// directory's own `*.toml` and those one level down (sample sets such as
+/// `materials/samples/`), except `provenance.toml`. Each must load with its textures and
+/// pass both evaluators' rules ([`MaterialDesc::check_evaluators`], ADR-0023 §10 and gate 8).
+/// Returns one message per failing descriptor, sorted; none without a `materials/`
+/// directory. For `content-check`.
+#[must_use]
+pub fn check_material_dir(root: &Path) -> Vec<String> {
+    let canonical_root = root.canonicalize().ok();
+    let dir = root.join("materials");
+    let mut files = Vec::new();
+    let list = |dir: &Path| -> Vec<std::path::PathBuf> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        paths
+    };
+    for path in list(&dir) {
+        if path.is_dir() {
+            files.extend(list(&path).into_iter().filter(|path| path.is_file()));
+        } else {
+            files.push(path);
+        }
+    }
+    let mut problems = Vec::new();
+    for path in files {
+        let is_toml = path.extension().is_some_and(|ext| ext == "toml");
+        let is_provenance = path
+            .file_name()
+            .is_some_and(|name| name == "provenance.toml");
+        if !is_toml || is_provenance {
+            continue;
+        }
+        let shown = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Err(problem) = check_material_file(root, canonical_root.as_deref(), &path, &shown) {
+            problems.push(problem.to_string());
+        }
+    }
+    problems
+}
+
+/// Checks one material descriptor at `path` (shown as `shown`) and its textures.
+fn check_material_file(
+    root: &Path,
+    canonical_root: Option<&Path>,
+    path: &Path,
+    shown: &str,
+) -> Result<MaterialStats, AssetFileProblem> {
     let inside = |path: &Path| -> Result<std::path::PathBuf, String> {
         let canonical = path.canonicalize().map_err(|error| error.to_string())?;
         if canonical_root.is_some_and(|root| !canonical.starts_with(root)) {
@@ -614,12 +690,12 @@ fn check_material(
         }
         Ok(canonical)
     };
-    let shown = format!("materials/{model}.toml");
     let canonical =
-        inside(&path).map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
+        inside(path).map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
     let material = MaterialDesc::load_file(&canonical)
         .map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
     let mut textures = Vec::new();
+    let mut emissive_mask = false;
     for (slot, name) in material.bound_textures() {
         let shown = format!("{shown}: {} texture textures/{name}.ktx2", slot.name());
         let texture_file = texture_path(root, name).expect("validated by MaterialDesc");
@@ -633,12 +709,19 @@ fn check_material(
                 texture.format()
             )));
         }
+        emissive_mask |=
+            slot == TextureSlot::MetallicRoughness && has_emissive_mask(texture.format());
         textures.push((name.to_owned(), texture.data().len()));
     }
-    Ok(Some(MaterialStats {
+    // ADR-0023 §10: the material against both evaluators.
+    material
+        .check_evaluators(emissive_mask)
+        .map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
+    Ok(MaterialStats {
         textured: material.shader == MaterialShader::Textured,
+        model: material.shading_model(),
         textures,
-    }))
+    })
 }
 
 /// Combined parse/validation error.
@@ -1225,5 +1308,41 @@ fallback = "a"
         assert_eq!(issues[0].problem, AssetFileProblem::OutsideRoot);
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    /// Gate 8 (ADR-0023, N2c): every descriptor under `materials/` (and one level of
+    /// subdirectories, such as the `samples` sheet set) is checked, whether a pack's unit
+    /// names it or not; the shipped ones pass and a broken one is named.
+    #[test]
+    fn material_dir_checks_every_descriptor() {
+        let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        assert_eq!(check_material_dir(&content), Vec::<String>::new());
+        let root = temp_root("material-dir");
+        std::fs::create_dir_all(root.join("materials/set")).expect("temp dir");
+        std::fs::write(root.join("materials/set/provenance.toml"), "not a material")
+            .expect("write");
+        std::fs::write(root.join("materials/set/notes.txt"), "skipped").expect("write");
+        std::fs::create_dir_all(root.join("textures")).expect("temp dir");
+        std::fs::write(
+            root.join("textures/x.ktx2"),
+            include_bytes!("../../../content/textures/sentinel-base.ktx2"),
+        )
+        .expect("write");
+        let textured = "shader = \"textured\"\nbase_color = \"x\"\n";
+        std::fs::write(root.join("materials/ok.toml"), textured).expect("write");
+        // A valid descriptor that is black on Compat: the evaluator rule catches it.
+        std::fs::write(
+            root.join("materials/set/bad.toml"),
+            format!("{textured}model = \"unlit\"\n"),
+        )
+        .expect("write");
+        let problems = check_material_dir(&root);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("materials/set/bad.toml"),
+            "{problems:?}"
+        );
+        assert!(problems[0].contains("unlit"), "{problems:?}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

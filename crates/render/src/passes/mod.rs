@@ -4,6 +4,7 @@
 pub(crate) mod capture;
 pub(crate) mod composite;
 pub(crate) mod contact;
+pub(crate) mod decal_gbuffer;
 pub(crate) mod deferred;
 pub(crate) mod environment;
 pub(crate) mod fog;

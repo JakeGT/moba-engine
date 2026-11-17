@@ -263,6 +263,7 @@ impl EnvironmentResources {
             water: self.water_pipeline_layout(),
             full_water: self.full_water(),
             decals: self.config.decals,
+            material_gbuffer: None,
         }
     }
 

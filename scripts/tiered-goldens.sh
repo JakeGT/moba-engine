@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Tiered goldens (ADR-0021 §7, verification gate 4): Low (Quality), High, native and the
+# Tiered goldens (ADR-0021 §7, verification gate 4): Low (Quality), High, native, the
 # overlay over moving units (a two-tick capture: the history warms up at tick n - 1 and tick n
-# is captured with the camera panned), on lavapipe at 640x360 with the HUD at half scale.
+# is captured with the camera panned), the material-model sheet (ADR-0023 gate 5, N2c: one
+# sphere per shading model, MOBA_MATERIAL_SHEET=samples) and the G-buffer decals (the R3b
+# teamfight replay's paint), on lavapipe at 640x360 with the HUD at half scale.
 #
 #   scripts/tiered-goldens.sh [client binary] [image-check binary] [output dir]
 #
@@ -61,11 +63,18 @@ capture() {
 local_scene=(MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90)
 network_scene=(MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120
   MOBA_SMOKE_FRAMES=100000)
+# One sphere per shading model, seen side-on (crates/client/src/app/material_sheet.rs).
+sheet_scene=(MOBA_MATERIAL_SHEET=samples MOBA_PREVIEW_CAMERA=1.5708,0.45,11,0,-12)
+# The R3b teamfight replay mid-fight: paint decals on the ground under the units.
+teamfight_scene=(MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330
+  MOBA_CAMERA_DISTANCE=30 MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40)
 cases=(
   "low MOBA_QUALITY=low ${local_scene[*]}"
   "high MOBA_QUALITY=high ${local_scene[*]}"
   "native MOBA_QUALITY=high MOBA_UPSCALE_MODE=native ${local_scene[*]}"
   "overlay MOBA_QUALITY=high MOBA_CAPTURE_TWO_TICK=1 ${network_scene[*]}"
+  "materials MOBA_QUALITY=high ${sheet_scene[*]} ${local_scene[*]}"
+  "decals MOBA_QUALITY=high ${teamfight_scene[*]}"
 )
 upscalers=${UPSCALERS:-taau fsr3}
 hashes=${TIERED_HASHES:-tests/golden/render-tiered-hashes.txt}

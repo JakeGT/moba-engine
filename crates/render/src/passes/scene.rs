@@ -254,6 +254,19 @@ pub(crate) struct PrepassTarget {
     /// The main view's lighting set (the G-buffer prepass's fragment stages read it).
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) extent: vk::Extent2D,
+    /// Which draws this recording makes (N2c: the G-buffer pass split around the decals).
+    pub(crate) phase: PrepassPhase,
+}
+
+/// The draws one prepass recording makes (N2c, ADR-0023 §7a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrepassPhase {
+    /// Everything, clearing the targets (one G-buffer pass, or the depth prepass).
+    All,
+    /// The receivers (the terrain), clearing the targets and storing them for the decals.
+    Receivers,
+    /// The rest (units, walls, props, minions, foliage, sky) over the loaded targets.
+    Rest,
 }
 
 /// The `tc_mask` pass's targets (ADR-0021 §2d).
@@ -515,8 +528,9 @@ pub(crate) struct ScenePipelines {
 pub(crate) struct PrepassPipelines {
     terrain: GraphicsPipeline,
     unit: GraphicsPipeline,
-    /// The textured meshes' G-buffer pipeline (temporal prepass only, ADR-0023 §1e); the
-    /// position-only prepass draws them with [`Self::unit`].
+    /// The textured meshes' G-buffer pipeline (temporal prepass only, ADR-0023 §1e; N2c:
+    /// the Slang material stage with the material layout); the position-only prepass draws
+    /// them with [`Self::unit`].
     unit_textured: Option<GraphicsPipeline>,
     /// `None` without skinning, or if it failed to build (skinned meshes are then drawn by
     /// the scene pass alone: correct, without early rejection, AO depth or an outline ID).
@@ -549,8 +563,35 @@ pub(crate) struct EnvironmentLayouts {
     pub(crate) water: vk::PipelineLayout,
     pub(crate) full_water: bool,
     /// Decals are on (`EnvironmentConfig::decals`); off, the terrain uses
-    /// `terrain_nodecals.frag`, its decal code compiled out.
+    /// `terrain_nodecals.frag` (and on the deferred frame `terrain_gbuffer_nodecals*_hdr`),
+    /// its decal code compiled out.
     pub(crate) decals: bool,
+    /// The textured units' G-buffer layout (N2c, Tiered: camera, instances, the bindless
+    /// set, and [`MaterialPush`]); `None` on Compat.
+    pub(crate) material_gbuffer: Option<vk::PipelineLayout>,
+}
+
+/// The Tiered material table the textured units' G-buffer stage reads (N2c, ADR-0023 §6d).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MaterialTableSpec {
+    /// The bindless set's layout and the set (bound at set 2 of the material layout).
+    pub(crate) bindless_layout: vk::DescriptorSetLayout,
+    pub(crate) bindless_set: vk::DescriptorSet,
+    /// The table's device address.
+    pub(crate) table_address: u64,
+}
+
+/// `MaterialPush` in `shaders/slang/unit_material_gbuffer.slang` (32 bytes): the vertex
+/// stage's [`SkinPush`], then the material table's address and the draw's material. The
+/// layout declares `VERTEX` 0..16 and `FRAGMENT` 0..32, so the skin words are pushed to both
+/// stages and the material words to the fragment stage alone.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct MaterialPush {
+    pub(crate) skin: [u32; 4],
+    pub(crate) table: u64,
+    pub(crate) material: u32,
+    pub(crate) reserved: u32,
 }
 
 /// Attachments of the full water pass (R3b).
@@ -594,6 +635,10 @@ pub(crate) struct SceneSetSpec {
     pub(crate) depth: DepthConvention,
     /// The deferred lighting (ADR-0023 §2, N2b): the G-buffer pass also writes `hdr`.
     pub(crate) deferred: bool,
+    /// The deferred frame's `Paint` decals are the `gbuffer_decals` pass, so the G-buffer
+    /// terrain has no decal code (`RenderConfig::paint_decal_pass`; ADR-0023 amendment 3
+    /// item 31). Otherwise the terrain takes them inline, as N2b's did.
+    pub(crate) paint_pass: bool,
     /// The world draws the sky (`WorldConfig::sky`): the deferred frame's G-buffer pass
     /// writes its radiance into `hdr`; without it the sky's draw writes `clear_color` there.
     pub(crate) sky: bool,
@@ -625,20 +670,31 @@ impl ScenePipelines {
             overlay,
             depth,
             deferred,
+            paint_pass,
             sky: world_sky,
             clear_color,
         } = set;
         let depth_compare = depth.compare();
         let module = |name| shaders.module(device, name);
         let unit_vertex = module("unit.vert")?;
-        let unit_fragment = module("unit.frag")?;
+        // N2c (ADR-0023 §6b): the tiered forward units shade with the Tiered BRDF core.
+        let unit_fragment = module(if overlay {
+            "unit_tiered.frag"
+        } else {
+            "unit.frag"
+        })?;
         let textured_vertex = module("unit_textured.vert")?;
-        let textured_fragment = module("unit_textured.frag")?;
+        let textured_fragment = module(if overlay {
+            "unit_textured_tiered.frag"
+        } else {
+            "unit_textured.frag"
+        })?;
         let terrain_vertex = module("terrain.vert")?;
         // ADR-0021 §5b: on Tiered the glow decals draw in the overlay, so the scene's terrain,
         // foliage and water compile them out.
         let terrain_fragment = module(match (environment.decals, overlay) {
-            (false, _) => "terrain_nodecals.frag",
+            (false, false) => "terrain_nodecals.frag",
+            (false, true) => "terrain_nodecals_tiered.frag",
             (true, false) => "terrain.frag",
             (true, true) => "terrain_tiered.frag",
         })?;
@@ -904,7 +960,11 @@ impl ScenePipelines {
                 skinned.is_some(),
                 vat.is_some(),
                 deferred.then_some(color_format),
+                // The G-buffer terrain without decal code: the decal pass draws them, or
+                // decals are off (as the forward terrain's `terrain_nodecals*.frag`).
+                paint_pass || !environment.decals,
                 (!world_sky).then(|| clear_color.map(f32::from_bits)),
+                environment.material_gbuffer,
             )?)
         } else {
             let id_format = outline_ids.then_some(crate::frame_graph::OUTLINE_ID_FORMAT);
@@ -1001,6 +1061,7 @@ impl ScenePipelines {
                         depth_write: false,
                         depth_compare,
                         samples,
+                        cull_mode: vk::CullModeFlags::NONE,
                     },
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?,
@@ -1130,7 +1191,9 @@ impl ScenePipelines {
         skinned: bool,
         vat: bool,
         hdr: Option<vk::Format>,
+        terrain_nodecals: bool,
         sky_clear: Option<[f32; 4]>,
+        material_layout: Option<vk::PipelineLayout>,
     ) -> RenderResult<PrepassPipelines> {
         let module = |name| shaders.module(device, name);
         let depth_compare = depth.compare();
@@ -1143,12 +1206,19 @@ impl ScenePipelines {
             "unit_gbuffer_hdr.frag",
             "unit_gbuffer_ids_hdr.frag",
         ]))?;
+        // N2c (ADR-0023 §6d): the textured units' stage is Slang, reading the material table
+        // and the bindless textures through the material layout.
         let unit_textured_fragment = module(pick([
-            "unit_textured_gbuffer.frag",
-            "unit_textured_gbuffer_ids.frag",
-            "unit_textured_gbuffer_hdr.frag",
-            "unit_textured_gbuffer_ids_hdr.frag",
+            "unit_material_gbuffer.slang",
+            "unit_material_gbuffer_ids.slang",
+            "unit_material_gbuffer_hdr.slang",
+            "unit_material_gbuffer_ids_hdr.slang",
         ]))?;
+        // The Slang stage declares the material layout's sets and push block; the scene layout
+        // would not match it, so a missing layout is an error, not a fallback.
+        let material_layout = material_layout.ok_or(RenderError::InvalidMaterial(
+            "the G-buffer prepass needs the material table's pipeline layout (Tiered)",
+        ))?;
         let target = |format, write_mask| ColorTarget {
             format,
             write_mask,
@@ -1209,6 +1279,12 @@ impl ScenePipelines {
         let suffixed = |base: &'static str| -> &'static str {
             match (base, hdr.is_some()) {
                 (_, false) => base,
+                ("terrain_gbuffer.frag", true) if terrain_nodecals => {
+                    "terrain_gbuffer_nodecals_hdr.frag"
+                }
+                ("terrain_gbuffer_ids.frag", true) if terrain_nodecals => {
+                    "terrain_gbuffer_nodecals_ids_hdr.frag"
+                }
                 ("terrain_gbuffer.frag", true) => "terrain_gbuffer_hdr.frag",
                 ("terrain_gbuffer_ids.frag", true) => "terrain_gbuffer_ids_hdr.frag",
                 ("foliage_gbuffer.frag", true) => "foliage_gbuffer_hdr.frag",
@@ -1238,6 +1314,7 @@ impl ScenePipelines {
                     depth_write,
                     samples,
                     depth_compare,
+                    cull_mode: vk::CullModeFlags::NONE,
                 },
             )
             .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -1271,6 +1348,11 @@ impl ScenePipelines {
             &written[..count],
             true,
         )?;
+        // `RenderConfig::pipeline_stats`: the G-buffer terrain stage carries the `Paint`
+        // decals' code again (ADR-0023 amendment 3 item 31), as the forward one does.
+        for line in device.pipeline_statistics(terrain.handle()) {
+            eprintln!("[render] pipeline-stats terrain_gbuffer {line}");
+        }
         let unit = build(
             layout,
             Some(VertexLayout::Static),
@@ -1279,23 +1361,45 @@ impl ScenePipelines {
             &units[..count],
             true,
         )?;
-        let unit_textured = build(
-            layout,
+        // The Slang material stage's specialisation constants: the material sampler's
+        // bindless slot (0) and the table's length (1), from the renderer's own values.
+        let material_constants: [u32; 2] = [
+            crate::bindless::MATERIAL_SAMPLER.index(),
+            crate::material::MAX_MATERIALS as u32,
+        ];
+        let material_data: [u8; 8] = bytemuck::cast(material_constants);
+        let material_entries: [vk::SpecializationMapEntry; 2] = core::array::from_fn(|index| {
+            vk::SpecializationMapEntry::default()
+                .constant_id(u32::try_from(index).expect("two constants"))
+                .offset(u32::try_from(4 * index).expect("two constants"))
+                .size(4)
+        });
+        let material_specialization = vk::SpecializationInfo::default()
+            .map_entries(&material_entries)
+            .data(&material_data);
+        let unit_textured = build_specialized(
+            material_layout,
             Some(VertexLayout::StaticTextured),
             module("unit_textured_gbuffer.vert")?.handle(),
             unit_textured_fragment.handle(),
+            Some(&material_specialization),
             &units[..count],
             true,
         )?;
         let skinned_pipeline =
-            |vertex, vertex_layout, fragment: &crate::resources::ShaderModule| {
+            |vertex,
+             vertex_layout,
+             fragment: &crate::resources::ShaderModule,
+             layout,
+             specialization: Option<&vk::SpecializationInfo<'_>>| {
                 module(vertex)
                     .and_then(|vertex| {
-                        build(
+                        build_specialized(
                             layout,
                             Some(vertex_layout),
                             vertex.handle(),
                             fragment.handle(),
+                            specialization,
                             &units[..count],
                             true,
                         )
@@ -1305,21 +1409,34 @@ impl ScenePipelines {
                     })
                     .ok()
             };
-        let (skinned, skinned_textured) = if skinned {
-            (
-                skinned_pipeline(
-                    "skinned_gbuffer.vert",
-                    VertexLayout::Skinned,
-                    &unit_fragment,
-                ),
+        let skinned = if skinned {
+            skinned_pipeline(
+                "skinned_gbuffer.vert",
+                VertexLayout::Skinned,
+                &unit_fragment,
+                layout,
+                None,
+            )
+        } else {
+            None
+        };
+        // The material path draws the textured skinned meshes only with their own pipeline
+        // (`draw_material_units`), so with skinning on, that pipeline failing is an error:
+        // the textured heroes would otherwise vanish from the deferred frame.
+        let skinned_textured = match skinned {
+            Some(_) => Some(
                 skinned_pipeline(
                     "skinned_textured_gbuffer.vert",
                     VertexLayout::SkinnedTextured,
                     &unit_textured_fragment,
-                ),
-            )
-        } else {
-            (None, None)
+                    material_layout,
+                    Some(&material_specialization),
+                )
+                .ok_or(RenderError::InvalidMaterial(
+                    "the textured skinned G-buffer pipeline failed to build",
+                ))?,
+            ),
+            None => None,
         };
         let vat = if vat {
             Some(build(
@@ -1427,6 +1544,7 @@ impl ScenePipelines {
                         depth_write: true,
                         depth_compare,
                         samples: vk::SampleCountFlags::TYPE_1,
+                        cull_mode: vk::CullModeFlags::NONE,
                     },
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -1524,6 +1642,11 @@ pub(crate) struct ScenePass {
     vat: VatMeshes,
     /// Layout of the VAT pipelines: sets 0/1/3 as `pipeline_layout`, set 2 the VAT set.
     vat_pipeline_layout: PipelineLayout,
+    /// The textured units' G-buffer layout and the table it reads (N2c, Tiered).
+    material_pipeline_layout: Option<PipelineLayout>,
+    material_table: Option<MaterialTableSpec>,
+    /// Per mesh slot: its material's index in the material table (with a textured set).
+    mesh_material_index: [u16; MAX_MESHES],
     /// Per mesh slot: its index in `vat`, or `u8::MAX` for a mesh without a VAT.
     mesh_vat: [u8; MAX_MESHES],
     /// Per mesh slot: the finest level this tier draws (its triangle budget, R8).
@@ -1560,6 +1683,8 @@ pub(crate) struct MainViewSpec {
     pub(crate) depth: DepthConvention,
     /// The deferred lighting (N2b): the G-buffer pass also writes `hdr`. With `temporal`.
     pub(crate) deferred: bool,
+    /// [`SceneSetSpec::paint_pass`]. With `deferred`.
+    pub(crate) paint_pass: bool,
     /// The world draws the sky ([`SceneSetSpec::sky`]).
     pub(crate) sky: bool,
     /// [`SceneSetSpec::clear_color`].
@@ -1579,6 +1704,7 @@ impl MainViewSpec {
             overlay: self.overlay && !msaa,
             depth: self.depth,
             deferred: self.deferred && self.temporal && !msaa,
+            paint_pass: self.paint_pass && self.deferred && self.temporal && !msaa,
             sky: self.sky,
             clear_color: self.clear_color,
         };
@@ -1592,6 +1718,7 @@ impl MainViewSpec {
             overlay: false,
             depth: self.depth,
             deferred: false,
+            paint_pass: false,
             sky: self.sky,
             clear_color: self.clear_color,
         });
@@ -1646,6 +1773,7 @@ impl ScenePass {
         skinning: bool,
         culling: CullSettings,
         environment: EnvironmentConfig,
+        material_table: Option<MaterialTableSpec>,
     ) -> RenderResult<Self> {
         let (camera_binding, instance_binding) = buffer_set_layout_bindings();
         // Every scene pipeline shares one layout, so its per-stage descriptor totals must fit
@@ -1745,6 +1873,31 @@ impl ScenePass {
         ];
         let vat_pipeline_layout =
             PipelineLayout::with_push_constants(device.device.clone(), &vat_layouts, &skin_push)?;
+        // N2c (ADR-0023 §6d): the textured units' G-buffer stage reads the material table by
+        // device address and the textures from the bindless set (here at set 2). The push
+        // ranges overlap: the skin words go to both stages, the material words to the
+        // fragment stage. Sets 0/1 bound with this layout are not compatible with the scene
+        // layout's (another push range), so the prepass binds them again around its draws.
+        let material_pipeline_layout = material_table
+            .map(|table| {
+                let layouts = [
+                    camera_layout.handle(),
+                    instance_layout.handle(),
+                    table.bindless_layout,
+                ];
+                let ranges = [
+                    vk::PushConstantRange::default()
+                        .stage_flags(vk::ShaderStageFlags::VERTEX)
+                        .offset(0)
+                        .size(SKIN_PUSH_SIZE),
+                    vk::PushConstantRange::default()
+                        .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                        .offset(0)
+                        .size(core::mem::size_of::<MaterialPush>() as u32),
+                ];
+                PipelineLayout::with_push_constants(device.device.clone(), &layouts, &ranges)
+            })
+            .transpose()?;
         let environment = EnvironmentResources::new(
             device,
             frames,
@@ -1755,7 +1908,10 @@ impl ScenePass {
             environment,
         )?;
         let (base_set, main_set) = main.sets(shadow);
-        let layouts = environment.layouts();
+        let mut layouts = environment.layouts();
+        layouts.material_gbuffer = material_pipeline_layout
+            .as_ref()
+            .map(PipelineLayout::handle);
         let pipelines = ScenePipelines::build(
             device,
             shaders,
@@ -1838,6 +1994,9 @@ impl ScenePass {
             skinning,
             vat,
             vat_pipeline_layout,
+            material_pipeline_layout,
+            material_table,
+            mesh_material_index: [0; MAX_MESHES],
             mesh_vat: [u8::MAX; MAX_MESHES],
             mesh_finest: [0; MAX_MESHES],
             terrain_chunks: Vec::with_capacity(MAX_TERRAIN_CHUNKS),
@@ -1898,7 +2057,13 @@ impl ScenePass {
                 self.depth_format,
                 set,
                 self.skinning,
-                self.environment.layouts(),
+                crate::passes::scene::EnvironmentLayouts {
+                    material_gbuffer: self
+                        .material_pipeline_layout
+                        .as_ref()
+                        .map(PipelineLayout::handle),
+                    ..self.environment.layouts()
+                },
             )
         };
         let pipelines = build(base_set)?;
@@ -1961,7 +2126,7 @@ impl ScenePass {
     }
 
     /// Draws `mesh` with the material whose descriptor set is `set` (null for the
-    /// vertex-colour look). Load time only.
+    /// vertex-colour look) and whose material table index is `index`. Load time only.
     ///
     /// # Errors
     /// [`RenderError::InvalidMaterial`] for an unknown mesh, or a textured material on a mesh
@@ -1970,6 +2135,7 @@ impl ScenePass {
         &mut self,
         mesh: MeshId,
         set: vk::DescriptorSet,
+        index: u16,
     ) -> RenderResult<()> {
         let gpu = self
             .meshes
@@ -1981,6 +2147,7 @@ impl ScenePass {
             ));
         }
         self.mesh_material_sets[mesh.index()] = set;
+        self.mesh_material_index[mesh.index()] = index;
         Ok(())
     }
 
@@ -2846,10 +3013,13 @@ impl ScenePass {
             return;
         };
         let state = &self.views[0];
+        // N2c: the rest loads what the receivers and the decals left.
+        let rest = target.phase == PrepassPhase::Rest;
+        let load = |op| if rest { vk::AttachmentLoadOp::LOAD } else { op };
         let mut depth_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(target.depth)
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(load(vk::AttachmentLoadOp::CLEAR))
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
                 depth_stencil: self.main.depth.clear(),
@@ -2864,7 +3034,7 @@ impl ScenePass {
             let attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(ids.view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .load_op(load(vk::AttachmentLoadOp::CLEAR))
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue { uint32: [0; 4] },
@@ -2883,14 +3053,14 @@ impl ScenePass {
             vk::RenderingAttachmentInfo::default()
                 .image_view(view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .load_op(load(vk::AttachmentLoadOp::CLEAR))
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue { float32: [0.0; 4] },
                 })
         };
         let motion_attachment = target.motion.map(cleared);
-        let gbuffer_store = if target.gbuffer_store {
+        let gbuffer_store = if target.gbuffer_store || target.phase == PrepassPhase::Receivers {
             vk::AttachmentStoreOp::STORE
         } else {
             vk::AttachmentStoreOp::DONT_CARE
@@ -2902,7 +3072,7 @@ impl ScenePass {
             .map(|view| cleared(view).store_op(gbuffer_store));
         let hdr_attachment = target
             .hdr
-            .map(|view| cleared(view).load_op(vk::AttachmentLoadOp::DONT_CARE));
+            .map(|view| cleared(view).load_op(load(vk::AttachmentLoadOp::DONT_CARE)));
         let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 6];
         let mut color_count = 0;
         for attachment in motion_attachment
@@ -2948,13 +3118,35 @@ impl ScenePass {
             }
         }
         // The same terrain runs as `record` (the map's heightfield, or the R2a plane).
-        self.draw_terrain(device, command_buffer, state, &prepass.terrain);
+        if !rest {
+            self.draw_terrain(device, command_buffer, state, &prepass.terrain);
+        }
+        if target.phase == PrepassPhase::Receivers {
+            // N2c (ADR-0023 §7a): the decals follow the receivers; the rest is its own pass.
+            device.cmd_end_rendering(command_buffer);
+            return;
+        }
         // The position-only prepass shaders read no material, so one pipeline draws both
         // the vertex-colour and the textured meshes; the G-buffer prepass has a textured
         // pipeline that binds the materials. The camera list, as the scene's.
         let list = &state.camera;
+        // N2c (ADR-0023 §6d): on Tiered the textured units' G-buffer stage reads the material
+        // table through its own layout, after the vertex-colour units.
+        let material = match (
+            gbuffer.then_some(()).and(prepass.unit_textured.as_ref()),
+            &self.material_pipeline_layout,
+            self.material_table,
+        ) {
+            (Some(_), Some(layout), Some(table)) => Some((layout.handle(), table)),
+            _ => None,
+        };
+        let textured_passes: &[bool] = if material.is_some() {
+            &[false]
+        } else {
+            &[false, true]
+        };
         if list.len > 0 {
-            for textured in [false, true] {
+            for &textured in textured_passes {
                 let pipeline = match (textured, &prepass.unit_textured) {
                     (true, Some(textured)) => textured,
                     _ => &prepass.unit,
@@ -2965,7 +3157,7 @@ impl ScenePass {
         if !list.skinned.is_empty()
             && let Some(skinned) = &prepass.skinned
         {
-            for textured in [false, true] {
+            for &textured in textured_passes {
                 let pipeline = match (textured, &prepass.skinned_textured) {
                     (true, Some(textured)) => textured,
                     _ => skinned,
@@ -2978,6 +3170,23 @@ impl ScenePass {
                     textured,
                     gbuffer,
                     false,
+                );
+            }
+        }
+        if let Some((layout, table)) = material {
+            self.draw_material_units(device, command_buffer, state, frame, prepass, layout, table);
+            // Back to the scene layout for the VAT minions, the foliage and the sky: sets 0/1
+            // (another push range made them incompatible) and the lighting set.
+            self.bind_view_sets(device, command_buffer, state, frame);
+            // SAFETY: as above: the lighting set matches the scene layout's set 3.
+            unsafe {
+                device.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout.handle(),
+                    3,
+                    &[target.lighting],
+                    &[],
                 );
             }
         }
@@ -3207,6 +3416,155 @@ impl ScenePass {
 
     /// One instanced draw with `pipeline` per static mesh and level whose material is
     /// (`textured`) or is not textured, binding each material set when `bind_materials`.
+    /// The textured units' G-buffer draws (N2c, ADR-0023 §6d): the static meshes instanced,
+    /// then the skinned ones, with the material layout (`layout`): sets 0/1 and the bindless
+    /// set 2 bound with it, then per mesh the material table's address and the mesh's
+    /// material index in the fragment push range (the skin words, `VERTEX | FRAGMENT`, per
+    /// skinned draw as [`Self::draw_skinned`] pushes them).
+    #[allow(clippy::too_many_arguments)] // One draw group's state.
+    #[allow(clippy::too_many_lines)] // The static and the skinned loops, as their own draws.
+    fn draw_material_units(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        state: &SceneView,
+        frame: usize,
+        prepass: &PrepassPipelines,
+        layout: vk::PipelineLayout,
+        table: MaterialTableSpec,
+    ) {
+        let list = &state.camera;
+        let scene_frame = &state.frames[frame];
+        let sets = [
+            scene_frame.camera_set,
+            scene_frame.instance_set,
+            table.bindless_set,
+        ];
+        // SAFETY: the camera and instance sets were allocated with the layouts the material
+        // layout declares at 0 and 1, and the bindless set with its set 2 layout; all live as
+        // long as the renderer.
+        unsafe {
+            device.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                layout,
+                0,
+                &sets,
+                &[],
+            );
+        }
+        let push_material = |slot: usize| {
+            let push = MaterialPush {
+                skin: [0; 4],
+                table: table.table_address,
+                material: u32::from(self.mesh_material_index[slot]),
+                reserved: 0,
+            };
+            // SAFETY: bytes 16..32 lie in the layout's fragment range (0..32) and in no
+            // vertex range (0..16), so `FRAGMENT` alone is the exact stage set.
+            unsafe {
+                device.device.cmd_push_constants(
+                    command_buffer,
+                    layout,
+                    vk::ShaderStageFlags::FRAGMENT,
+                    16,
+                    &bytes_of(&push)[16..],
+                );
+            }
+        };
+        if list.len > 0
+            && let Some(pipeline) = &prepass.unit_textured
+        {
+            let mut bound = false;
+            for (slot, mesh) in self.meshes.iter().enumerate() {
+                if mesh.joint_count > 0
+                    || self.mesh_vat[slot] != u8::MAX
+                    || self.mesh_material_sets[slot] == vk::DescriptorSet::null()
+                {
+                    continue;
+                }
+                let mut mesh_bound = false;
+                for level in 0..usize::from(mesh.lods.count.max(1)) {
+                    let bucket = slot * MAX_LODS + level;
+                    let count = list.counts[bucket];
+                    if count == 0 {
+                        continue;
+                    }
+                    if !bound {
+                        bind_pipeline(device, command_buffer, pipeline);
+                        bound = true;
+                    }
+                    if !mesh_bound {
+                        push_material(slot);
+                        bind_mesh(device, command_buffer, mesh);
+                        mesh_bound = true;
+                    }
+                    let range = mesh.lods.level(level);
+                    // SAFETY: as in `draw_static_with`: the level's indices lie inside the
+                    // index buffer and the instances inside the view's instance buffer.
+                    unsafe {
+                        device.device.cmd_draw_indexed(
+                            command_buffer,
+                            range.index_count,
+                            count,
+                            range.first_index,
+                            0,
+                            list.starts[bucket],
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(pipeline) = &prepass.skinned_textured {
+            let mut bound_pipeline = false;
+            let mut bound_slot = u32::MAX;
+            for draw in &list.skinned {
+                let slot = draw.slot as usize;
+                if self.mesh_material_sets[slot] == vk::DescriptorSet::null() {
+                    continue;
+                }
+                if !bound_pipeline {
+                    bind_pipeline(device, command_buffer, pipeline);
+                    bound_pipeline = true;
+                }
+                if draw.slot != bound_slot {
+                    bound_slot = draw.slot;
+                    push_material(slot);
+                    bind_mesh(device, command_buffer, &self.meshes[slot]);
+                }
+                let push = SkinPush {
+                    first_bone: draw.first_bone,
+                    joint_count: draw.joint_count,
+                    reserved: [draw.previous_bone, u32::from(draw.has_previous)],
+                };
+                // SAFETY: bytes 0..16 lie in both the vertex range (0..16) and the fragment
+                // range (0..32), so both stages are named.
+                unsafe {
+                    device.device.cmd_push_constants(
+                        command_buffer,
+                        layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        bytes_of(&push),
+                    );
+                }
+                let range = self.meshes[slot].lods.level(usize::from(draw.lod));
+                // SAFETY: as in `draw_skinned`: the level's indices and the bones are in
+                // range, and `draw.instance` is a bucketed slot of the list.
+                unsafe {
+                    device.device.cmd_draw_indexed(
+                        command_buffer,
+                        range.index_count,
+                        1,
+                        range.first_index,
+                        0,
+                        draw.instance,
+                    );
+                }
+            }
+        }
+    }
+
     fn draw_static(
         &self,
         device: &DeviceContext,

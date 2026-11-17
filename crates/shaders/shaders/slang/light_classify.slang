@@ -4,8 +4,9 @@
 // tile is classed:
 // - **sky**: every pixel at the far plane: counted nowhere (`deferred_light` never sees it;
 //   the G-buffer pass drew the sky);
-// - **standard**: only `STANDARD` and `UNLIT` pixels (the fast permutation);
-// - **extended**: any other model (the full permutation).
+// - **standard**: only `UNLIT`, `STANDARD`, `FOLIAGE` and `TRANSMISSIVE_FALLBACK` pixels
+//   (the fast permutation; `FOLIAGE` joined it in N2c);
+// - **extended**: any other model (the full permutation with the models' lobes).
 // A lit tile is appended to its class's list, and that class's `VkDispatchIndirectCommand`
 // counts it. The header is reset by the `mask_clear` pass before this one
 // (`TileLayout::RESET`: counts 0, arguments (0, 0, 1)).
@@ -45,8 +46,11 @@ static const uint TILE_COUNT_WORD = 9;
 static const uint CLASS_SKY = 0;
 static const uint CLASS_STANDARD = 1;
 static const uint CLASS_EXTENDED = 2;
-// Models the standard permutation shades: UNLIT and STANDARD.
-static const uint STANDARD_MODELS = (1u << GBUFFER_MODEL_UNLIT) | (1u << GBUFFER_MODEL_STANDARD);
+// Models the standard permutation shades: UNLIT, STANDARD, FOLIAGE (its back light) and
+// TRANSMISSIVE_FALLBACK (lit as STANDARD); N2c, ADR-0023 amendment 3.
+static const uint STANDARD_MODELS = (1u << GBUFFER_MODEL_UNLIT) | (1u << GBUFFER_MODEL_STANDARD)
+                                  | (1u << GBUFFER_MODEL_FOLIAGE)
+                                  | (1u << GBUFFER_MODEL_TRANSMISSIVE_FALLBACK);
 
 groupshared uint model_mask;
 

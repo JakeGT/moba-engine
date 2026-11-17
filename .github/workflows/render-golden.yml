@@ -692,6 +692,19 @@ jobs:
             deferred-parity
         env:
           RUN: xvfb-run -a
+      # ADR-0023 amendment 3 item 31: the shipped frame inlines the terrain's `Paint` decals;
+      # the G-buffer decal pass (its `paint` graph variant, gb0's sRGB view and the terrain
+      # permutations without decal code) is built only with MOBA_PAINT_DECAL_PASS=1. This runs
+      # gate 2 on the teamfight (the scene with `Paint` decals) with the pass forced on.
+      - name: Deferred–forward parity with the G-buffer decal pass (ADR-0023 amendment 3 item 31)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          scripts/deferred-parity.sh ./target/release/moba-client ./target/release/image-check \
+            deferred-parity-paint-pass
+        env:
+          RUN: xvfb-run -a
+          PARITY_SCENES: teamfight
+          MOBA_PAINT_DECAL_PASS: "1"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -701,6 +714,7 @@ jobs:
             overlay-invariance
             tiered-goldens
             deferred-parity
+            deferred-parity-paint-pass
 
   # ADR-0021 amendment 6 item 5: `gh workflow run render-golden.yml --ref <branch>
   # -f cpu_sample=true` runs the tiered goldens (TAAU and FSR 3.1) on eight runners at once,
@@ -780,7 +794,8 @@ jobs:
           classes, cpus, status = {}, {}, 0
           # Every capture tiered-goldens.sh takes (its `cases` times TAAU and FSR 3.1); the
           # union of what the legs produced is checked as well, in case the script grows.
-          names = {p + n for p in ("", "fsr3-") for n in ("low", "high", "native", "overlay")}
+          names = {p + n for p in ("", "fsr3-") for n in (
+                   "low", "high", "native", "overlay", "materials", "decals")}
           def error(message):
               global status
               print(f"::error::{message}", file=sys.stderr)

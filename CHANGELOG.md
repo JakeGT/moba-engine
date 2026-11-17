@@ -140,6 +140,66 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **The material model on Tiered (ADR-0023 N2c and amendment 3;
+  [perf/0037](docs/perf/0037-n2c-materials.md)); the material spec is frozen for C1:**
+  - **Shading models:** `CLEARCOAT`, `SHEEN`, `ANISOTROPIC` and `THIN_FILM` lit with their own
+    lobes in `deferred_light`'s extended tiles (`include/shading_models.glsl`); `FOLIAGE` and
+    `TRANSMISSIVE_FALLBACK` moved to the standard tiles; `UNLIT` is the emissive alone. Every
+    Tiered lighting module adds multiscatter energy compensation and the material's dielectric
+    F0, with a 1024-sample split-sum LUT whose texels sit on the end points, read with one
+    fetch and integrated once per process on scoped threads (white furnace within 2 %). Each
+    model's light-invariant terms are prepared once per pixel, and the thin film's Fresnel is
+    evaluated once, at N·V. `ior` and `specular` shape only `standard`'s and `transmissive`'s
+    F0 (0.04 elsewhere, on every path); the anisotropy follows the mesh's tangent.
+  - **Material table and bindless materials:** textured units are written into the G-buffer by
+    `unit_material_gbuffer.slang`, the first Slang fragment stage, which reads 64-byte
+    `MaterialRecord`s by device address and bindless textures; a reflection test pins the
+    record and the push block, and an interface test checks the GLSL vertex stages' outputs
+    against the Slang fragment's inputs.
+  - **Content format:** `model` with a table of its parameters, `ior`, `dust`,
+    `emissive_texture`, `model_texture`, `[transmission]` and `[compat]`; the emissive mask in
+    `metallic_roughness.b` (a 3- or 4-channel map) on both paths; each model's Compat fallback
+    (`MaterialDesc::compat_fallback`). `content-check` checks every descriptor under
+    `materials/` against both evaluators and reports `material_models`.
+    `content/materials/samples/` has one material per model, and `MOBA_MATERIAL_SHEET=samples`
+    draws them as a sphere sheet.
+  - **G-buffer decals:** while the terrain is the only `Paint` receiver, its G-buffer stage
+    applies the decals inline and the frame is N2b's single G-buffer pass (amendment 3 item
+    31). `MOBA_PAINT_DECAL_PASS=1` (`RenderConfig::with_paint_decal_pass`) builds the decal
+    pass instead: on frames with a `Paint` decal the G-buffer pass is split into `prepass`
+    (the terrain, without decal code), `gbuffer_decals` (the decals' back faces against the
+    read-only depth, blended into `gb0`'s sRGB view) and `gbuffer_rest`; it costs 0.008 ms at
+    Low and 0.012 ms at High by lane on the teamfight, and the first receiver other than the
+    terrain turns it on. New frame-log lanes `gpu_gbuffer_decals` and `gpu_gbuffer_rest`, the
+    field `paint_decals_avg`, and with `MOBA_TILE_COUNTS=1` (off by default: the read-back
+    costs about 0.005 ms of GPU) `tiles_standard_avg`, `tiles_extended_avg` and
+    `extended_frames`. `MOBA_PIPELINE_STATS=1` now keeps every pipeline's statistics, compute
+    included, and logs the G-buffer terrain's and the deferred lighting's (register counts on
+    the RTX 5070 Ti: standard tiles 74, extended 105, after the per-model terms were packed
+    into three `vec4`s; item 32). Every renderer logs `[render] validation: <mode>` at
+    start-up, and a deferred Tiered frame `[render] paint decals: inline|gbuffer pass`; CI's
+    `tiered-temporal` job runs the teamfight's deferred–forward parity with the decal pass
+    forced on (`PARITY_SCENES` limits `deferred-parity.sh`'s scenes), and
+    `terrain-decal-check.sh` times both stages that inline the decals against their
+    permutations without decal code (`MOBA_DECALS=off`, which now also selects
+    `terrain_gbuffer_nodecals*_hdr` on the deferred frame): Compat's `scene` lane (pinned to
+    Compat; on Tiered it has been empty since N2b, so the old check always passed) and the
+    Tiered `prepass` lane (the median of five rounds in a 1920×1080 window, under the GPU lock
+    it takes itself), failing on a missing or zero p50 or a Tiered run that does not light
+    deferred, and skipping the Tiered half on a device not admitted to Tiered; it also bounds
+    their registers (`REGISTERS` 64, `GBUFFER_REGISTERS` 48). With the decal pass a captured frame logs
+    `[render] capture frame: paint_decals=N plan=...`, and the CI step requires a live `Paint`
+    decal drawn through the pass.
+  - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
+    (worst pixel 3, 3, 3 and 6/255 locally, with the inline decals and with the decal pass);
+    Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the emissive mask,
+    which only the N2c samples carry). On the RTX 5070 Ti the teamfight frame is 1.014–1.063×
+    N1's forward frame (gate ≤ 1.10× on `gpu_total`; GPU span up to 1.074×, advisory) and
+    0.998–1.002× N2b's on p50 (up to 1.003× on p95); the material sheet's close view, the
+    extended-model check, is 1.091× an estimate of N1 drawing the spheres (criterion 1.10×;
+    1.123× N1's frame without them), and the headroom left for N2d–N2f (0.0088 ms at Low, 0.0078
+    ms at High after the phases' budgets) is budgeted in amendment 3, with N2d and N2f recording
+    the area lights and glass pixels they measure.
 - **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
   [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
   Compat is byte-identical (its images; every Compat SPIR-V module but `sky.frag`, whose body

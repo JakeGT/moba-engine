@@ -234,14 +234,9 @@ pub(crate) fn create_blended(
         .dynamic_state(&dynamic)
         .layout(spec.layout)
         .push(&mut rendering);
-    // Statistics for the perf check of the terrain shader's registers (ADR-0017 §1).
-    let create_info = if device.pipeline_stats {
-        create_info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR)
-    } else {
-        create_info
-    };
 
-    // Every referenced struct outlives the call; the layout matches the shaders.
+    // Every referenced struct outlives the call; the layout matches the shaders (with
+    // `RenderConfig::pipeline_stats`, the device adds the statistics flag).
     device.create_graphics_pipeline(&create_info)
 }
 
@@ -445,6 +440,9 @@ pub(crate) enum TargetBlend {
     None,
     /// `MAX` of source and destination (the temporal masks, ADR-0021 §2d).
     Max,
+    /// Colour `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`, the destination's alpha kept
+    /// (`(ZERO, ONE)`): the G-buffer decals over `gb0` (N2c, ADR-0023 §7a).
+    Alpha,
 }
 
 /// One colour attachment of a [`TargetsSpec`] pipeline.
@@ -478,9 +476,39 @@ pub(crate) struct TargetsSpec<'a> {
     pub(crate) samples: vk::SampleCountFlags,
     /// The depth test: the main view's convention, like the scene pipelines.
     pub(crate) depth_compare: vk::CompareOp,
+    /// `NONE` but for the G-buffer decals' boxes, which draw their back faces only.
+    pub(crate) cull_mode: vk::CullModeFlags,
 }
 
-/// Creates a [`TargetsSpec`] pipeline: no culling, no depth bias, depth tested with
+/// `target`'s blend state.
+fn blend_attachment(target: &ColorTarget) -> vk::PipelineColorBlendAttachmentState {
+    let one = vk::BlendFactor::ONE;
+    let (enable, [src_color, dst_color, src_alpha, dst_alpha], op) = match target.blend {
+        TargetBlend::None => (false, [one; 4], vk::BlendOp::MAX),
+        TargetBlend::Max => (true, [one; 4], vk::BlendOp::MAX),
+        TargetBlend::Alpha => (
+            true,
+            [
+                vk::BlendFactor::SRC_ALPHA,
+                vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                vk::BlendFactor::ZERO,
+                one,
+            ],
+            vk::BlendOp::ADD,
+        ),
+    };
+    vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(enable)
+        .src_color_blend_factor(src_color)
+        .dst_color_blend_factor(dst_color)
+        .color_blend_op(op)
+        .src_alpha_blend_factor(src_alpha)
+        .dst_alpha_blend_factor(dst_alpha)
+        .alpha_blend_op(op)
+        .color_write_mask(target.write_mask)
+}
+
+/// Creates a [`TargetsSpec`] pipeline: `spec.cull_mode`, no depth bias, depth tested with
 /// `spec.depth_compare`, like the scene pipelines.
 pub(crate) fn create_targets(
     device: &DeviceContext,
@@ -531,14 +559,15 @@ pub(crate) fn create_targets(
         .depth_clamp_enable(false)
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
+        .cull_mode(spec.cull_mode)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .depth_bias_enable(false)
         .line_width(1.0);
     let multisample =
         vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(spec.samples);
+    // No depth attachment (`UNDEFINED`): no depth test.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(true)
+        .depth_test_enable(spec.depth_format != vk::Format::UNDEFINED)
         .depth_write_enable(spec.depth_write)
         .depth_compare_op(spec.depth_compare)
         .depth_bounds_test_enable(false)
@@ -546,19 +575,7 @@ pub(crate) fn create_targets(
     let mut attachments = [vk::PipelineColorBlendAttachmentState::default(); MAX_TARGETS];
     let mut formats = [vk::Format::UNDEFINED; MAX_TARGETS];
     for (index, target) in spec.colors.iter().enumerate() {
-        let (enable, source, op) = match target.blend {
-            TargetBlend::None => (false, vk::BlendFactor::ONE, vk::BlendOp::MAX),
-            TargetBlend::Max => (true, vk::BlendFactor::ONE, vk::BlendOp::MAX),
-        };
-        attachments[index] = vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(enable)
-            .src_color_blend_factor(source)
-            .dst_color_blend_factor(vk::BlendFactor::ONE)
-            .color_blend_op(op)
-            .src_alpha_blend_factor(source)
-            .dst_alpha_blend_factor(vk::BlendFactor::ONE)
-            .alpha_blend_op(op)
-            .color_write_mask(target.write_mask);
+        attachments[index] = blend_attachment(target);
         formats[index] = target.format;
     }
     let count = spec.colors.len();

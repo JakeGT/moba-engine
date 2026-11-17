@@ -3,8 +3,10 @@
 **Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-02)). N2a is recorded in
-[Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built) and N2b in
-[Amendment 2](#amendment-2-2026-11-15-n2b-deferred-lighting-for-standard-as-built).
+[Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built), N2b in
+[Amendment 2](#amendment-2-2026-11-15-n2b-deferred-lighting-for-standard-as-built) and N2c, with the
+frozen material spec, in
+[Amendment 3](#amendment-3-2026-11-17-n2c-the-material-model-as-built-and-the-frozen-material-spec).
 Proposed 2026-11-02. This is phase N2 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§3, §4, §5.2, §6.2, §6.6, §8
 and §12), written before the code.
@@ -585,8 +587,19 @@ gbuffer_rest        walls, props, structures, units  → gb0–gb2, depth, motio
   The CPU list, its order and the tier caps (Low 48, Medium 96, High and Ultra 128) stay.
 - **Water** is forward on Tiered, so it keeps evaluating `Paint` decals inline through the
   shared module.
-- **The terrain register problem goes away on Tiered.** The tiered terrain G-buffer shader has
-  no decal code. `scripts/terrain-decal-check.sh` keeps guarding Compat's `terrain.frag`.
+- **The terrain register problem goes away on Tiered** while the decal pass is on: the tiered
+  terrain G-buffer shader then has no decal code. Since amendment 3 item 31 the decals are
+  inline by default, so `scripts/terrain-decal-check.sh` guards both stages that inline them,
+  each against its permutation without decal code (`MOBA_DECALS=off`) on the networked Ultra
+  overview (the median of five interleaved rounds, a 1920×1080 window, under the GPU lock):
+  Compat's `terrain.frag` by the `scene` lane (pinned to `MOBA_RENDER_PATH=compat`) and the
+  tiered `terrain_gbuffer*_hdr` stage by the `prepass` lane, each within 1.15×, a missing or
+  zero p50 failing; and their fragment registers (64 and 48 on the RTX 5070 Ti). The Tiered
+  half fails when a run does not light deferred, and is skipped, with the gate's reason, on a
+  device not admitted to Tiered.
+- *Amendment 3 item 31:* while the terrain is the only `Paint` receiver, the tiered terrain
+  G-buffer stage keeps the decals inline (as N2b's did) and this pass is built only on request
+  (`RenderConfig::paint_decal_pass`), for the first receiver other than the terrain.
 
 **7b. `Glow` decals** (telegraphs, zones, ranges) are in N1's overlay layer (ADR-0021 §5b), not
 in the G-buffer, and N2 does not touch them.
@@ -1352,6 +1365,392 @@ clarifications:
     runtime checks rather than admission limits because the recorded device fixtures
     (`vulkan-probe --json`) do not record them, so an admission test could not hold them;
     they can join `REQUIRED_LIMITS` when the fixtures are re-recorded on #9/#127's devices.
+
+### Amendment 3 (2026-11-17, N2c): the material model as built, and the frozen material spec
+
+N2c builds §6 (the shading models past `STANDARD`, multiscatter, the material table and the
+content format with its Compat fallbacks), §7 (`Paint` decals in the G-buffer), §10's
+`content-check` rules and gate 1's GLSL-vertex / Slang-fragment interface test. It **freezes the
+material spec** (below, and `docs/content-authoring.md`, Materials and textures), which unblocks
+C1. Every departure from §1–§12 is an item here.
+
+**The frozen material spec** (C1's contract, §10). A change to any of this from now on is an
+amendment that names C1's consequence.
+
+- **Descriptor:** `<root>/materials/<model>.toml`, at most 4 KiB, unknown keys rejected, every
+  number range-checked. The ADR-0010/0011 keys are unchanged. The material-model keys, all
+  optional and for `shader = "textured"` only:
+
+  | Key | Range (default) | Meaning |
+  |---|---|---|
+  | `model` | one of §6c's eight names, `thin_film` and `transmissive` spelled so (`standard`) | the shading model |
+  | `ior` | 1..=2.5 (1.5) | `standard` and `transmissive` only: dielectric F0 = `((ior − 1)/(ior + 1))² × specular` on Tiered, above 0.16 an error; every other model's base is F0 0.04 on every path, and a non-default `ior` or `specular` on it is an error (item 24) |
+  | `dust` | 0..=1 (0) | world-space dust on up-facing surfaces, Tiered only |
+  | `emissive_texture` | a texture name | full-colour emissive, sRGB `bc7-srgb`/`rgba8-srgb`, times `emissive`, Tiered only |
+  | `model_texture` | a texture name | linear `bc7`/`rgba8`; R, G and B scale the model's data channels per texel, the AO being G on `standard`, `transmissive` and `foliage` and B on `clearcoat` and `anisotropic` (`sheen` has no AO channel); thin film: R picks the thickness between min and max, G scales the film's IOR, B is the AO (item 27); Tiered only |
+  | `[clearcoat]` | `weight` 0..=1 (1), `roughness` 0..=1 (0) | `KHR_materials_clearcoat` |
+  | `[sheen]` | `weight` 0..=1 (1), `roughness` 0..=1 (0.5), `tint` 0..=1 (0 white, 1 base colour) | `KHR_materials_sheen` |
+  | `[anisotropic]` | `strength` 0..=1 (0.5), `rotation` −π..=π rad (0) | `KHR_materials_anisotropy`: the mesh's tangent turned by `rotation` about the normal (item 26) |
+  | `[thin_film]` | `thickness_min`, `thickness_max` 100..=400 nm (100, 400; max ≥ min), `ior` 1..=2 (1.3) | `KHR_materials_iridescence` |
+  | `[foliage]` | `translucency` 0..=1 (0.35) | `KHR_materials_diffuse_transmission` |
+  | `[transmission]` | `transmission` 0..=1 (1), `thickness` 0..=10 m (0), `attenuation_color` 0..=1 (white), `attenuation_distance` 0.001..=1000 m (infinite) | `model = "transmissive"` only; parsed now, drawn by N2f |
+  | `[compat]` | `base_color_factor`, `metallic`, `roughness` 0..=1; `emissive` 0..=16 | overrides of the Compat fallback |
+
+  A model table that is not the material's model is an error, as is any model key on a
+  `vertex-color` material.
+- **The emissive mask** is `metallic_roughness.b`, on both paths, when the bound map has a third
+  channel (`bc7` or `rgba8`, `moba_assets::has_emissive_mask`); a `bc5`/`rg8` map keeps the
+  full emissive. `metallic_roughness` therefore accepts `bc7` and `rgba8` as well as `bc5`/`rg8`.
+- **The Compat fallback** is `MaterialDesc::compat_fallback()`, computed at load, then the
+  `[compat]` overrides:
+
+  | Model | Compat (and the forward Tiered frame) draws |
+  |---|---|
+  | `standard`, `sheen`, `foliage`, `transmissive` | the base as it is (`transmissive`: opaque, with the emissive mask) |
+  | `clearcoat` | roughness `mix(base, coat, 0.5 × weight)` |
+  | `anisotropic` | isotropic GGX at `sqrt((α + α_t) / 2)`, `α_t = mix(α, 1, strength²)` |
+  | `thin_film` | base colour × `1 + (t − 1) × metallic`, where `t` is the film's Fresnel at normal incidence (at `thickness_max`) over the base's F0, per channel, clamped to 0..=1: only a metal's base colour is its F0 |
+  | `unlit` | base colour 0, metallic 0, painted specular and rim 0, the emissive |
+
+- **`content-check` rules** (both evaluators, gate 8): the collapsed values are finite and in
+  range; an `unlit` material has a non-zero `emissive` (Tiered's) and a non-zero Compat
+  emissive, and no `model_texture`; `ior` and `specular` keep their defaults (1.5, 1) on every
+  model but `standard` and `transmissive`; an
+  `emissive_texture` with a non-zero `emissive` on a lit model has the mask or a
+  `[compat] emissive`. Every descriptor under `materials/` and one level of subdirectories is
+  checked, named by a unit or not (`moba_assets::check_material_dir`). The report counts the
+  units' materials per model: text `models     standard 1`, JSON `"material_models"`.
+- **The record and the table** (Tiered only): `MaterialRecord`, 64 bytes, as
+  `shaders/slang/lib/material.slang`; 64 records (`MAX_MATERIALS`), host-written at load. The
+  model word's flags (bits 28–31) are the emissive mask (1), a bound emissive texture (2) and a
+  bound model texture (4).
+
+**Items.**
+
+1. **`model_texture` is added** (§6d lists a model-texture handle that §6f did not name).
+2. **The emissive mask is read on Compat now**, not from C1 (§10): `unit_textured.frag`'s
+   SPIR-V changes. No Compat pixel moves for content whose `metallic_roughness` has two
+   channels, which is all shipped content but the N2c samples (gate 5, measured below).
+3. **The Compat collapse is computed at load** by `compat_fallback()` and fills the UBO of
+   every textured material; `STANDARD`'s is its own factors (a unit test). Departures from §10's
+   table: `THIN_FILM`'s tint is computed there, not baked into the albedo by `content-check`;
+   `FOLIAGE` on a unit material is the base under the unit shader (the map's foliage keeps
+   `foliage.frag`); `UNLIT` is a black dielectric plus its emissive, so Compat still adds the
+   0.04 specular of a black base: Compat's `shade()` has no unlit branch, and adding one would
+   move Compat SPIR-V for every textured unit. C1 adds it.
+4. **`specular` is reused.** It is ADR-0011's painted-specular scale on Compat and
+   `KHR_materials_specular`'s factor in Tiered's F0 (§6b): one key, as §6f lists it. Content
+   that sets it for the painted highlight also scales its Tiered F0. Only `standard` and
+   `transmissive` may set it (item 24).
+5. **`deferred_light` stays GLSL** (§6d's `deferred_light.slang` with `IShadingModel` generics
+   is not built, as amendment 2 item 1 began). The models past `STANDARD` are
+   `include/shading_models.glsl`, compiled only into `deferred_light_extended.comp`
+   (`MOBA_SHADING_MODELS`), with a `switch` on the model; `shade()` calls `model_direct` per
+   light and `model_ambient` once, so a `STANDARD` pixel in an extended tile shades as in a
+   standard one.
+6. **The first Slang fragment stage is the textured units' G-buffer stage**
+   (`slang/unit_material_gbuffer.slang`, four permutations: plain, `PREPASS_IDS`,
+   `GBUFFER_HDR`, both), behind the GLSL `unit_textured_gbuffer.vert` and
+   `skinned_textured_gbuffer.vert`. Vertex-colour units, terrain, walls, props, foliage and the
+   forward Tiered frame stay GLSL. The interface test
+   (`glsl_vertex_and_slang_fragment_interfaces_match`) reflects both stages' SPIR-V: every
+   location the fragment reads is written by the vertex stage with the same type, integer
+   inputs are `Flat`, and the fragment reads at least locations 0, 1, 3, 4, 14 and 15 (13 in the
+   `_ids` permutations). Slang strips unread varyings, so the test does not require equal sets.
+7. **Bindless materials.** The material table is read by device address; the draw's material
+   index is a push constant (`MaterialPush`, 32 bytes: the vertex stage's 16-byte skin words,
+   the table address, the index, a reserved word), **per mesh, not per instance** (§6d): a
+   material belongs to a model today (item 20's gap). Textures are `BindlessTable` handles in
+   set 2 of the stage's layout (samplers at binding 0, textures at binding 2). The material
+   sampler is bindless sampler slot 12 (`MATERIAL_SAMPLER`, after the 12-entry palette): the
+   Compat `Materials` sampler (repeat, trilinear, the tier's anisotropy). The stage takes the
+   slot and the table's length as specialisation constants 0 and 1, which the renderer sets
+   from `bindless::MATERIAL_SAMPLER` and `MAX_MATERIALS` (a test checks both are decorated), and
+   clamps the draw's index to the table. Empty slots point at the default textures (white, flat,
+   metallic 0 / roughness 1, full mask, white emissive and model data); the stage skips the
+   emissive and model samples when the record's flags say those slots are the defaults. Only
+   the textured units read the table.
+8. **The record has no alpha cutoff and no style words.** No shipped material is a cutout
+   (reserved for when one is); per-material wrap, rim and ramp stay off Tiered (§6b), which
+   corrects amendment 2 item 9's "N2c's material table carries them".
+9. **Multiscatter and the stored F0** (`MOBA_TIERED_SHADING`) are in every Tiered lighting
+   module, forward and deferred; Compat's expansion is unchanged (its SPIR-V is byte-identical
+   but for item 2).
+10. **Tiered gets its own split-sum LUT, with its texels on the end points** (§6b said no new
+    LUT). With the 128-sample LUT and a fetch clamped at the last row's centre, the `E_ss` read
+    near roughness 1 was far enough from the lobe's integral that the white furnace read 0.93.
+    Tiered's table (`brdf_lut_tiered`) integrates the same `(A, B)` with 1,024 samples per
+    texel and puts texel `i` at `i / (size − 1)` on both axes, so `brdf_lut_sample` reads N·V
+    and roughness 0..=1 with one bilinear fetch, `uv = (x · (size − 1) + 0.5) / size`, and
+    nothing is clamped or extrapolated. Every Tiered lit stage is built with
+    `MOBA_TIERED_SHADING` (the offscreen views share the main view's pipelines), so none reads
+    this table with Compat's fetch. The table is integrated once per process, on scoped threads,
+    and kept for a renderer rebuilt on a settings change: 5–8 ms of start-up on the 9800X3D's 16
+    threads, 43–77 ms on one. Compat keeps its 128-sample table with centred texels and its
+    fetch. **C1 must adopt both** when it brings multiscatter to Compat, or its furnace will
+    fail the same way. Gate 3's furnace is a CPU model of the shader's fetch (item 28).
+11. **`FOLIAGE` and `TRANSMISSIVE_FALLBACK` are lit in the standard tiles** (reverses amendment 2
+    item 10). The foliage's back light needs no model code beyond `STANDARD`'s, and the map's
+    foliage covers much of the frame: in the extended class it pushed gate 7 to 1.108× at Low.
+    The extended class is now only `CLEARCOAT`, `SHEEN`, `ANISOTROPIC` and `THIN_FILM`.
+12. **The roughness floors stay.** The lighting's floor (`MOBA_MIN_ROUGHNESS`, 0.045) applies
+    to every lobe, the coat's included. The G-buffer's floor on a unit's stored base roughness
+    (0.08, amendment 2 item 9) is kept: amendment 2 left it for N2c to revisit, and moving it
+    would move the encoding that `gbuffer-smoke` and C1's spec rely on. Below 0.08 a unit's
+    base lobe is therefore rougher on the deferred frame than on the forward one. The coat,
+    sheen and film keep their own roughness in the model data.
+13. **The dust colour is a constant** (ash, `(0.30, 0.28, 0.25)`) until a map has a dust colour.
+14. **`UNLIT` is unfogged** on both Tiered frames: the deferred pass leaves its `hdr` (amendment 2
+    item 6) and the forward Tiered frame writes the emissive alone, before height fog.
+15. **No scalarised light loop yet** (amendment 2 item 5 stands).
+16. **G-buffer decals as built** (departs from §7a):
+    - **GLSL** (`decal_gbuffer.vert`, `decal_gbuffer.frag`), sharing `decals.glsl` with the
+      forward path, not a Slang port.
+    - **The receivers are the terrain only.** Foliage is drawn after the decals, in the rest, as
+      the forward frame draws grass over the terrain's inlined decals. The passes are
+      `prepass` (receivers; the lane keeps N2b's name), `gbuffer_decals` and `gbuffer_rest`.
+    - **Depth is attached read-only and sampled** (§7a): `DEPTH_STENCIL_READ_ONLY_OPTIMAL`,
+      loaded and not stored, and bound in the same layout as the texture the pass
+      reconstructs the ground from.
+    - **Base colour only**, blended `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` into `gb0`'s sRGB view,
+      so the blend is linear as in the forward `apply_paint_decals`; the write mask is RGB, so
+      `gb0.a` (metallic) is kept. `gb0` gains
+      `MUTABLE_FORMAT` with a two-format list (UNORM, sRGB). `gb1.b` (roughness) is not
+      blended: the forward path changes only albedo, and gate 2 compares with it. So
+      `independentBlend` is not needed for decals.
+    - **The 32 × 32 grid is still read per fragment.** A pixel is shaded only when its forward
+      grid cell lists the decal, so a decal clips where the forward terrain clips it. Without
+      it, splat droplets outside their cell drew in deferred only (teamfight parity max 28/255).
+      The grid bins a decal by its radius, so droplets past it are clipped at cell edges on both
+      paths: a known R3b limit, kept so the two frames agree.
+    - **Back faces only, behind the ground.** Front faces are culled and the back faces are
+      tested `LESS_OR_EQUAL` against the reversed-Z depth, so a box face in front of the
+      ground rasterises nothing, the sky fails the test, and each covered pixel blends once,
+      with the camera inside a box too.
+    - **`terminateInvocation`, not `discard`**, for pixels outside the decal's grid cell or
+      shape: glslc maps `discard` to `OpDemoteToHelperInvocation` under SPIR-V 1.6, which
+      validation rejects without the demote feature. The device enables
+      `shaderTerminateInvocation` on Tiered (Vulkan 1.3 requires it, so admission is
+      unchanged).
+    - `Glow` decals in the same buffer (N1's overlay, §7b) are collapsed by the vertex stage,
+      every vertex outside the clip volume, so they rasterise nothing.
+    - **Built only on request (item 31).** With `RenderConfig::paint_decal_pass`
+      (`MOBA_PAINT_DECAL_PASS=1`) the frame graph has a `paint` axis: without a live `Paint`
+      decal, `gbuffer_decals` and `gbuffer_rest` are reserved and `prepass` draws everything
+      (twice the plans, the same resources), and the G-buffer terrain is the permutation
+      without decal code. Without it, or with `MOBA_DECALS=off` (§11), the frame is N2b's: one
+      G-buffer pass, the terrain's inline decals, no sRGB view on `gb0`.
+17. **The graph's largest tiered topology is 41 resources** (of `MAX_RESOURCES` 48; no `u128`
+    mask; with the decal pass, item 31). The frame log has the lanes `prepass`, `gbuffer_decals` and `gbuffer_rest` (38
+    lanes in all).
+18. **Samples and the sheet.** `content/materials/samples/` holds one material per model
+    (textures `material-sample-*`, baked by `texture-bake generate material-sample`; the MR and
+    model maps are `rgba8`, so the mask is exercised). `MOBA_MATERIAL_SHEET=<set>` draws one
+    sphere per descriptor in `materials/<set>/` (client-only instances, at most 16). The tiered
+    goldens gain `materials` (the sheet) and `decals` (the teamfight replay).
+19. **Not built in N2c** (still in §6f's scope): the `mesh-bake`/glTF importer's mapping of
+    `KHR_materials_*` to these keys. One material per model (item 7) leaves nowhere to put a
+    glTF file's per-primitive materials, so the mapping waits for multi-material models
+    (item 20).
+20. **Art-slice gaps** (art-source `PIPELINE.md` §6 and `export/structures/HOOKS.md`):
+    - **Closed:** the emissive slot (`emissive_texture`, and the mask in `metallic_roughness.b`;
+      an asset whose MR is `bc5` must bake it as `bc7`/`rgba8` to carry the mask, or use
+      `emissive_texture` with a `[compat] emissive`); the dust part of weathering (`dust`).
+    - **Open, with owners:**
+      - **Weathering masks** on a second UV (the structures' unique masks): need `TEXCOORD_1`
+        (ADR-0007's vertex format) and a material key; a later ADR-0023 amendment with the
+        asset track.
+      - **`TEXCOORD_1`:** ADR-0007 (the loader and the vertex layout).
+      - **One material per model** (`<asset>-glass`, `-emit`, `-crystal` slots): the loader's
+        per-primitive split plus item 19; an asset-track (ADR-0007) change, needed before N2f
+        can draw a model's glass slot.
+      - **Props cannot take a material:** the map-visuals descriptor (ADR-0014); the material
+        table can index them once it has a per-instance index.
+      - **VAT has no faction key:** ADR-0012.
+      - **Terrain import and wall tiling** (walls stretch `wall_mesh` along a segment):
+        ADR-0014.
+      - **FX hooks:** ADR-0013.
+      - **N6's wetness** (§6a): N6.
+
+21. **`content-check` does not check the bible's per-class ranges** (§6e: coat roughness
+    0.05–0.25, the glass F0 range, the rough metals' roughness, the thin film's straw-to-purple
+    limit on thickness) and does not bake `THIN_FILM`'s tint into the albedo (§10's G2 bake;
+    item 3 computes it at load instead). Its rules are the frozen spec's checks above. The
+    ranges wait for the bible's accepted numbers (PR #347); C1 or the asset track adds them.
+22. **The forward Tiered frame draws every model but `STANDARD` and `UNLIT` with its Compat
+    fallback** (`MOBA_DEFERRED=off`, and a device that lights forward under amendment 2 item
+    17): `unit_textured_tiered.frag` reads the parameter block, which is the fallback, and
+    draws `UNLIT` as its emissive alone, as the deferred frame does. §5b's one shared shade,
+    and so gate 2's parity, hold for `STANDARD` (and `UNLIT`) only. The material sheet is not a parity
+    scene, since its other seven spheres differ by design; it is a golden (`materials`).
+23. **Gate 7's wall-heavy overview is not measured as such** (§9b: `gbuffer_receivers`
+    against N1's prepass). The shipped maps have four walls each, so no view is wall-heavy. A
+    low orbit across the whole map (`MOBA_PREVIEW_CAMERA=-0.7,0.12,170`: terrain, towers and
+    structures, little wall) costs what N2b's frame does: 0.999× N1's `gpu_total` (p95 1.000×),
+    1.001× N2b's, with item 31's single G-buffer pass on every frame. The receivers' pass
+    exists only with the decal pass (item 31); with it forced on, the teamfight's receivers
+    (the terrain alone) are 0.045 ms at Low and 0.052 ms at High, against N1's whole prepass of
+    0.020 and 0.024 ms, which writes no G-buffer. Walls stay after the decals; their overdraw of
+    decal-shaded terrain waits for a map with walls in view and a receiver that needs the pass.
+24. **`ior` and `specular` shape the F0 of `standard` and `transmissive` only** (§6b gave every
+    model the stored F0). Only those two models store an F0 in the G-buffer; every other
+    model's channel holds its own data, so the deferred frame lit their base at 0.04 while the
+    forward Tiered frame and the thin film's Compat tint used the authored F0. Now all three
+    use `MaterialDesc::model_dielectric_f0()`: the authored F0 for `standard` and
+    `transmissive`, IOR 1.5's 0.04 for the rest, and `content-check` refuses a non-default
+    `ior` or `specular` on the rest, so the spec says what is drawn. A model that needs its own
+    F0 later is an amendment that names C1's consequence.
+25. **The models' light-invariant terms are computed once per pixel** (§6c's per-model BRDFs
+    are unchanged otherwise). `model_prepare` (`include/shading_models.glsl`), called by
+    `shade()` after the energy compensation, builds the anisotropic frame, the sheen colour
+    and its albedo scaling and the thin film's Fresnel; `model_direct` and the ambient read
+    them. **The thin film's Fresnel is evaluated once, at N·V** (the
+    `KHR_materials_iridescence` form evaluates it per light at V·H): each light's specular is
+    scaled by `film(N·V) / Schlick(F0, N·V)` and the ambient takes `film(N·V)` as its F0. The
+    film's colour therefore does not shift across a highlight, an approximation that is
+    largest where V·H and N·V differ most (wide highlights, grazing views). The Compat
+    collapse (normal incidence) is unchanged.
+26. **The anisotropy's direction is the mesh's tangent turned by `rotation`**
+    (`KHR_materials_anisotropy`; the first build took the angle in the stored normal's
+    orthonormal basis, which flips at `n.z = 0`, so a direction authored on a sphere jumped
+    there). The G-buffer still stores an angle modulo π in that basis, now of the tangent's
+    direction: the Slang stage quantises the normal as the G-buffer will, rebuilds the basis
+    the lighting uses and measures the turned tangent in it. The basis still flips at `n.z = 0`,
+    and the stored angle flips with it, so the lit direction is as continuous as the mesh's
+    tangents (`anisotropy_direction_is_continuous_across_the_basis_seam`). A mesh without a
+    usable tangent falls back to the rotation in the basis.
+27. **The thin film's `model_texture` B is the material AO**, as the clearcoat's and the
+    anisotropic model's B is (the first build left it unread, and the film's AO at 1).
+28. **Gate 3 stays a CPU model until N2e.** The furnace models the fetch and the compensation
+    with the painted-specular scale at 1 and no specular occlusion; a rendered furnace, with
+    the painted specular and the specular occlusion N2e's stylisation brings, is N2e's. **N2e's
+    gate 4 needs a `Paint`-only switch**, `MOBA_PAINT_DECALS=off` (not built in N2c):
+    `MOBA_DECALS=off` also removes the overlay's `Glow` decals, so it cannot isolate the
+    `Paint` decals. The switch drops the `Paint` decals from the upload, so it covers both
+    the terrain's inline decals and the decal pass (item 31); N2e runs gate 4 on the default
+    frame, the inline one, and on the pass while it is opt-in.
+29. **Review hardening** (no behaviour change for valid content): a textured skinned pipeline
+    that fails to build, or a Tiered prepass without the material layout, is an error, not a
+    silent fallback; `gb0`'s sRGB view is asserted present when the decal pass is on (item 31), and the UNORM
+    format's sRGB twin is a checked table (`srgb_twin`); a test checks that the material
+    G-buffer layout fits the Tiered admission minimums.
+30. **Timing evidence names what it measured.** The frame log reports `paint_decals_avg` (live
+    `Paint` decals per frame) and, with `MOBA_TILE_COUNTS=1`, `tiles_standard_avg`,
+    `tiles_extended_avg` and `extended_frames` (`light_classify`'s counts, copied to a
+    host-readable buffer in `mask_clear` and read a frame later). The copy's barriers cost
+    0.004–0.005 ms on the RTX 5070 Ti, so it is off by default and in gate 7's timings.
+31. **While the terrain is the only `Paint` receiver, its G-buffer stage applies the decals
+    inline** (departs from §7a's decal pass and from item 16's default). On the teamfight, a
+    live `Paint` decal is on 2,806 of 2,940 frames, so item 16's split ran almost always and
+    cost 0.008 ms at Low and 0.012 ms at High by lane (`prepass` + `gbuffer_decals` +
+    `gbuffer_rest` against N2b's one pass), mostly the second pass boundary. The terrain's
+    `terrain_gbuffer*_hdr` permutations are N2b's again (48 registers on the RTX 5070 Ti) and
+    the frame graph is N2b's; the decal pass, the `paint` axis, `gb0`'s sRGB view and the
+    terrain's permutations without decal code (`terrain_gbuffer_nodecals*_hdr`) are built only
+    with `RenderConfig::paint_decal_pass` (`MOBA_PAINT_DECAL_PASS=1`). The first `Paint`
+    receiver other than the terrain turns it on, and is measured then (the cost above, by
+    lane, is what it starts from). Until then only the override exercises the pass. CI's
+    `tiered-temporal` job runs gate 2 on the teamfight (the scene with `Paint` decals) with
+    `MOBA_PAINT_DECAL_PASS=1` and validation and sync validation, whenever its renderer
+    filter runs it (pull requests that touch the renderer, and dispatches), and fails unless
+    the start-up log says the pass was built (`[render] paint decals: gbuffer pass`) and the
+    captured frame had a live `Paint` decal and drew through it (`[render] capture frame:
+    paint_decals=N plan=gbuffer_decals`, logged on a capture frame with the pass). Parity
+    on all four scenes, validation on the RTX 5070 Ti and gate 4 with the pass on were run by
+    hand for this PR (perf/0037), not by CI. Without the pass no `paint` frame-graph variant
+    is compiled. `MOBA_DECALS=off` builds the G-buffer terrain from the permutation without
+    decal code too, as it does the forward terrain (byte-identical captures on lavapipe;
+    `terrain-decal-check.sh` times one against the other). A further 0.005 ms is available on
+    views with no live `Paint` decal: the permutation without decal code is that much cheaper
+    there (the close sheet camera's `prepass`, 0.119 against 0.124 ms; the overview's, 0.134
+    against 0.145 ms in a 1920×1080 window), but choosing it per frame changes no pixel only if
+    the driver compiles the rest identically, so it is left as an N2d lever (gate 7 below).
+32. **Register counts are evidence.** With `MOBA_PIPELINE_STATS=1` every pipeline, compute
+    included, keeps the driver's statistics, and the log prints the G-buffer terrain's and
+    the deferred lighting's. On the RTX 5070 Ti, `deferred_light` (standard tiles) is 74
+    registers and `deferred_light_extended` 105. Item 25's light-invariant terms took one
+    field each (113 registers, against 111 before the hoisting); a pixel has one model, so
+    they now share three `vec4`s (`ModelContext`, documented per model in
+    `include/shading_models.glsl`). The `moba_model` global is not the cause: after `glslc
+    -O` the extended permutation is one function with no `Private` variable, so a global and
+    a local compile alike.
+33. **Second review hardening** (no behaviour change for valid frames): the tile counts are
+    marked written only after a successful submit, and the first copy after creation or a
+    resize, which would read an unwritten header, is skipped; a test ties `lighting.glsl`'s
+    `MOBA_BRDF_LUT_SIZE` to `BRDF_LUT_SIZE`; the Tiered LUT's rows come from one queue that the
+    creating thread drains too, so a helper thread the system refuses costs time, not the
+    renderer's creation; the `Paint` decal count is taken once per frame, while the upload is
+    built. After the third review: without the decal pass the `paint` frame-graph variants
+    are not compiled; the renderer logs `[render] validation: <mode>` at creation, so each
+    capture log shows whether validation ran. After the fourth: `terrain-decal-check.sh`
+    times and bounds the registers of both stages that inline the decals (§7a), and its
+    timing fails rather than passes when a lane did not run (since N2b the Tiered `scene`
+    lane is empty, so its old comparison of 0 against 0 always passed).
+
+**Gates** ([perf/0037](../perf/0037-n2c-materials.md)):
+
+- **1. Encoding and interfaces:** the record and push block against the Slang reflection, and
+  the interface test (item 6). The Rust twin (`every_model_round_trips`,
+  `stored_texels_are_fixed_points`) and `gbuffer-smoke` cover all eight models. Met.
+- **2. Parity** (`STANDARD` and `UNLIT` only, item 22): `deferred-parity.sh` at 1280×720 on lavapipe
+  gives the worst pixels 3 (default), 3 (sky off), 3 (river) and 6/255 (teamfight), each
+  within 2/255 on at least 99.999 % of pixels (1, 1, 3 and 7 pixels past 2/255), with item
+  31's inline decals and with the decal pass forced on alike. CI's lavapipe reads 4, 4, 3 and
+  6/255. Met. Without item 16's grid test the pass read 28/255 on the teamfight.
+- **3. White furnace:** worst 0.9861 over roughness 0–1 and N·V 0.05–1, a CPU model of the
+  shader's fetch (item 10). Met; a rendered furnace is not measured.
+- **4. Hidden information (decals):** with bloom off, all 38,838 unit pixels of the teamfight
+  keep their G-buffer albedo bytes with decals on and off, with item 31's inline decals
+  (35,063 other pixels change) and with the decal pass (35,010). `MOBA_DECALS=off` also
+  removes the overlay's glow decals, so the `Paint` decals are not isolated. Partial; N2e runs
+  the full gate with rims.
+- **5. Goldens:**
+  - Every Compat golden scene, and both sentinel heroes, are byte-identical to `ceca947`.
+  - The `materials` and `decals` tiered goldens are two-run identical with TAAU and FSR 3.1.
+  - Validation and sync validation are clean on lavapipe and on the RTX 5070 Ti.
+- **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay, the second
+  review's head (item 31's inline decals): GPU total 1.014–1.063× (Low, High, Ultra,
+  Overdrive, Low and High with FSR 3.1), GPU span 1.029–1.074×, 0.998–1.002× N2b's on p50
+  (0.998–1.003× on p95, Ultra's 1.003); Compat Ultra 0.999×. **`gpu_total` is the gate
+  metric** (perf/0036's gate column); `gpu_span`, which adds the gaps between passes, is
+  advisory. Met on the replay the
+  gate is defined on, which has no extended-model pixel. The overview: item 23.
+  - **Headroom** against 1.10× N1 (`gpu_total`, ms): Low 0.0188, High 0.0288, Ultra 0.0288,
+    Overdrive 0.0432, Low with FSR 3.1 0.0346, High with FSR 3.1 0.0446 (span: 0.0135 at
+    Low, 0.0224 at High). The decal pass forced on (item 31) costs 0.006 ms of total at Low
+    and 0.009 ms at High (by lane 0.008 and 0.012 ms).
+  - **The extended-model check** is the material sheet's close view at High (14 % of tiles
+    extended). N1 cannot draw the spheres, so it is checked against an estimate of N1 drawing
+    them: N1's frame of the same view without them (0.586 ms) plus what the spheres cost the
+    forward Tiered frame (`MOBA_DEFERRED=off`) in the lanes N1 has: `scene` 0.005, `shadow`
+    0.003, `ao` 0.003 and `overlay_prepass` 0.006 ms, so 0.603 ms; the spheres' forward
+    `prepass` delta (0.009 ms) is left out, since N1's prepass writes no G-buffer.
+    **Criterion: the deferred frame within 1.10× that estimate.** It is 0.658 ms, 1.091×
+    (1.075× with the prepass delta in), so 0.005 ms of headroom. Against N1's view without
+    the spheres it is 1.123× in the same rounds (0.658 against 0.586 ms; 1.127× and the far
+    view 1.108× in the sheet's own rounds).
+  - **Budget for N2d–N2f** (measured as now: the teamfight, plus the extended-model check):
+    N2d (LTC area lights and the light record) at most 0.005 ms at Low and 0.008 ms at High;
+    N2e (team rims, with the stylisation layer removed) at most 0.005 ms at Low and 0.008 ms
+    at High, net of what the removal saves; N2f (the `glass` pass, Medium+) nothing at Low
+    and at most 0.005 ms at High.
+    - On the teamfight that leaves 0.0088 ms at Low and 0.0078 ms at High. Before item 31,
+      High and Ultra had none: 0.008 + 0.008 + 0.005 = 0.021 ms against 0.0209 ms.
+    - Spending the whole budget puts `gpu_span` at about 1.093× N1 at Low and 1.098× at High;
+      span is advisory, so that is reported, not gated.
+    - **The extended-model check has 0.005 ms**, less than any phase's High budget. A phase
+      that adds cost on extended tiles therefore recovers it first. Item 31 already folded
+      the `Paint` decals back, so the levers left are: the wave-uniform (scalarised) light loop
+      amendment 2 item 5 deferred (`deferred_light` is 0.053 ms at Low); the terrain's
+      permutation without decal code on frames with no live `Paint` decal (0.005 ms on such
+      views, item 31); and `light_classify` (0.009 ms) folded into the deferred dispatch.
+    - **N2d and N2f record what they light**, as item 30 does for the tiles: the area lights
+      lit per frame (N2d) and the glass pixels or tiles (N2f) go in the frame log. A budget
+      measured on a scene without the feature does not pass.
+    - A phase that cannot meet its budget after its levers is an amendment that names the
+      preset and the overrun.
+- **8. Compat contract:** `content-check` passes every shipped material under both evaluators,
+  and `every_sample_material_loads_on_compat` builds each model's sample on Compat. Met.
 
 ## Corrections to the roadmap
 

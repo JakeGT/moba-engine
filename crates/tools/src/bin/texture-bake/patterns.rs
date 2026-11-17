@@ -148,6 +148,50 @@ pub(crate) fn sentinel(map: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The material-model sample set (ADR-0023 gate 5 and 8, N2c): neutral sources for the
+/// sample materials in `content/materials/samples/`, one sphere per shading model on the
+/// material sheet. `u` runs once around a sphere and `v` from pole to pole.
+///
+/// - `base` (colour): a light neutral grey with a faint 16 × 8 checker, so filtering and the
+///   anisotropic lobe's direction stay readable;
+/// - `mr` (four linear channels): R metallic and G roughness 1 (the factors decide), B the
+///   emissive mask: a band around the equator (`v` 0.45–0.55);
+/// - `emissive` (colour): warm white, brightest at the equator;
+/// - `model` (four linear channels): R a ramp along `u` (a thin film's thickness from its
+///   minimum to its maximum), G and B 1.
+pub(crate) fn material_sample(map: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let u = (x as f32 + 0.5) / SIZE as f32;
+            let v = (y as f32 + 0.5) / SIZE as f32;
+            let band = (0.45..=0.55).contains(&v);
+            let pixel = match map {
+                "base" => {
+                    let checker = ((x * 16 / SIZE) + (y * 8 / SIZE)).is_multiple_of(2);
+                    let g = if checker { 190 } else { 178 };
+                    [g, g, g, 255]
+                }
+                "mr" => [255, 255, if band { 255 } else { 0 }, 255],
+                "emissive" => {
+                    let glow = 1.0 - (v - 0.5).abs() * 2.0;
+                    let g = (glow * glow * 255.0) as u8;
+                    [
+                        g,
+                        (f32::from(g) * 0.85) as u8,
+                        (f32::from(g) * 0.6) as u8,
+                        255,
+                    ]
+                }
+                "model" => [(u * 255.0) as u8, 255, 255, 255],
+                _ => return None,
+            };
+            out.extend_from_slice(&pixel);
+        }
+    }
+    Some(out)
+}
+
 /// The terrain layers `terrain` knows, in the order maps usually list them.
 pub(crate) const TERRAIN_LAYERS: [&str; 5] = ["grass", "dirt", "rock", "moss", "pebbles"];
 

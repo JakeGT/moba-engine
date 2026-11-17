@@ -164,6 +164,9 @@ fn main() {
     // Materials next to the unit models (`materials/<model>.toml`, ADR-0010): what a client
     // would load. One descriptor set per textured material; the pool is sized from this.
     let materials = content.assets.material_report(pack_dir);
+    // Every descriptor under `materials/`, bound to a model or not (the sample sets), against
+    // both evaluators (ADR-0023 §10, gate 8).
+    errors.extend(moba_assets::check_material_dir(pack_dir));
     // Per-tier budgets of every unit model (R8, ADR-0018 §4): over a tier is a warning (the
     // tier degrades or drops the model's optional maps); over Ultra, or a model that does
     // not load, is an error.
@@ -271,7 +274,7 @@ fn main() {
     if json {
         let error_list: Vec<String> = errors.iter().map(|error| json_string(error)).collect();
         println!(
-            "{{\"file\":{},\"budgets\":[{}],\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"assets\":{},\"materials\":{},\"textured_materials\":{},\"textures\":{},\"texture_bytes\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":{},\"warnings\":{},\"map_errors\":{},\"map_warnings\":{},\"errors\":[{}]}}",
+            "{{\"file\":{},\"budgets\":[{}],\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"assets\":{},\"materials\":{},\"textured_materials\":{},\"material_models\":{{{}}},\"textures\":{},\"texture_bytes\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":{},\"warnings\":{},\"map_errors\":{},\"map_warnings\":{},\"errors\":[{}]}}",
             json_string(&path),
             budgets_json(&budgets),
             json_string(&content.manifest.name),
@@ -285,6 +288,7 @@ fn main() {
             content.assets.len(),
             materials.materials,
             materials.textured,
+            material_models(&materials, true),
             materials.textures,
             materials.texture_bytes,
             content.hash(),
@@ -313,6 +317,9 @@ fn main() {
             "materials  {} ({} textured, {} descriptor sets)",
             materials.materials, materials.textured, materials.textured
         );
+        if materials.materials > 0 {
+            println!("models     {}", material_models(&materials, false));
+        }
         println!(
             "textures   {} ({} bindings, {} KiB)",
             materials.textures,
@@ -622,4 +629,22 @@ fn source_check(manifest: &std::path::Path, json: bool) -> i32 {
             1
         }
     }
+}
+
+/// The materials per shading model (ADR-0023 §6c), the used ones only: `"standard":2,...`
+/// for the JSON object, `standard 2, ...` for the text report.
+fn material_models(report: &moba_assets::MaterialReport, json: bool) -> String {
+    moba_assets::ShadingModel::ALL
+        .iter()
+        .zip(report.models)
+        .filter(|(_, count)| *count > 0)
+        .map(|(model, count)| {
+            if json {
+                format!("\"{}\":{count}", model.name())
+            } else {
+                format!("{} {count}", model.name())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

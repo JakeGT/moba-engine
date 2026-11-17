@@ -1,0 +1,16 @@
+# Sample material for the material-model sheet (ADR-0023 gate 5 and 8; one sphere per
+# shading model, MOBA_MATERIAL_SHEET=samples). Textures: texture-bake material-sample
+# (scripts/bake-sample-textures.sh). docs/content-authoring.md#materials has the keys.
+# CLEARCOAT: a dark Void lacquer (luma in the bible's 39-58 band) under a smooth coat.
+shader = "textured"
+base_color = "material-sample-base"
+metallic_roughness = "material-sample-mr"
+base_color_factor = [0.06, 0.05, 0.09, 1.0]
+metallic = 0.0
+roughness = 0.6
+model = "clearcoat"
+[clearcoat]
+weight = 1.0
+roughness = 0.1
+[compat]
+roughness = 0.3

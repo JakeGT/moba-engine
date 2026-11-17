@@ -14,9 +14,12 @@
 // forward `shade()` adds it, and the result replaces every lit pixel. The sky, also drawn by
 // the G-buffer pass, is never in a listed tile's lit pixels.
 //
-// Permutations (crates/shaders/build.rs): the default build is the standard tiles' fast path
-// (`STANDARD` and `UNLIT` only); `DEFERRED_EXTENDED` adds the other models (N2b: `FOLIAGE`,
-// whose back light reproduces `foliage.frag`'s; the rest shade as `STANDARD` until N2c).
+// Permutations (crates/shaders/build.rs): the default build is the standard tiles' path
+// (`UNLIT`, `STANDARD`, `FOLIAGE`, whose back light reproduces `foliage.frag`'s, and
+// `TRANSMISSIVE_FALLBACK`, lit as `STANDARD`); `DEFERRED_EXTENDED` adds the models with their
+// own lobes (`CLEARCOAT`, `SHEEN`, `ANISOTROPIC`, `THIN_FILM`; include/shading_models.glsl).
+// N2c moved `FOLIAGE` to the standard tiles (ADR-0023 amendment 3): the map's foliage covers
+// much of the frame, and the extended permutation's model code would cost it occupancy.
 //
 // Bindings: set 0 the camera block, set 1 this pass's inputs (below), set 3 the scene
 // lighting set. `DeferredPush` mirrors `DeferredPush` in crates/render/src/passes/deferred.rs
@@ -33,6 +36,12 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 vec2 moba_pixel_center;
 #define MOBA_PIXEL_CENTER moba_pixel_center
 
+// N2c (ADR-0023 §6b): the Tiered BRDF core (multiscatter, the stored F0), and in the
+// extended permutation the other shading models (§6c).
+#define MOBA_TIERED_SHADING
+#ifdef DEFERRED_EXTENDED
+#define MOBA_SHADING_MODELS
+#endif
 #include "camera.glsl"
 #include "lighting.glsl"
 #include "atmosphere.glsl"
@@ -136,18 +145,24 @@ void main() {
     // The shadow lookup's normal offset: the G-buffer has only the shading normal; foliage
     // offsets along +y, as `foliage.frag` does.
     surface.geometric_normal = s.normal;
+    // ADR-0023 §6b: the stored dielectric F0 (`STANDARD` and the transmissive fallback);
+    // the other models' dielectric base is IOR 1.5's 0.04.
+    surface.f0 = (s.model == GBUFFER_MODEL_STANDARD
+                  || s.model == GBUFFER_MODEL_TRANSMISSIVE_FALLBACK)
+        ? s.model_data.x : 0.04;
 #ifdef DEFERRED_EXTENDED
+    surface.model = s.model;
+    surface.model_data = s.model_data;
+#endif
     if (s.model == GBUFFER_MODEL_FOLIAGE) {
         surface.geometric_normal = vec3(0.0, 1.0, 0.0);
     }
-#endif
     // Only the units emit (`default_surface` has none): the other surfaces' `hdr` texels were
     // never written this frame, so they are not read.
     if (unit && DEBUG_VIEW != DEBUG_LIT_ONLY) {
         surface.emissive = imageLoad(hdr, pixel).rgb;
     }
     vec3 lit = shade(surface);
-#ifdef DEFERRED_EXTENDED
     if (s.model == GBUFFER_MODEL_FOLIAGE) {
         // `foliage.frag`'s translucency: sunlight through the blade when looking towards the
         // sun. The G-buffer holds its `0.35 * height` as the model's translucency.
@@ -156,7 +171,6 @@ void main() {
         float through = pow(clamp(dot(-view, light), 0.0, 1.0), 3.0);
         lit += albedo * camera.sun_color.rgb * (s.model_data.x * through);
     }
-#endif
     if ((s.flags & GBUFFER_FLAG_NO_FOG_OF_WAR) == 0u) {
         lit = apply_fog_of_war(lit, world_pos);
     }

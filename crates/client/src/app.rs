@@ -60,6 +60,8 @@
 //!   `MOBA_DECALS=off` (no projected telegraphs, scorch marks or splats; the effects' particles
 //!   stay), `MOBA_FOLIAGE=off` and `MOBA_WATER=off|simple|full`. The map's `[foliage]` and
 //!   `[[water]]` tables and the effects' `[[decals]]` set the art direction.
+//!   `MOBA_PAINT_DECAL_PASS=1` (Tiered, deferred): the `Paint` decals as the G-buffer decal
+//!   pass instead of inline in the terrain's G-buffer stage (ADR-0023 amendment 3 item 31).
 //! - `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>[,<x>,<z>]` (local preview): a fixed orbit
 //!   camera (radians, metres) instead of the slow turn, around an optional focus (metres from
 //!   the map centre); the R3a goldens use it for the horizon view, R3b for the river.
@@ -413,7 +415,8 @@ impl ClientApp {
                     + 64
                     + moba_assets::MAX_SOCKETS * 10
                     + 64
-                    + stress::MAX_STRESS_MINIONS,
+                    + stress::MAX_STRESS_MINIONS
+                    + material_sheet::MAX_SPHERES,
             ),
             models: {
                 let mut models = models::ModelLibrary::from_env();
@@ -749,6 +752,8 @@ impl App for ClientApp {
             .with_environment(Some(launch::environment_config(self.config_quality)))
             .with_debug_view(launch::debug_view())
             .with_deferred(launch::deferred_lighting())
+            .with_tile_counts(launch::tile_counts())
+            .with_paint_decal_pass(launch::paint_decal_pass())
             .with_readback(launch::motion_probe_requested());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
@@ -1609,6 +1614,7 @@ impl App for ClientApp {
                         pinned,
                     );
                 }
+                models.push_sheet(units);
                 if let Some(stress) = stress.as_mut() {
                     stress.push(
                         units,
@@ -1797,6 +1803,7 @@ mod foliage;
 mod launch;
 mod local_feed;
 mod map_visuals;
+mod material_sheet;
 mod materials;
 mod minions;
 mod models;

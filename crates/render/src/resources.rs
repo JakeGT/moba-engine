@@ -227,6 +227,8 @@ pub(crate) struct GpuImage {
     allocator: AllocatorHandle,
     image: vk::Image,
     view: vk::ImageView,
+    /// An `*_SRGB` view of a `MUTABLE_FORMAT` UNORM image ([`Self::with_srgb_view`]).
+    srgb_view: Option<vk::ImageView>,
     allocation: Option<Allocation>,
     /// The accounting class and bytes counted in `crate::memory`, released on drop.
     tracked: (crate::memory::MemoryClass, u64),
@@ -381,6 +383,38 @@ impl GpuImage {
         )
     }
 
+    /// As [`Self::with_samples`] (single-sampled), `MUTABLE_FORMAT` with the format list
+    /// `[format, srgb]` and a second view in `srgb` ([`Self::srgb_view`]), for blending into a
+    /// UNORM target that holds sRGB-encoded values in linear space (N2c's G-buffer decals).
+    pub(crate) fn with_srgb_view(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        srgb: vk::Format,
+        usage: vk::ImageUsageFlags,
+    ) -> RenderResult<Self> {
+        debug_assert_eq!(
+            srgb_twin(format),
+            Some(srgb),
+            "{name}: the sRGB view must be the UNORM format's twin"
+        );
+        Self::create_with(
+            device,
+            allocator,
+            name,
+            extent,
+            format,
+            usage,
+            vk::ImageAspectFlags::COLOR,
+            1,
+            Layers::Single,
+            vk::SampleCountFlags::TYPE_1,
+            Some(srgb),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)] // The create info, flattened.
     fn create(
         device: ash::Device,
@@ -394,30 +428,36 @@ impl GpuImage {
         kind: Layers,
         samples: vk::SampleCountFlags,
     ) -> RenderResult<Self> {
+        Self::create_with(
+            device, allocator, name, extent, format, usage, aspect, mip_levels, kind, samples, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // The create info, flattened.
+    fn create_with(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspect: vk::ImageAspectFlags,
+        mip_levels: u32,
+        kind: Layers,
+        samples: vk::SampleCountFlags,
+        srgb: Option<vk::Format>,
+    ) -> RenderResult<Self> {
         assert!(extent.width > 0 && extent.height > 0);
         assert!(mip_levels > 0);
-        let (layers, flags, image_type, depth) = match kind {
-            Layers::Single => (1, vk::ImageCreateFlags::empty(), vk::ImageType::TYPE_2D, 1),
-            Layers::Cube => (
-                6,
-                vk::ImageCreateFlags::CUBE_COMPATIBLE,
-                vk::ImageType::TYPE_2D,
-                1,
-            ),
-            Layers::Array(layers) => (
-                layers,
-                vk::ImageCreateFlags::empty(),
-                vk::ImageType::TYPE_2D,
-                1,
-            ),
-            Layers::Volume(depth) => (
-                1,
-                vk::ImageCreateFlags::empty(),
-                vk::ImageType::TYPE_3D,
-                depth.max(1),
-            ),
+        let (layers, flags, image_type, depth) = image_shape(kind);
+        let formats = [format, srgb.unwrap_or(format)];
+        let mut format_list = vk::ImageFormatListCreateInfo::default().view_formats(&formats);
+        let flags = if srgb.is_some() {
+            flags | vk::ImageCreateFlags::MUTABLE_FORMAT
+        } else {
+            flags
         };
-        let create_info = vk::ImageCreateInfo::default()
+        let mut create_info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(image_type)
             .format(format)
@@ -433,6 +473,11 @@ impl GpuImage {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        if srgb.is_some() {
+            // The list keeps the image's compression where a driver needs to know every view
+            // format (core in Vulkan 1.2).
+            create_info = create_info.push(&mut format_list);
+        }
         // SAFETY: the device is live and the create info is fully initialised.
         let image = unsafe { device.create_image(&create_info, None) }?;
         // SAFETY: `image` was created by this device.
@@ -477,6 +522,20 @@ impl GpuImage {
             }
         };
 
+        let srgb_view = match srgb
+            .map(|srgb| create_view(&device, image, srgb, aspect, mip_levels, kind))
+            .transpose()
+        {
+            Ok(srgb_view) => srgb_view,
+            Err(error) => {
+                // SAFETY: the view belongs to this image and is destroyed once.
+                unsafe { device.destroy_image_view(view, None) };
+                drop_allocator_free(&allocator, allocation);
+                // SAFETY: the image's only view is gone and it is destroyed once.
+                unsafe { device.destroy_image(image, None) };
+                return Err(error);
+            }
+        };
         let class = crate::memory::MemoryClass::of_image(usage);
         crate::memory::track_alloc(class, requirements.size);
         Ok(Self {
@@ -484,6 +543,7 @@ impl GpuImage {
             allocator,
             image,
             view,
+            srgb_view,
             allocation: Some(allocation),
             tracked: (class, requirements.size),
         })
@@ -499,6 +559,13 @@ impl GpuImage {
         self.view
     }
 
+    /// The sRGB view of an image made with [`Self::with_srgb_view`]; `None` for any other
+    /// image (never its UNORM view: blending through it would be in the wrong space).
+    #[inline]
+    pub(crate) fn srgb_view(&self) -> Option<vk::ImageView> {
+        self.srgb_view
+    }
+
     /// Device memory this image holds: its allocation's size.
     #[inline]
     pub(crate) fn allocated_bytes(&self) -> u64 {
@@ -508,8 +575,12 @@ impl GpuImage {
 
 impl Drop for GpuImage {
     fn drop(&mut self) {
-        // SAFETY: the view and image belong to this device and are destroyed once.
+        // SAFETY: the views and image belong to this device and are destroyed once.
         unsafe { self.device.destroy_image_view(self.view, None) };
+        if let Some(srgb_view) = self.srgb_view {
+            // SAFETY: as above.
+            unsafe { self.device.destroy_image_view(srgb_view, None) };
+        }
         // SAFETY: same as above.
         unsafe { self.device.destroy_image(self.image, None) };
         if let Some(allocation) = self.allocation.take() {
@@ -550,6 +621,31 @@ enum Layers {
     Array(u32),
     /// A 3D image `n` slices deep, a `3D` view (R6).
     Volume(u32),
+}
+
+/// An image's array layers, create flags, type and depth for `kind`.
+fn image_shape(kind: Layers) -> (u32, vk::ImageCreateFlags, vk::ImageType, u32) {
+    match kind {
+        Layers::Single => (1, vk::ImageCreateFlags::empty(), vk::ImageType::TYPE_2D, 1),
+        Layers::Cube => (
+            6,
+            vk::ImageCreateFlags::CUBE_COMPATIBLE,
+            vk::ImageType::TYPE_2D,
+            1,
+        ),
+        Layers::Array(layers) => (
+            layers,
+            vk::ImageCreateFlags::empty(),
+            vk::ImageType::TYPE_2D,
+            1,
+        ),
+        Layers::Volume(depth) => (
+            1,
+            vk::ImageCreateFlags::empty(),
+            vk::ImageType::TYPE_3D,
+            depth.max(1),
+        ),
+    }
 }
 
 /// A view of mip levels `0..levels` and every layer: `2D`, `CUBE`, `2D_ARRAY` or `3D` by
@@ -864,5 +960,14 @@ impl Drop for CommandPool {
         // SAFETY: the pool belongs to this device, allocates no external children and is
         // destroyed once.
         unsafe { self.device.destroy_command_pool(self.pool, None) };
+    }
+}
+
+/// The `*_SRGB` format with `format`'s layout, for the UNORM formats that have one in use.
+pub(crate) const fn srgb_twin(format: vk::Format) -> Option<vk::Format> {
+    match format {
+        vk::Format::R8G8B8A8_UNORM => Some(vk::Format::R8G8B8A8_SRGB),
+        vk::Format::B8G8R8A8_UNORM => Some(vk::Format::B8G8R8A8_SRGB),
+        _ => None,
     }
 }

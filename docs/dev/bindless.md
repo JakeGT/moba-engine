@@ -7,13 +7,18 @@ is the working summary. Evidence: [perf/0028](../perf/0028-bindless.md).
 
 - **`BindlessTable`** (`crates/render/src/bindless.rs`) is created by the renderer on the
   **tiered path only** and held for its lifetime. Compat keeps plain descriptor sets
-  (ADR-0009) and never creates it. In N0 no production pass binds it yet; the smoke tests do.
-- **One set, bound at index 0** of every tiered pipeline layout, `UPDATE_AFTER_BIND_POOL`,
-  every binding `PARTIALLY_BOUND | UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING`:
+  (ADR-0009) and never creates it. In N0 only the smoke tests bound it; since N2c
+  ([ADR-0023](../adr/0023-frame-architecture-materials.md) amendment 3) the unit G-buffer stages
+  read their material textures and the material sampler from it.
+- **One set**, `UPDATE_AFTER_BIND_POOL`, every binding
+  `PARTIALLY_BOUND | UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING`. A pipeline layout that
+  reads it places it where its shaders declare it: the smoke tests at set 0, the units'
+  material G-buffer layout (N2c) at set 2, after the camera (0) and the instances (1). Other
+  tiered layouts do not include it:
 
 | Binding | Type | Slots | Fallbacks |
 |---|---|---|---|
-| 0 | `SAMPLER[]` | 32 | the 12-entry palette (`SamplerKey`); slots 12–31 hold slot 0 (linear/wrap) |
+| 0 | `SAMPLER[]` | 32 | the 12-entry palette (`SamplerKey`); slot 12 is the material sampler (`MATERIAL_SAMPLER`, N2c, anisotropic by tier); slots 13–31 hold slot 0 (linear/wrap) |
 | 1 | `STORAGE_IMAGE[]` | 1,024 | slot 0: a 1×1 image cleared to zero, in `GENERAL` |
 | 2 | `SAMPLED_IMAGE[]` | 16,384, variable count | 0 magenta (`MISSING`), 1 white, 2 flat normal |
 
