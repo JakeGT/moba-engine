@@ -212,7 +212,7 @@ const MATRIX: [(&str, [Cell; 5]); 16] = [
         "Local and ability lights",
         [
             ("clustered, 2–4 shadowed", Planned(N2)),
-            ("plus LTC area lights", Planned(N2)),
+            ("plus LTC area lights", Built),
             ("plus RT shadow rays, top-N per tile", Planned(N5)),
             ("ReSTIR DI", Planned(N8)),
             ("ReSTIR DI", Planned(N9)),
