@@ -20,6 +20,18 @@ pub enum ValidationMode {
     Required,
 }
 
+/// The start-up banner's word for the validation state (`[render] validation: <mode>`):
+/// `required` (validation and synchronisation validation), `on` (the layer was found),
+/// `off (no layer)` (asked for if available, not installed) or `off`.
+pub(crate) const fn validation_banner(mode: ValidationMode, enabled: bool) -> &'static str {
+    match (mode, enabled) {
+        (ValidationMode::Required, true) => "required",
+        (_, true) => "on",
+        (ValidationMode::IfAvailable, false) => "off (no layer)",
+        (_, false) => "off",
+    }
+}
+
 /// Result of a headless Vulkan instance/device probe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -347,4 +359,23 @@ unsafe extern "system" fn debug_callback(
     }
     eprintln!("[vulkan {severity:?} {message_type:?}] {message}");
     vk::FALSE
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::{ValidationMode, validation_banner};
+
+    #[test]
+    fn validation_banner_names_each_state() {
+        assert_eq!(
+            validation_banner(ValidationMode::Required, true),
+            "required"
+        );
+        assert_eq!(validation_banner(ValidationMode::IfAvailable, true), "on");
+        assert_eq!(
+            validation_banner(ValidationMode::IfAvailable, false),
+            "off (no layer)"
+        );
+        assert_eq!(validation_banner(ValidationMode::Off, false), "off");
+    }
 }

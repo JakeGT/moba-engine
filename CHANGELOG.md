@@ -176,16 +176,22 @@ the semver check):
     `extended_frames`. `MOBA_PIPELINE_STATS=1` now keeps every pipeline's statistics, compute
     included, and logs the G-buffer terrain's and the deferred lighting's (register counts on
     the RTX 5070 Ti: standard tiles 74, extended 105, after the per-model terms were packed
-    into three `vec4`s; item 32).
+    into three `vec4`s; item 32). Every renderer logs `[render] validation: <mode>` at
+    start-up, and a deferred Tiered frame `[render] paint decals: inline|gbuffer pass`; CI's
+    `tiered-temporal` job runs the teamfight's deferred–forward parity with the decal pass
+    forced on (`PARITY_SCENES` limits `deferred-parity.sh`'s scenes), and
+    `terrain-decal-check.sh` also bounds the tiered terrain G-buffer stage's registers
+    (`GBUFFER_REGISTERS`, 48).
   - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
-    (worst pixel 3, 3, 3 and 6/255 locally, with the inline decals and with the decal pass); Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the
-    emissive mask, which only the N2c samples carry). On the RTX 5070 Ti the teamfight frame is
-    1.014–1.063× N1's forward frame (gate ≤ 1.10× on `gpu_total`; GPU span up to 1.074×,
-    advisory) and 0.998–1.002× N2b's; the material sheet's close view, the extended-model
-    check, is 1.091× an estimate of N1 drawing the spheres (criterion 1.10×; 1.127× N1's frame
-    without them), and the headroom left for N2d–N2f (0.0088 ms at Low, 0.0078 ms at High
-    after the phases' budgets) is budgeted in amendment 3, with N2d and N2f recording the
-    area lights and glass pixels they measure.
+    (worst pixel 3, 3, 3 and 6/255 locally, with the inline decals and with the decal pass);
+    Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the emissive mask,
+    which only the N2c samples carry). On the RTX 5070 Ti the teamfight frame is 1.014–1.063×
+    N1's forward frame (gate ≤ 1.10× on `gpu_total`; GPU span up to 1.074×, advisory) and
+    0.998–1.002× N2b's on p50 (up to 1.003× on p95); the material sheet's close view, the
+    extended-model check, is 1.091× an estimate of N1 drawing the spheres (criterion 1.10×;
+    1.123× N1's frame without them), and the headroom left for N2d–N2f (0.0088 ms at Low, 0.0078
+    ms at High after the phases' budgets) is budgeted in amendment 3, with N2d and N2f recording
+    the area lights and glass pixels they measure.
 - **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
   [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
   Compat is byte-identical (its images; every Compat SPIR-V module but `sky.frag`, whose body

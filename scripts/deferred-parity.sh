@@ -14,6 +14,10 @@
 # QUALITY picks the tier (default high: the Ultra configuration on Tiered, with full water)
 # and UPSCALER the back end (default taau). PARITY_FOLIAGE=1 also captures the three scenes
 # with the foliage (FOLIAGE, the extended tiles) and reports their parity without failing.
+# PARITY_SCENES (space-separated names, default all four) limits the scenes. With
+# MOBA_PAINT_DECAL_PASS=1 in the environment the deferred frame draws the `Paint` decals as
+# the G-buffer decal pass (ADR-0023 amendment 3 item 31), and each deferred capture must log
+# that the pass was built.
 # CI runs it under lavapipe with validation and sync validation (render-golden.yml); set
 # RUN="xvfb-run -a" when there is no display.
 set -euo pipefail
@@ -35,6 +39,10 @@ capture() {
   fi
   grep -q "^\[render\] lighting: $lighting" "$file.log" ||
     { grep "^\[render\]" "$file.log"; echo "FAIL: $file did not light $lighting"; exit 1; }
+  if [ "$lighting" = deferred ] && [ "${MOBA_PAINT_DECAL_PASS:-}" = 1 ]; then
+    grep -q "^\[render\] paint decals: gbuffer pass" "$file.log" ||
+      { grep "^\[render\]" "$file.log"; echo "FAIL: $file did not build the decal pass"; exit 1; }
+  fi
 }
 scenes=(
   "default MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90"
@@ -57,6 +65,10 @@ for scene in "${scenes[@]}"; do
   set -- $scene
   name=$1
   shift
+  case " ${PARITY_SCENES:-$name} " in
+    *" $name "*) ;;
+    *) continue ;;
+  esac
   if run_scene "$name" MOBA_FOLIAGE=off "$@"; then
     echo "ok: deferred parity $name"
   else

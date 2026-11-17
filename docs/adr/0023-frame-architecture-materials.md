@@ -587,8 +587,10 @@ gbuffer_rest        walls, props, structures, units  → gb0–gb2, depth, motio
   The CPU list, its order and the tier caps (Low 48, Medium 96, High and Ultra 128) stay.
 - **Water** is forward on Tiered, so it keeps evaluating `Paint` decals inline through the
   shared module.
-- **The terrain register problem goes away on Tiered.** The tiered terrain G-buffer shader has
-  no decal code. `scripts/terrain-decal-check.sh` keeps guarding Compat's `terrain.frag`.
+- **The terrain register problem goes away on Tiered** while the decal pass is on: the tiered
+  terrain G-buffer shader then has no decal code. `scripts/terrain-decal-check.sh` keeps
+  guarding Compat's `terrain.frag`, and since amendment 3 item 31 (the decals inline by
+  default) also the tiered terrain G-buffer stage (`GBUFFER_REGISTERS`, 48 on the RTX 5070 Ti).
 - *Amendment 3 item 31:* while the terrain is the only `Paint` receiver, the tiered terrain
   G-buffer stage keeps the decals inline (as N2b's did) and this pass is built only on request
   (`RenderConfig::paint_decal_pass`), for the first receiver other than the terrain.
@@ -1618,7 +1620,9 @@ amendment that names C1's consequence.
     the painted specular and the specular occlusion N2e's stylisation brings, is N2e's. **N2e's
     gate 4 needs a `Paint`-only switch**, `MOBA_PAINT_DECALS=off` (not built in N2c):
     `MOBA_DECALS=off` also removes the overlay's `Glow` decals, so it cannot isolate the
-    `Paint` pass.
+    `Paint` decals. The switch drops the `Paint` decals from the upload, so it covers both
+    the terrain's inline decals and the decal pass (item 31); N2e runs gate 4 on the default
+    frame, the inline one, and on the pass while it is opt-in.
 29. **Review hardening** (no behaviour change for valid content): a textured skinned pipeline
     that fails to build, or a Tiered prepass without the material layout, is an error, not a
     silent fallback; `gb0`'s sRGB view is asserted present when the decal pass is on (item 31), and the UNORM
@@ -1639,13 +1643,17 @@ amendment that names C1's consequence.
     terrain's permutations without decal code (`terrain_gbuffer_nodecals*_hdr`) are built only
     with `RenderConfig::paint_decal_pass` (`MOBA_PAINT_DECAL_PASS=1`). The first `Paint`
     receiver other than the terrain turns it on, and is measured then (the cost above, by
-    lane, is what it starts from). Until then only the override exercises the pass: parity
-    on lavapipe on all four scenes, validation and sync validation on lavapipe and the RTX
-    5070 Ti, and gate 4 with it on are run each time. A further 0.005 ms is available on
-    views with no live `Paint` decal: the permutation without decal code is that much cheaper
-    there (the close sheet camera's `prepass`, 0.119 against 0.124 ms), but choosing it per
-    frame changes no pixel only if the driver compiles the rest identically, so it is left as
-    an N2d lever (gate 7 below).
+    lane, is what it starts from). Until then only the override exercises the pass. CI's
+    `tiered-temporal` job runs gate 2 on the teamfight (the scene with `Paint` decals) with
+    `MOBA_PAINT_DECAL_PASS=1` and validation and sync validation, whenever its renderer
+    filter runs it (pull requests that touch the renderer, and dispatches), and fails unless
+    the start-up log says the pass was built (`[render] paint decals: gbuffer pass`). Parity
+    on all four scenes, validation on the RTX 5070 Ti and gate 4 with the pass on were run by
+    hand for this PR (perf/0037), not by CI. Without the pass no `paint` frame-graph variant
+    is compiled. A further 0.005 ms is available on views with no live `Paint` decal: the
+    permutation without decal code is that much cheaper there (the close sheet camera's
+    `prepass`, 0.119 against 0.124 ms), but choosing it per frame changes no pixel only if
+    the driver compiles the rest identically, so it is left as an N2d lever (gate 7 below).
 32. **Register counts are evidence.** With `MOBA_PIPELINE_STATS=1` every pipeline, compute
     included, keeps the driver's statistics, and the log prints the G-buffer terrain's and
     the deferred lighting's. On the RTX 5070 Ti, `deferred_light` (standard tiles) is 74
@@ -1661,7 +1669,10 @@ amendment that names C1's consequence.
     `MOBA_BRDF_LUT_SIZE` to `BRDF_LUT_SIZE`; the Tiered LUT's rows come from one queue that the
     creating thread drains too, so a helper thread the system refuses costs time, not the
     renderer's creation; the `Paint` decal count is taken once per frame, while the upload is
-    built.
+    built. After the third review: without the decal pass the `paint` frame-graph variants
+    are not compiled; the renderer logs `[render] validation: <mode>` at creation, so each
+    capture log shows whether validation ran; and `terrain-decal-check.sh` bounds the inline
+    terrain G-buffer stage's registers (§7a).
 
 **Gates** ([perf/0037](../perf/0037-n2c-materials.md)):
 
@@ -1686,9 +1697,10 @@ amendment that names C1's consequence.
   - Validation and sync validation are clean on lavapipe and on the RTX 5070 Ti.
 - **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay, the second
   review's head (item 31's inline decals): GPU total 1.014–1.063× (Low, High, Ultra,
-  Overdrive, Low and High with FSR 3.1), GPU span 1.029–1.074×, 0.998–1.002× N2b's on both
-  p50 and p95; Compat Ultra 0.999×. **`gpu_total` is the gate metric** (perf/0036's gate
-  column); `gpu_span`, which adds the gaps between passes, is advisory. Met on the replay the
+  Overdrive, Low and High with FSR 3.1), GPU span 1.029–1.074×, 0.998–1.002× N2b's on p50
+  (0.998–1.003× on p95, Ultra's 1.003); Compat Ultra 0.999×. **`gpu_total` is the gate
+  metric** (perf/0036's gate column); `gpu_span`, which adds the gaps between passes, is
+  advisory. Met on the replay the
   gate is defined on, which has no extended-model pixel. The overview: item 23.
   - **Headroom** against 1.10× N1 (`gpu_total`, ms): Low 0.0188, High 0.0288, Ultra 0.0288,
     Overdrive 0.0432, Low with FSR 3.1 0.0346, High with FSR 3.1 0.0446 (span: 0.0135 at
@@ -1702,7 +1714,8 @@ amendment that names C1's consequence.
     `prepass` delta (0.009 ms) is left out, since N1's prepass writes no G-buffer.
     **Criterion: the deferred frame within 1.10× that estimate.** It is 0.658 ms, 1.091×
     (1.075× with the prepass delta in), so 0.005 ms of headroom. Against N1's view without
-    the spheres it is 1.127×, and the far view 1.108×.
+    the spheres it is 1.123× in the same rounds (0.658 against 0.586 ms; 1.127× and the far
+    view 1.108× in the sheet's own rounds).
   - **Budget for N2d–N2f** (measured as now: the teamfight, plus the extended-model check):
     N2d (LTC area lights and the light record) at most 0.005 ms at Low and 0.008 ms at High;
     N2e (team rims, with the stylisation layer removed) at most 0.005 ms at Low and 0.008 ms

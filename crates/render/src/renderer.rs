@@ -35,7 +35,7 @@ use crate::frame_graph::{
     self, Binding, Bindings, FramePlan, FrameSpec, OFFSCREEN_VARIANTS, PassKind, ShadowSpec,
     VfxMode,
 };
-use crate::instance::{InstanceContext, ValidationMode};
+use crate::instance::{InstanceContext, ValidationMode, validation_banner};
 use crate::lighting::{
     self, BakedAo, EnvironmentState, FrameLighting, LightingConfig, LightingResources, OutlineMode,
     ShadowFilter,
@@ -688,7 +688,7 @@ pub struct Renderer {
     offscreen: Vec<OffscreenTarget>,
     /// Every frame variant, compiled once at creation: index
     /// `(4 * paint + 2 * haze + capture) * OFFSCREEN_VARIANTS + offscreen mask` (see
-    /// [`Self::plan_index`]).
+    /// [`Self::plan_index`]); the `paint` half exists only with the G-buffer decal pass.
     plans: Vec<FramePlan>,
     capture_pending: bool,
     capture_ready: bool,
@@ -799,6 +799,12 @@ impl Renderer {
         // before creation (none in the open build).
         let vendor_instance = crate::vendor::instance_extensions();
         let instance = InstanceContext::new(&required, &vendor_instance, config.validation)?;
+        // Each capture log says whether its validation was on (a clean log proves nothing
+        // without it).
+        eprintln!(
+            "[render] validation: {}",
+            validation_banner(config.validation, instance.validation_enabled())
+        );
         let loader = khr::surface::Instance::load(&instance.entry, &instance.instance);
         let factory =
             ash_window::SurfaceFactory::new(&instance.entry, &instance.instance, display_handle)?;
@@ -1107,9 +1113,15 @@ impl Renderer {
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
         // that run them, all first without a `Paint` decal (N2c: the G-buffer decals' passes
-        // only reserved, one G-buffer pass); see `plan_index`.
-        let mut plans = Vec::with_capacity(8 * OFFSCREEN_VARIANTS);
-        for paint in [false, true] {
+        // only reserved, one G-buffer pass); see `plan_index`. Without the decal pass
+        // (amendment 3 item 31) no frame selects a `paint` variant, so none is compiled.
+        let paint_variants: &[bool] = if frame_spec.has_gbuffer_decals() {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        let mut plans = Vec::with_capacity(4 * paint_variants.len() * OFFSCREEN_VARIANTS);
+        for &paint in paint_variants {
             for haze in [false, true] {
                 for capture in [false, true] {
                     for offscreen in 0..OFFSCREEN_VARIANTS {
@@ -1292,6 +1304,17 @@ impl Renderer {
                     "forward"
                 }
             );
+            // ... and, with MOBA_PAINT_DECAL_PASS=1, that the decal pass was built (item 31).
+            if deferred_pass.is_some() && environment_config.decals {
+                eprintln!(
+                    "[render] paint decals: {}",
+                    if gbuffer_decals_pass.is_some() {
+                        "gbuffer pass"
+                    } else {
+                        "inline"
+                    }
+                );
+            }
         }
         if config.debug_view.deferred_view() != 0 && deferred_pass.is_none() {
             eprintln!(
@@ -2561,7 +2584,9 @@ impl Renderer {
     /// The plan variant for a capture flag, an offscreen mask, whether heat haze is in view
     /// (ADR-0019: without it the haze's passes are only reserved, so the frame records
     /// neither them nor their barriers) and whether a `Paint` decal is in this frame's upload
-    /// (N2c, ADR-0023 §7a: without one the G-buffer decals' passes are only reserved).
+    /// (N2c, ADR-0023 §7a: without one the G-buffer decals' passes are only reserved). `paint`
+    /// is true only when the decal pass exists (amendment 3 item 31): without it the `paint`
+    /// variants are not compiled.
     const fn plan_index(capture: bool, offscreen: usize, haze: bool, paint: bool) -> usize {
         (4 * (paint as usize) + 2 * (haze as usize) + capture as usize) * OFFSCREEN_VARIANTS
             + offscreen

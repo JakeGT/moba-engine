@@ -15,6 +15,10 @@
 #    REGISTERS (default 64, the RTX 5070 Ti's count at R3b). A driver without the extension
 #    or a `Register Count` statistic (lavapipe; RADV names its counters VGPRs/SGPRs) skips
 #    this check. It catches register growth only: the record copy stayed at 64 registers.
+#    On the Tiered deferred frame the terrain's G-buffer stage carries the same decal code
+#    inline (ADR-0023 amendment 3 item 31); its fragment shader (`pipeline-stats
+#    terrain_gbuffer`) must need at most GBUFFER_REGISTERS (default 48, the RTX 5070 Ti's
+#    count at N2c). A run on the Compat path logs no such line and skips it.
 #
 #   scripts/terrain-decal-check.sh [client binary]
 #
@@ -23,6 +27,7 @@ set -euo pipefail
 client=${1:-./target/release/moba-client}
 ratio=${RATIO:-1.15}
 registers_max=${REGISTERS:-64}
+gbuffer_registers_max=${GBUFFER_REGISTERS:-48}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 status=0
@@ -70,19 +75,25 @@ else
 fi
 
 run stats MOBA_PIPELINE_STATS=1 MOBA_SMOKE_FRAMES=5
-lines=$(grep '\[render\] pipeline-stats terrain .*FRAGMENT' "$work/stats.log" || true)
-if [ -z "$lines" ] || ! grep -q 'Register_Count=' <<< "$lines"; then
-  echo "terrain-decal-check: the driver reports no register count; register check skipped"
-else
+check_registers() {
+  local pattern=$1 max=$2 label=$3 lines line samples count
+  lines=$(grep "$pattern" "$work/stats.log" || true)
+  if [ -z "$lines" ] || ! grep -q 'Register_Count=' <<< "$lines"; then
+    echo "terrain-decal-check: no register count for $label; register check skipped"
+    return
+  fi
   while read -r line; do
     samples=$(sed -n 's/.*samples=\([0-9]*\).*/\1/p' <<< "$line")
     count=$(sed -n 's/.*Register_Count=\([0-9]*\).*/\1/p' <<< "$line")
-    if [ "$count" -gt "$registers_max" ]; then
-      echo "terrain-decal-check: FAIL samples=$samples registers=$count > $registers_max"
+    if [ "$count" -gt "$max" ]; then
+      echo "terrain-decal-check: FAIL $label samples=${samples:-1} registers=$count > $max"
       status=1
     else
-      echo "terrain-decal-check: ok samples=$samples registers=$count <= $registers_max"
+      echo "terrain-decal-check: ok $label samples=${samples:-1} registers=$count <= $max"
     fi
   done <<< "$lines"
-fi
+}
+check_registers '\[render\] pipeline-stats terrain .*FRAGMENT' "$registers_max" terrain
+check_registers '\[render\] pipeline-stats terrain_gbuffer .*FRAGMENT' \
+  "$gbuffer_registers_max" terrain_gbuffer
 exit $status

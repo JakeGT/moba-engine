@@ -14,8 +14,12 @@ Captured 2026-11-17 for ADR-0023 (N2c) and its
 - **Toolchain:** rustc stable, the pinned `slangc`.
 - **Branch:** `feat/n2c-material-model`, on origin/main `ceca947` (N2b): the first build at
   `7106fb2`, the first review's code at `5e7062b`, and the second review's at `84e0904`, where
-  every measurement below ran unless it says otherwise (later commits change only docs and
-  the hash file).
+  every measurement below ran unless it says otherwise. The third review's commit adds two
+  start-up log lines, stops compiling the `paint` frame-graph variants when the decal pass is
+  off, and adds a CI step; gate 2 on all four scenes, the tiered goldens and Compat were
+  re-run on it on lavapipe, and all 48 of its captures are byte-identical to `84e0904`'s
+  (`review3/` in the evidence directory). Other later commits change only docs and the
+  hash file.
 - **Baselines:** detached release builds in their own temporary worktrees
   (`build-baselines.sh`), deleted after the measurements: `ab42718` (the N1 tiered forward
   frame, ADR-0023 §9b's baseline) and `ceca947` (N2b).
@@ -36,7 +40,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | 3. White furnace | **Met** (CPU model of the shader's fetch): worst 0.9861 over roughness 0–1 and N·V 0.05–1 |
 | 4. Hidden information (decals) | **Partly:** with bloom off, every unit pixel keeps its G-buffer albedo with decals on and off, with the inline decals and with the decal pass; the `Paint` decals are not isolated from the glow decals; see below |
 | 5. Goldens | **Met.** Compat byte-identical (11 scenes); all twelve tiered goldens two-run identical; exact hashes from CI |
-| 7. Performance (≤ 1.10× N1) | **Met** on the teamfight, every preset: GPU total 1.014–1.063× `ab42718` (GPU span 1.029–1.074×), 0.998–1.002× `ceca947` on p50 and p95; Compat 0.999×; least headroom Tiered Low, 0.0188 ms. **The extended-model check is met:** the close material sheet (14.1 % of tiles extended) is 1.091× an estimate of N1 drawing the spheres (criterion 1.10×; 1.127× N1's frame without them). The overview 0.999× (p95 1.000×) |
+| 7. Performance (≤ 1.10× N1) | **Met** on the teamfight, every preset: GPU total 1.014–1.063× `ab42718` (GPU span 1.029–1.074×), 0.998–1.002× `ceca947` on p50 (0.998–1.003× on p95); Compat 0.999×; least headroom Tiered Low, 0.0188 ms. **The extended-model check is met:** the close material sheet (14.1 % of tiles extended) is 1.091× an estimate of N1 drawing the spheres (criterion 1.10×; 1.123× N1's frame without them in the same rounds). The overview 0.999× (p95 1.000×) |
 | 8. Compat contract | **Met.** `content-check` passes every shipped material under both evaluators; a test builds each model's sample on Compat |
 
 ## Gate 1: encoding and interfaces
@@ -224,12 +228,12 @@ The first review's numbers (`5e7062b`, with the split G-buffer) and the first bu
 | Close camera, no sheet | 0.6413 | 0.629 | +0.0123 | 0.6479 | 0.642 | +0.0059 |
 
 - **Every teamfight preset is within 1.10× N1** on `gpu_total` and costs what N2b's does:
-  0.998–1.002× `ceca947` on p50 and p95, with `prepass` equal to N2b's at every preset. The
-  least headroom is Tiered Low: 0.0188 ms of total, 0.0135 ms of span (the first review's
-  split G-buffer left 0.0138 and 0.0074).
+  0.998–1.002× `ceca947` on p50 (0.998–1.003× on p95, Ultra's 0.598 against 0.596 ms), with
+  `prepass` equal to N2b's at every preset. The least headroom is Tiered Low: 0.0188 ms of
+  total, 0.0135 ms of span (the first review's split G-buffer left 0.0138 and 0.0074).
 - **Before `FOLIAGE` moved to the standard tiles** (amendment 3 item 11), round 1 of the first
-  build measured Tiered Low at 1.108× total (1.123× span), High at 1.100× and Ultra at
-  1.098×: over or at the gate. That is why it moved.
+  build measured Tiered Low at 1.108× total (1.123× span), High at 1.100× and Ultra at 1.098×:
+  over or at the gate. That is why it moved.
 
 **The decal pass, forced on** (amendment 3 item 31; the cost of turning it on when a receiver
 other than the terrain needs it):
@@ -278,7 +282,9 @@ extended tiles per frame on the RTX, every frame extended.)
 |  | `ceca947` | 0.626 | 0.641 | 0.640 | 0.124 | — | — | 0.045 | 1.074 (1.087) |  |
 |  | branch | 0.629 | 0.644 | 0.642 | 0.124 | — | — | 0.047 | **1.079 (1.090)** | 1.005 (1.005) |
 
-- **Against N1's frame without the spheres**, the sheet is 1.108× (far) and 1.127× (close).
+- **Against N1's frame without the spheres**, the sheet is 1.108× (far) and 1.127× (close) in
+  these rounds; in the sheet-forward rounds the extended-model check uses, the close view is
+  1.123× (0.658 against 0.586 ms).
   The spheres cost the branch 0.025–0.028 ms over the same view without them: their G-buffer
   draws (`prepass`, about 0.010 ms), the extended tiles in `deferred_light` (0.006–0.007 ms)
   and their shadow, AO and overlay prepass. The views without the spheres are 1.069× and
@@ -351,6 +357,25 @@ Compat Ultra 0.675 (0.999×); the overview 0.709 ms (1.016×).
 - **VRAM at High:** 247.5 MB, the same as N2b (N1 236.2). The material table is 4 KiB.
 - The raw logs are in `~/Projects/MOBA/handoff/evidence/n2c-ab/review2/` (local, not
   committed), with the scripts that ran them (`scripts/`; each takes its output directory).
+
+## Register counts on the RTX 5070 Ti
+
+`MOBA_PIPELINE_STATS=1` (amendment 3 item 32) logs `VK_KHR_pipeline_executable_properties`
+statistics; NVIDIA reports `Register_Count`. The logs are in the evidence directory's
+`review2/r8/`.
+
+| Pipeline stage | Registers | Log |
+|---|---|---|
+| `deferred_light` (standard tiles) | 74 | `final.log` |
+| `deferred_light_extended`, the first build (`7106fb2`, before the hoisting) | 111 | `old.log` |
+| `deferred_light_extended`, hoisted, one field per term (`5477882`) | 113 | `cur.log` |
+| `deferred_light_extended`, packed into three `vec4`s (`84e0904`) | 105 | `packed.log`, `final.log` |
+| `light_classify` | 17 | `final.log` |
+| `terrain_gbuffer` fragment, inline decals (the default) | 48 | `final.log` |
+| `terrain_gbuffer` fragment without decal code (`MOBA_PAINT_DECAL_PASS=1`) | 64 | `pstats-pass.log` |
+
+`scripts/terrain-decal-check.sh` now fails if the inline stage needs more than 48
+(`GBUFFER_REGISTERS`).
 
 ## Validation on the RTX 5070 Ti
 
