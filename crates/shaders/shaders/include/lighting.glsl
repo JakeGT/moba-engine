@@ -367,9 +367,48 @@ vec3 moba_representative_point(float tag, vec4 shape, vec3 to_light, vec3 r) {
 // One shaped light by LTC: `(diffuse form factor, specular lobe integral)` and, in
 // `radiance_scale`, the radiance per unit of colour that gives the shape the point light's
 // total power: sphere 1 / R², capsule 1 / (R² + R h), one-sided rect pi / (w h) for the
-// half-length h and half-extents w, h.
+// half-length h and half-extents w, h. Every shape is one quad (`ltc.glsl`).
 vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 n, vec3 v, float n_dot_v,
                          float roughness, out vec2 magnitude_fresnel, out float radiance_scale) {
+    vec3 q[4];
+    float radius = shape.w;
+    float distance = length(to_light);
+    float grow;
+    if (tag > 2.5) {
+        vec3 normal;
+        vec3 ex;
+        vec3 ey;
+        moba_rect_axes(shape, normal, ex, ey);
+        radiance_scale = MOBA_PI / max(length(ex) * length(ey), 1e-6);
+        magnitude_fresnel = vec2(0.0);
+        if (dot(to_light, normal) >= 0.0) {
+            return vec2(0.0); // Behind the emitting side.
+        }
+        grow = ltc_grow(distance, max(length(ex), length(ey)));
+        ex *= grow;
+        ey *= grow;
+        q[0] = to_light - ex - ey;
+        q[1] = to_light - ex + ey;
+        q[2] = to_light + ex + ey;
+        q[3] = to_light + ex - ey;
+    } else if (tag > 1.5) {
+        float half_length = length(shape.xyz);
+        radiance_scale = 1.0 / max(radius * radius + radius * half_length, 1e-6);
+        grow = ltc_grow(distance, radius + half_length);
+        vec3 half_axis = shape.xyz * grow;
+        radius *= grow;
+        ltc_facing_quad(to_light - half_axis, to_light + half_axis, radius,
+                        0.25 * MOBA_PI * radius, q);
+    } else {
+        // The square of the silhouette disk's area: the disk spans the sphere's cone.
+        radiance_scale = 1.0 / max(radius * radius, 1e-6);
+        grow = ltc_grow(distance, radius);
+        radius *= grow;
+        float distance2 = distance * distance;
+        float disk = radius * sqrt(distance2 / max(distance2 - radius * radius, 1e-6));
+        float half_side = 0.5 * sqrt(MOBA_PI) * disk;
+        ltc_facing_quad(to_light, to_light, half_side, half_side, q);
+    }
     vec3 t1 = v - n * dot(v, n);
     float t1_length2 = dot(t1, t1);
     vec3 helper = abs(n.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
@@ -379,28 +418,7 @@ vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 n, vec3 v, f
     vec4 m = ltc_fetch(0.0, coord);
     magnitude_fresnel = ltc_fetch(1.0, coord).xy;
     mat3 lobe = mat3(vec3(m.x, 0.0, m.y), vec3(0.0, 1.0, 0.0), vec3(m.z, 0.0, m.w)) * basis;
-    float radius = shape.w;
-    if (tag > 2.5) {
-        vec3 normal;
-        vec3 ex;
-        vec3 ey;
-        moba_rect_axes(shape, normal, ex, ey);
-        radiance_scale = MOBA_PI / max(length(ex) * length(ey), 1e-6);
-        return vec2(ltc_rect(basis, to_light, ex, ey), ltc_rect(lobe, to_light, ex, ey));
-    }
-    if (tag > 1.5) {
-        vec3 p1 = to_light - shape.xyz;
-        vec3 p2 = to_light + shape.xyz;
-        radiance_scale = 1.0 / max(radius * radius + radius * length(shape.xyz), 1e-6);
-        return vec2(ltc_capsule(basis, p1, p2, radius), ltc_capsule(lobe, p1, p2, radius));
-    }
-    // The sphere's diffuse is its own vector form factor, R² / d² toward the centre.
-    float distance2 = dot(to_light, to_light);
-    radiance_scale = 1.0 / max(radius * radius, 1e-6);
-    float diffuse = distance2 <= radius * radius * 1.0001
-        ? 1.0
-        : ltc_sphere_clip(basis * to_light * (radius * radius / (distance2 * sqrt(distance2))));
-    return vec2(diffuse, ltc_sphere(lobe, to_light, radius));
+    return vec2(ltc_quad(basis, q), ltc_quad(lobe, q)) / (grow * grow);
 }
 #endif
 

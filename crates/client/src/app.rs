@@ -736,7 +736,10 @@ impl App for ClientApp {
             .with_shader_dir(self.shader_dir.clone())
             .with_pipeline_stats(std::env::var_os("MOBA_PIPELINE_STATS").is_some_and(|v| v == "1"))
             .with_compressed_textures(launch::compressed_textures())
-            .with_lighting(Some(launch::lighting_config(self.config_quality)))
+            .with_lighting(Some(launch::lighting_config(
+                self.config_quality,
+                self.quality,
+            )))
             .with_vfx(self.vfx.enabled())
             .with_distortion(launch::distortion_switch().0)
             .with_distortion_draw(launch::distortion_switch().1)

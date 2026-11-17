@@ -6,7 +6,7 @@
 //
 // The table is `crates/render/assets/ltc-ggx.bin`, baked by `moba-tools ltc-bake` from a port
 // of the LTC reference code's fitLTC.cpp, and the evaluation follows the reference's WebGL
-// demos (ltc_quad.fs, ltc_disk.fs), adapted. That code is:
+// demo ltc_quad.fs (the clipless polygon), adapted. That code is:
 //
 //   Copyright (c) 2017, Eric Heitz, Jonathan Dupuy, Stephen Hill and David Neubelt.
 //   Redistribution and use in source and binary forms, with or without modification, are
@@ -16,8 +16,10 @@
 // and asks that its papers be cited: Heitz, Dupuy, Hill and Neubelt, "Real-Time
 // Polygonal-Light Shading with Linearly Transformed Cosines", ACM SIGGRAPH 2016; Heitz and
 // Hill, "Linear-Light Shading with Linearly Transformed Cosines" and "Real-Time Line- and
-// Disk-Light Shading with Linearly Transformed Cosines", SIGGRAPH 2017 course. The cubic
-// solver is the demo's port of Christoph Peters, "How to solve a cubic equation, revisited".
+// Disk-Light Shading with Linearly Transformed Cosines", SIGGRAPH 2017 course. Every shape
+// is one quad: a rect as itself, a sphere or a capsule as the quad facing the point that
+// covers its projected area (ours; measured against the demos' disk and line forms, which
+// cost a cubic solve or a second integral and ~40 more registers in the deferred lighting).
 #ifndef MOBA_LTC_GLSL
 #define MOBA_LTC_GLSL
 
@@ -55,159 +57,52 @@ vec3 ltc_edge(vec3 v1, vec3 v2) {
     return cross(v1, v2) * theta_sintheta;
 }
 
-// The clipless quad: `m` takes world offsets from the shaded point into the lobe's space.
-// Either winding (the form factor is turned toward the quad).
-float ltc_quad(mat3 m, vec3 p0, vec3 p1, vec3 p2, vec3 p3) {
-    vec3 l0 = normalize(m * p0);
-    vec3 l1 = normalize(m * p1);
-    vec3 l2 = normalize(m * p2);
-    vec3 l3 = normalize(m * p3);
+// How much to grow a shape whose largest half-extent `extent` spans less than
+// MOBA_LTC_MIN_SPAN of its `distance` (the caller divides the integrals by its square).
+// Below that the quad's corners are too close for fp32 (the edges' cross products cancel to
+// the normalisation's noise: 10% at a span of 1e-3), while the integral is already the
+// shape's area times the lobe's value, so the grown shape's, over the growth squared, is the
+// small one's to O(span²). It is what makes a vanishing light its point light (gate 3).
+#define MOBA_LTC_MIN_SPAN 0.01
+float ltc_grow(float distance, float extent) {
+    return max(MOBA_LTC_MIN_SPAN * distance / max(extent, 1e-6), 1.0);
+}
+
+// The clipless quad: `m` takes the corners (offsets from the shaded point) into the lobe's
+// space. Either winding (the form factor is turned toward the quad).
+float ltc_quad(mat3 m, vec3 q[4]) {
+    vec3 l0 = normalize(m * q[0]);
+    vec3 l1 = normalize(m * q[1]);
+    vec3 l2 = normalize(m * q[2]);
+    vec3 l3 = normalize(m * q[3]);
     vec3 form = ltc_edge(l0, l1) + ltc_edge(l1, l2) + ltc_edge(l2, l3) + ltc_edge(l3, l0);
     return ltc_sphere_clip(dot(form, l0 + l1 + l2 + l3) < 0.0 ? -form : form);
 }
 
-// A one-sided rect: `centre` relative to the shaded point, half-extent vectors `ex`, `ey`,
-// emitting toward `ex x ey`.
-float ltc_rect(mat3 m, vec3 centre, vec3 ex, vec3 ey) {
-    if (dot(centre, cross(ex, ey)) >= 0.0) {
-        return 0.0;
-    }
-    return ltc_quad(m, centre - ex - ey, centre - ex + ey, centre + ex + ey, centre + ex - ey);
-}
-
-// A capsule (`p1` to `p2`, `radius`) as the quad facing the shaded point with its projected
-// area (ours, ADR-0023 §4a): `radius` either side across the view, pi radius / 4 beyond each
-// end along the axis.
-float ltc_capsule(mat3 m, vec3 p1, vec3 p2, float radius) {
+// The quad standing in for a sphere or a capsule (ours, ADR-0023 §4a and amendment 4), facing
+// the shaded point: at each end (`p1`, `p2`, relative to the point) `half_width` either side
+// across the view and `reach` beyond the end along the axis. A capsule of radius R takes R
+// and pi R / 4, so a distant view sees 2 R x its projected length + pi R², its own projected
+// area at every angle; a sphere is the square of its silhouette disk's area, both ends at its
+// centre. End-on (or with no axis), any direction across the view.
+void ltc_facing_quad(vec3 p1, vec3 p2, float half_width, float reach, out vec3 q[4]) {
     vec3 axis = p2 - p1;
     float axis_length2 = dot(axis, axis);
     axis = axis_length2 > 1e-12 ? axis * inversesqrt(axis_length2) : vec3(0.0);
-    float reach = 0.25 * MOBA_PI * radius;
     vec3 view1 = normalize(p1);
     vec3 view2 = normalize(p2);
     vec3 across1 = cross(view1, axis);
     vec3 across2 = cross(view2, axis);
-    // End-on, any direction across the view.
     vec3 fallback1 = abs(view1.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     vec3 fallback2 = abs(view2.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     across1 = normalize(dot(across1, across1) > 1e-8 ? across1 : cross(view1, fallback1));
     across2 = normalize(dot(across2, across2) > 1e-8 ? across2 : cross(view2, fallback2));
     vec3 c1 = p1 - cross(across1, view1) * reach;
     vec3 c2 = p2 + cross(across2, view2) * reach;
-    vec3 s1 = across1 * radius;
-    vec3 s2 = across2 * radius;
-    return ltc_quad(m, c1 - s1, c1 + s1, c2 + s2, c2 - s2);
-}
-
-// The three real roots of c.w x^3 + c.z x^2 + c.y x + c.x (c.w = 1 here), the demo's order.
-vec3 ltc_solve_cubic(vec4 c) {
-    c.xyz /= c.w;
-    c.yz /= 3.0;
-    float b = c.z;
-    float cc = c.y;
-    float d = c.x;
-    vec3 delta = vec3(-c.z * c.z + c.y, -c.y * c.z + c.x, dot(vec2(c.z, -c.y), c.xy));
-    float discriminant = dot(vec2(4.0 * delta.x, -delta.y), delta.zy);
-    vec2 xlc;
-    vec2 xsc;
-    {
-        float c_a = delta.x;
-        float d_a = -2.0 * b * delta.x + delta.y;
-        float theta = atan(sqrt(discriminant), -d_a) / 3.0;
-        float x_1a = 2.0 * sqrt(-c_a) * cos(theta);
-        float x_3a = 2.0 * sqrt(-c_a) * cos(theta + (2.0 / 3.0) * MOBA_PI);
-        float xl = (x_1a + x_3a) > 2.0 * b ? x_1a : x_3a;
-        xlc = vec2(xl - b, c.w);
-    }
-    {
-        float c_d = delta.z;
-        float d_d = -d * delta.y + 2.0 * cc * delta.z;
-        float theta = atan(d * sqrt(discriminant), -d_d) / 3.0;
-        float x_1d = 2.0 * sqrt(-c_d) * cos(theta);
-        float x_3d = 2.0 * sqrt(-c_d) * cos(theta + (2.0 / 3.0) * MOBA_PI);
-        float xs = x_1d + x_3d < 2.0 * cc ? x_1d : x_3d;
-        xsc = vec2(-d, xs + cc);
-    }
-    float e = xlc.y * xsc.y;
-    float f = -xlc.x * xsc.y - xlc.y * xsc.x;
-    float g = xlc.x * xsc.x;
-    vec2 xmc = vec2(cc * f - b * g, -b * f + cc * e);
-    vec3 root = vec3(xsc.x / xsc.y, xmc.x / xmc.y, xlc.x / xlc.y);
-    if (root.x < root.y && root.x < root.z) {
-        root.xyz = root.yxz;
-    } else if (root.z < root.x && root.z < root.y) {
-        root.xyz = root.xzy;
-    }
-    return root;
-}
-
-// A sphere (`centre` relative to the shaded point, `radius`) through `m`: the disk across its
-// cone of directions, facing the point, then the ellipse's form factor (ltc_disk.fs).
-float ltc_sphere(mat3 m, vec3 centre, float radius) {
-    float distance2 = dot(centre, centre);
-    float radius2 = radius * radius;
-    if (distance2 <= radius2 * 1.0001) {
-        return 1.0;
-    }
-    float disk = radius * sqrt(distance2 / (distance2 - radius2));
-    vec3 axis = centre * inversesqrt(distance2);
-    vec3 helper = abs(axis.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-    vec3 e1 = normalize(cross(axis, helper));
-    vec3 e2 = cross(axis, e1);
-    vec3 c = m * centre;
-    vec3 v1 = m * (e1 * disk);
-    vec3 v2 = m * (e2 * disk);
-    float d11 = dot(v1, v1);
-    float d22 = dot(v2, v2);
-    float d12 = dot(v1, v2);
-    float a;
-    float b;
-    if (abs(d12) * inversesqrt(d11 * d22) > 0.0001) {
-        float tr = d11 + d22;
-        float det = sqrt(-d12 * d12 + d11 * d22);
-        float u = 0.5 * sqrt(max(tr - 2.0 * det, 0.0));
-        float v = 0.5 * sqrt(tr + 2.0 * det);
-        float e_max = (u + v) * (u + v);
-        float e_min = (u - v) * (u - v);
-        vec3 w1;
-        vec3 w2;
-        if (d11 > d22) {
-            w1 = d12 * v1 + (e_max - d11) * v2;
-            w2 = d12 * v1 + (e_min - d11) * v2;
-        } else {
-            w1 = d12 * v2 + (e_max - d22) * v1;
-            w2 = d12 * v2 + (e_min - d22) * v1;
-        }
-        a = 1.0 / e_max;
-        b = 1.0 / e_min;
-        v1 = normalize(w1);
-        v2 = normalize(w2);
-    } else {
-        a = 1.0 / d11;
-        b = 1.0 / d22;
-        v1 *= sqrt(a);
-        v2 *= sqrt(b);
-    }
-    vec3 v3 = cross(v1, v2);
-    if (dot(c, v3) < 0.0) {
-        v3 = -v3;
-    }
-    float l = dot(v3, c);
-    float x0 = dot(v1, c) / l;
-    float y0 = dot(v2, c) / l;
-    a *= l * l;
-    b *= l * l;
-    float c0 = a * b;
-    float c1 = a * b * (1.0 + x0 * x0 + y0 * y0) - a - b;
-    float c2 = 1.0 - a * (1.0 + x0 * x0) - b * (1.0 + y0 * y0);
-    vec3 roots = ltc_solve_cubic(vec4(c0, c1, c2, 1.0));
-    vec3 average = vec3(a * x0 / (a - roots.y), b * y0 / (b - roots.y), 1.0);
-    average = normalize(mat3(v1, v2, v3) * average);
-    float l1 = sqrt(-roots.y / roots.z);
-    float l2 = sqrt(-roots.y / roots.x);
-    float form_factor = l1 * l2 * inversesqrt((1.0 + l1 * l1) * (1.0 + l2 * l2));
-    // A degenerate ellipse (the roots coincide) adds nothing rather than a NaN.
-    return form_factor > 0.0 ? ltc_sphere_clip(average * form_factor) : 0.0;
+    q[0] = c1 - across1 * half_width;
+    q[1] = c1 + across1 * half_width;
+    q[2] = c2 + across2 * half_width;
+    q[3] = c2 - across2 * half_width;
 }
 
 #endif

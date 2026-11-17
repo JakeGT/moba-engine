@@ -201,16 +201,17 @@ pinned at commit `31e5e96b54f98f33098f8503003119ba2231a1c6` (2019-04-15). Ported
   bakes `crates/render/assets/ltc-ggx.bin` (the only generated file committed, 2 × 64 × 64
   `RGBA16F`, 64 KiB; the upstream's own tables are not shipped).
 - `crates/shaders/shaders/include/ltc.glsl` and its Rust twin `crates/render/src/ltc/twin.rs`
-  adapt the evaluation of the WebGL demos `webgl/shaders/ltc/ltc_quad.fs` (the clipless
-  polygon, `IntegrateEdgeVec`) and `webgl/shaders/ltc/ltc_disk.fs` (the ellipse's form factor
-  and `SolveCubic`, which the demo credits to Christoph Peters, "How to solve a cubic equation,
-  revisited"). `webgl/shaders/ltc/ltc_line.fs` was read and measured against (the capsule is
-  our own quad), not shipped.
+  adapt the evaluation of the WebGL demo `webgl/shaders/ltc/ltc_quad.fs` (the clipless
+  polygon, `IntegrateEdgeVec`, the sphere table for the horizon). The demos
+  `webgl/shaders/ltc/ltc_disk.fs` and `webgl/shaders/ltc/ltc_line.fs` were read and measured
+  against (a sphere as the disk spanning its cone, a capsule as a line with end caps), not
+  shipped: every shape is one quad (ours).
 
 Changes: translated to Rust and GLSL and renamed; the fit's threads split by view angle (same
 results as the upstream's order); the table written as one little-endian `RGBA16F` file of two
-layers; the evaluation reads Tiered's LUT atlas, turns each polygon's form factor toward the
-light instead of tracking a winding, and takes the sphere as the disk spanning its cone
+layers; the evaluation reads Tiered's LUT atlas, turns the quad's form factor toward the light
+instead of tracking a winding, grows a light too small for `f32` and scales its integral back,
+and stands a sphere or a capsule in as the quad facing the point with its projected area
 (ADR-0023 §4a and amendment 4). Each ported file carries a notice of its origin.
 
 SHA-256 of the files used, at that commit: `LICENSE`

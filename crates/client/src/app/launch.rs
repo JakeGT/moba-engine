@@ -445,15 +445,24 @@ fn cap_tier(tier: moba_render::QualityTier, target: &RenderTarget) -> moba_rende
     }
 }
 
-pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {
-    lighting_config_from(tier, |name| std::env::var(name).ok())
+/// The lighting for the configuration tier `tier` (on Tiered, the preset's configuration),
+/// with the area-light mode of the `preset` the player chose (N2d, ADR-0023 §4a: the
+/// representative point on Low, LTC from Medium; Tiered runs every preset on the High
+/// configuration, so the mode comes from the preset), then the environment overrides.
+pub(crate) fn lighting_config(
+    tier: moba_render::QualityTier,
+    preset: moba_render::QualityTier,
+) -> moba_render::LightingConfig {
+    lighting_config_from(tier, preset, |name| std::env::var(name).ok())
 }
 
 fn lighting_config_from(
     tier: moba_render::QualityTier,
+    preset: moba_render::QualityTier,
     var: impl Fn(&str) -> Option<String>,
 ) -> moba_render::LightingConfig {
-    let mut config = moba_render::LightingConfig::for_tier(tier);
+    let mut config = moba_render::LightingConfig::for_tier(tier)
+        .with_area_lights(moba_render::LightingConfig::for_tier(preset).area_lights);
     if let Some(value) = var("MOBA_SHADOWS") {
         match moba_render::ShadowFilter::from_name(&value) {
             Some(filter) => config = config.with_shadows(filter),
@@ -1929,8 +1938,12 @@ mod tests {
             }
         };
         let high = LightingConfig::for_tier(QualityTier::High);
-        assert_eq!(lighting_config_from(QualityTier::High, env(&[])), high);
+        assert_eq!(
+            lighting_config_from(QualityTier::High, QualityTier::High, env(&[])),
+            high
+        );
         let off = lighting_config_from(
+            QualityTier::High,
             QualityTier::High,
             env(&[
                 ("MOBA_SHADOWS", "OFF"),
@@ -1943,10 +1956,12 @@ mod tests {
         assert_eq!(off.shadow_resolution, 512);
         let bad = lighting_config_from(
             QualityTier::Low,
+            QualityTier::Low,
             env(&[("MOBA_SHADOWS", "vsm"), ("MOBA_SHADOW_SIZE", "big")]),
         );
         assert_eq!(bad, LightingConfig::for_tier(QualityTier::Low));
         let r2b = lighting_config_from(
+            QualityTier::High,
             QualityTier::High,
             env(&[
                 ("MOBA_LIGHTS", "off"),
@@ -1977,17 +1992,29 @@ mod tests {
         ];
         for (pairs, mode) in modes {
             assert_eq!(
-                lighting_config_from(QualityTier::Low, env(pairs)).area_lights,
+                lighting_config_from(QualityTier::High, QualityTier::Low, env(pairs)).area_lights,
                 mode
             );
         }
+        // Tiered's Low preset on the High configuration keeps Low's representative point.
+        let tiered_low = lighting_config_from(QualityTier::High, QualityTier::Low, env(&[]));
+        assert_eq!(
+            tiered_low.area_lights,
+            moba_render::AreaLights::RepresentativePoint
+        );
+        assert_eq!(
+            tiered_low.with_area_lights(moba_render::AreaLights::Ltc),
+            LightingConfig::for_tier(QualityTier::High)
+        );
         let capped = lighting_config_from(
+            QualityTier::Low,
             QualityTier::Low,
             env(&[("MOBA_LIGHTS", "8"), ("MOBA_CONTACT_SHADOWS", "12")]),
         );
         assert_eq!(capped.max_lights, 8);
         assert_eq!(capped.contact_shadow_steps, 12);
         let ignored = lighting_config_from(
+            QualityTier::Ultra,
             QualityTier::Ultra,
             env(&[
                 ("MOBA_LIGHTS", "lots"),

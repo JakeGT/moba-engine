@@ -290,15 +290,17 @@ struct Worst {
 }
 
 /// The recorded tolerances (ADR-0023 amendment 4), per shape `(evaluation, diffuse,
-/// specular)`: the worst measured over `cases()` (sphere 0.058 / 0.0002 / 0.099, capsule
+/// specular)`: the worst measured over `cases()` (sphere 0.176 / 0.004 / 0.085, capsule
 /// 0.145 / 0.042 / 0.056, rect 0.116 / 0.002 / 0.105) with ~15% headroom. The reference is
 /// fixed-seed, so the margin only absorbs `f32` differences between targets. What the
 /// errors are: the evaluation's is the clipless method's horizon (the sphere table stands
-/// in for clipping the polygon or ellipse in LTC space; worst on glossy lobes at grazing
-/// view) plus, for the capsule, its quad's square ends; the specular's adds the table's fit
-/// of GGX, which is loosest at grazing view (a lobe's peak there sits ~5° from GGX's).
+/// in for clipping the polygon in LTC space; worst on glossy lobes at grazing view) plus the
+/// sphere's and capsule's quads: a square's corners and sides where the disk's or the caps'
+/// rims are (the sphere's worst, 0.176, is a glossy lobe off its peak, where the corners
+/// land); the specular's adds the table's fit of GGX, which is loosest at grazing view (a
+/// lobe's peak there sits ~5° from GGX's) and which partly offsets it.
 const TOLERANCE: [(&str, [f64; 3]); 3] = [
-    ("sphere", [0.07, 0.002, 0.12]),
+    ("sphere", [0.2, 0.005, 0.1]),
     ("capsule", [0.17, 0.05, 0.07]),
     ("rect", [0.13, 0.003, 0.12]),
 ];
@@ -404,7 +406,7 @@ fn a_shrinking_sphere_tends_to_the_point_light() {
             let point_diffuse = w.z / 4.0;
             let point_specular = PI * magnitude * distribution(minv, w) / 4.0;
             let mut previous = [f32::INFINITY; 2];
-            for radius in [0.2f32, 0.05, 0.01] {
+            for radius in [0.2f32, 0.05, 0.01, 1e-3, 1e-5] {
                 let r2 = radius * radius;
                 let diffuse = sphere(&frame, Minv::IDENTITY, centre, radius) / r2;
                 let specular = sphere(&frame, minv, centre, radius) * magnitude / r2;
@@ -484,6 +486,10 @@ fn the_shader_constants_match() {
         crate::lighting::BRDF_LUT_SIZE as usize + 2 * LTC_SIZE
     );
     assert!(ltc.contains(&format!("#define MOBA_LTC_SIZE {LTC_SIZE}.0")));
+    assert!(ltc.contains(&format!(
+        "#define MOBA_LTC_MIN_SPAN {}",
+        super::twin::MIN_SPAN
+    )));
     assert!(lighting.contains(&format!(
         "#define MOBA_LIGHT_SHAPE_BASE {}u",
         crate::lights::SHAPE_BASE

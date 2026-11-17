@@ -1,21 +1,23 @@
-//! LTC area lights (N2d, ADR-0023 §4): the fitted GGX table and the Rust twin of
-//! `include/ltc.glsl`, which the gate-3 tests hold against a Monte Carlo reference.
+//! LTC area lights (N2d, ADR-0023 §4): the fitted GGX table, Tiered's LUT atlas and (in
+//! tests) the Rust twin of `include/ltc.glsl`, which the gate-3 tests hold against a Monte
+//! Carlo reference.
 //!
 //! The table is `assets/ltc-ggx.bin`, baked once by `moba-tools ltc-bake` (a port of the LTC
-//! reference code's `fitLTC.cpp`, THIRD_PARTY.md) and uploaded as one two-layer `RGBA16F`
-//! 64 × 64 array: layer 0 the inverse matrix's four terms, layer 1 the lobe's magnitude,
-//! average Fresnel and the horizon-clipped sphere table. Its sampling, and the evaluation of
-//! each shape, follow the reference's WebGL demos (`ltc_quad.fs`, `ltc_line.fs`,
-//! `ltc_disk.fs`; Heitz, Dupuy, Hill and Neubelt 2016; Heitz and Hill 2017), adapted:
+//! reference code's `fitLTC.cpp`, THIRD_PARTY.md): two `RGBA16F` 64 × 64 layers, layer 0 the
+//! inverse matrix's four terms, layer 1 the lobe's magnitude, average Fresnel and the
+//! horizon-clipped sphere table. Its sampling and the polygon's evaluation follow the
+//! reference's WebGL demo `ltc_quad.fs` (Heitz, Dupuy, Hill and Neubelt 2016), adapted. Every
+//! shape is one quad (ours, ADR-0023 §4a and amendment 4):
 //!
-//! - **`Rect`**: the clipless polygon (four edge vectors, then the sphere table for the
-//!   horizon), one-sided;
-//! - **`Sphere`**: the disk facing the shaded point with the sphere's own cone of directions
-//!   (a disk across the cone is exactly the sphere's silhouette), then the ellipse's vector
-//!   form factor and the sphere table, as `ltc_disk.fs` does;
-//! - **`Capsule`**: the line integral of a thin cylinder (`ltc_line.fs`) plus two half-sphere
-//!   ends, each a point evaluation of the LTC distribution over half the sphere's disk; the
-//!   composition is ours (ADR-0023 §4a).
+//! - **`Rect`**: itself, one-sided (four edge vectors, then the sphere table for the horizon);
+//! - **`Sphere`**: the square, facing the shaded point, of the area of the disk spanning the
+//!   sphere's cone (the disk is exactly the sphere's silhouette);
+//! - **`Capsule`**: the quad facing the point with the capsule's projected area at every angle:
+//!   the radius either side across the view, π R / 4 beyond each end along the axis.
+//!
+//! The demos' disk (an ellipse's form factor through a cubic solve) and line (a second
+//! integral plus end caps) forms were measured against these: the line misses most on glossy
+//! lobes, and both cost about 40 more registers in the deferred lighting (perf/0038).
 //!
 //! Every evaluation returns the integral of the (transformed) clamped cosine over the shape,
 //! in 0..=1: with the identity it is the form factor (the diffuse), with the table's matrix
