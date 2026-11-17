@@ -163,19 +163,29 @@ the semver check):
     `materials/` against both evaluators and reports `material_models`.
     `content/materials/samples/` has one material per model, and `MOBA_MATERIAL_SHEET=samples`
     draws them as a sphere sheet.
-  - **G-buffer decals:** on frames with a `Paint` decal the G-buffer pass is split into
-    `prepass` (the terrain), `gbuffer_decals` (the decals' back faces against the read-only
-    depth, blended into `gb0`) and `gbuffer_rest`; frames without one keep N2b's single pass.
-    New frame-log lanes `gpu_gbuffer_decals` and `gpu_gbuffer_rest`, the field
-    `paint_decals_avg`, and with `MOBA_TILE_COUNTS=1` (off by default: the read-back costs
-    about 0.005 ms of GPU) `tiles_standard_avg`, `tiles_extended_avg` and `extended_frames`.
+  - **G-buffer decals:** while the terrain is the only `Paint` receiver, its G-buffer stage
+    applies the decals inline and the frame is N2b's single G-buffer pass (amendment 3 item
+    31). `MOBA_PAINT_DECAL_PASS=1` (`RenderConfig::with_paint_decal_pass`) builds the decal
+    pass instead: on frames with a `Paint` decal the G-buffer pass is split into `prepass`
+    (the terrain, without decal code), `gbuffer_decals` (the decals' back faces against the
+    read-only depth, blended into `gb0`'s sRGB view) and `gbuffer_rest`; it costs 0.008 ms at
+    Low and 0.012 ms at High by lane on the teamfight, and the first receiver other than the
+    terrain turns it on. New frame-log lanes `gpu_gbuffer_decals` and `gpu_gbuffer_rest`, the
+    field `paint_decals_avg`, and with `MOBA_TILE_COUNTS=1` (off by default: the read-back
+    costs about 0.005 ms of GPU) `tiles_standard_avg`, `tiles_extended_avg` and
+    `extended_frames`. `MOBA_PIPELINE_STATS=1` now keeps every pipeline's statistics, compute
+    included, and logs the G-buffer terrain's and the deferred lighting's (register counts on
+    the RTX 5070 Ti: standard tiles 74, extended 105, after the per-model terms were packed
+    into three `vec4`s; item 32).
   - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
-    (worst pixel 3, 3, 3 and 6/255 locally); Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the
+    (worst pixel 3, 3, 3 and 6/255 locally, with the inline decals and with the decal pass); Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the
     emissive mask, which only the N2c samples carry). On the RTX 5070 Ti the teamfight frame is
-    1.036–1.073× N1's forward frame (gate ≤ 1.10× on `gpu_total`; GPU span up to 1.086×) and
-    1.010–1.020× N2b's, after `FOLIAGE` moved to the standard tiles (1.108× at Low before); the
-    material sheet, the only scene with extended-model pixels, is 1.102–1.117× N1's frame
-    without the spheres, and the headroom left for N2d–N2f is budgeted in amendment 3.
+    1.014–1.063× N1's forward frame (gate ≤ 1.10× on `gpu_total`; GPU span up to 1.074×,
+    advisory) and 0.998–1.002× N2b's; the material sheet's close view, the extended-model
+    check, is 1.091× an estimate of N1 drawing the spheres (criterion 1.10×; 1.127× N1's frame
+    without them), and the headroom left for N2d–N2f (0.0088 ms at Low, 0.0078 ms at High
+    after the phases' budgets) is budgeted in amendment 3, with N2d and N2f recording the
+    area lights and glass pixels they measure.
 - **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
   [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
   Compat is byte-identical (its images; every Compat SPIR-V module but `sky.frag`, whose body

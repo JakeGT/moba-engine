@@ -589,6 +589,9 @@ gbuffer_rest        walls, props, structures, units  → gb0–gb2, depth, motio
   shared module.
 - **The terrain register problem goes away on Tiered.** The tiered terrain G-buffer shader has
   no decal code. `scripts/terrain-decal-check.sh` keeps guarding Compat's `terrain.frag`.
+- *Amendment 3 item 31:* while the terrain is the only `Paint` receiver, the tiered terrain
+  G-buffer stage keeps the decals inline (as N2b's did) and this pass is built only on request
+  (`RenderConfig::paint_decal_pass`), for the first receiver other than the terrain.
 
 **7b. `Glow` decals** (telegraphs, zones, ranges) are in N1's overlay layer (ADR-0021 §5b), not
 in the G-buffer, and N2 does not touch them.
@@ -1523,12 +1526,14 @@ amendment that names C1's consequence.
       unchanged).
     - `Glow` decals in the same buffer (N1's overlay, §7b) are collapsed by the vertex stage,
       every vertex outside the clip volume, so they rasterise nothing.
-    - **The split is only for frames with a `Paint` decal.** The frame graph has a `paint`
-      axis: without a live `Paint` decal, `gbuffer_decals` and `gbuffer_rest` are reserved and
-      `prepass` draws everything, as N2b's one pass did (twice the plans, the same resources).
-    - `MOBA_DECALS=off` (§11) keeps one G-buffer pass, as in N2b, and no sRGB view on `gb0`.
+    - **Built only on request (item 31).** With `RenderConfig::paint_decal_pass`
+      (`MOBA_PAINT_DECAL_PASS=1`) the frame graph has a `paint` axis: without a live `Paint`
+      decal, `gbuffer_decals` and `gbuffer_rest` are reserved and `prepass` draws everything
+      (twice the plans, the same resources), and the G-buffer terrain is the permutation
+      without decal code. Without it, or with `MOBA_DECALS=off` (§11), the frame is N2b's: one
+      G-buffer pass, the terrain's inline decals, no sRGB view on `gb0`.
 17. **The graph's largest tiered topology is 41 resources** (of `MAX_RESOURCES` 48; no `u128`
-    mask). The frame log has the lanes `prepass`, `gbuffer_decals` and `gbuffer_rest` (38
+    mask; with the decal pass, item 31). The frame log has the lanes `prepass`, `gbuffer_decals` and `gbuffer_rest` (38
     lanes in all).
 18. **Samples and the sheet.** `content/materials/samples/` holds one material per model
     (textures `material-sample-*`, baked by `texture-bake generate material-sample`; the MR and
@@ -1573,13 +1578,12 @@ amendment that names C1's consequence.
 23. **Gate 7's wall-heavy overview is not measured as such** (§9b: `gbuffer_receivers`
     against N1's prepass). The shipped maps have four walls each, so no view is wall-heavy. A
     low orbit across the whole map (`MOBA_PREVIEW_CAMERA=-0.7,0.12,170`: terrain, towers and
-    structures, little wall) costs what N2b's frame does (0.991× N1's; N2b 0.996×): with the `paint`
-    variant (item 16) it runs the single G-buffer pass except on the minority of frames with a
-    live `Paint` decal, so the receivers' pass cannot be read from it. On the teamfight, which
-    always splits, the receivers' `prepass` (terrain alone) is 0.045 ms at Low and 0.052 ms at
-    High, against N1's whole prepass of 0.020 and 0.024 ms, which writes no G-buffer. Walls
-    stay in `gbuffer_rest`; their overdraw of decal-shaded terrain waits for a map with walls
-    in view.
+    structures, little wall) costs what N2b's frame does: 0.999× N1's `gpu_total` (p95 1.000×),
+    1.001× N2b's, with item 31's single G-buffer pass on every frame. The receivers' pass
+    exists only with the decal pass (item 31); with it forced on, the teamfight's receivers
+    (the terrain alone) are 0.045 ms at Low and 0.052 ms at High, against N1's whole prepass of
+    0.020 and 0.024 ms, which writes no G-buffer. Walls stay after the decals; their overdraw of
+    decal-shaded terrain waits for a map with walls in view and a receiver that needs the pass.
 24. **`ior` and `specular` shape the F0 of `standard` and `transmissive` only** (§6b gave every
     model the stored F0). Only those two models store an F0 in the G-buffer; every other
     model's channel holds its own data, so the deferred frame lit their base at 0.04 while the
@@ -1617,7 +1621,7 @@ amendment that names C1's consequence.
     `Paint` pass.
 29. **Review hardening** (no behaviour change for valid content): a textured skinned pipeline
     that fails to build, or a Tiered prepass without the material layout, is an error, not a
-    silent fallback; `gb0`'s sRGB view is asserted present when decals are on, and the UNORM
+    silent fallback; `gb0`'s sRGB view is asserted present when the decal pass is on (item 31), and the UNORM
     format's sRGB twin is a checked table (`srgb_twin`); a test checks that the material
     G-buffer layout fits the Tiered admission minimums.
 30. **Timing evidence names what it measured.** The frame log reports `paint_decals_avg` (live
@@ -1625,6 +1629,39 @@ amendment that names C1's consequence.
     `tiles_extended_avg` and `extended_frames` (`light_classify`'s counts, copied to a
     host-readable buffer in `mask_clear` and read a frame later). The copy's barriers cost
     0.004–0.005 ms on the RTX 5070 Ti, so it is off by default and in gate 7's timings.
+31. **While the terrain is the only `Paint` receiver, its G-buffer stage applies the decals
+    inline** (departs from §7a's decal pass and from item 16's default). On the teamfight, a
+    live `Paint` decal is on 2,806 of 2,940 frames, so item 16's split ran almost always and
+    cost 0.008 ms at Low and 0.012 ms at High by lane (`prepass` + `gbuffer_decals` +
+    `gbuffer_rest` against N2b's one pass), mostly the second pass boundary. The terrain's
+    `terrain_gbuffer*_hdr` permutations are N2b's again (48 registers on the RTX 5070 Ti) and
+    the frame graph is N2b's; the decal pass, the `paint` axis, `gb0`'s sRGB view and the
+    terrain's permutations without decal code (`terrain_gbuffer_nodecals*_hdr`) are built only
+    with `RenderConfig::paint_decal_pass` (`MOBA_PAINT_DECAL_PASS=1`). The first `Paint`
+    receiver other than the terrain turns it on, and is measured then (the cost above, by
+    lane, is what it starts from). Until then only the override exercises the pass: parity
+    on lavapipe on all four scenes, validation and sync validation on lavapipe and the RTX
+    5070 Ti, and gate 4 with it on are run each time. A further 0.005 ms is available on
+    views with no live `Paint` decal: the permutation without decal code is that much cheaper
+    there (the close sheet camera's `prepass`, 0.119 against 0.124 ms), but choosing it per
+    frame changes no pixel only if the driver compiles the rest identically, so it is left as
+    an N2d lever (gate 7 below).
+32. **Register counts are evidence.** With `MOBA_PIPELINE_STATS=1` every pipeline, compute
+    included, keeps the driver's statistics, and the log prints the G-buffer terrain's and
+    the deferred lighting's. On the RTX 5070 Ti, `deferred_light` (standard tiles) is 74
+    registers and `deferred_light_extended` 105. Item 25's light-invariant terms took one
+    field each (113 registers, against 111 before the hoisting); a pixel has one model, so
+    they now share three `vec4`s (`ModelContext`, documented per model in
+    `include/shading_models.glsl`). The `moba_model` global is not the cause: after `glslc
+    -O` the extended permutation is one function with no `Private` variable, so a global and
+    a local compile alike.
+33. **Second review hardening** (no behaviour change for valid frames): the tile counts are
+    marked written only after a successful submit, and the first copy after creation or a
+    resize, which would read an unwritten header, is skipped; a test ties `lighting.glsl`'s
+    `MOBA_BRDF_LUT_SIZE` to `BRDF_LUT_SIZE`; the Tiered LUT's rows come from one queue that the
+    creating thread drains too, so a helper thread the system refuses costs time, not the
+    renderer's creation; the `Paint` decal count is taken once per frame, while the upload is
+    built.
 
 **Gates** ([perf/0037](../perf/0037-n2c-materials.md)):
 
@@ -1633,43 +1670,59 @@ amendment that names C1's consequence.
   `stored_texels_are_fixed_points`) and `gbuffer-smoke` cover all eight models. Met.
 - **2. Parity** (`STANDARD` and `UNLIT` only, item 22): `deferred-parity.sh` at 1280×720 on lavapipe
   gives the worst pixels 3 (default), 3 (sky off), 3 (river) and 6/255 (teamfight), each
-  within 2/255 on at least 99.999 % of pixels (re-run on the review's head: 1, 1, 3 and 7
-  pixels past 2/255). Met. Without item 16's grid test the teamfight read 28/255.
+  within 2/255 on at least 99.999 % of pixels (1, 1, 3 and 7 pixels past 2/255), with item
+  31's inline decals and with the decal pass forced on alike. CI's lavapipe reads 4, 4, 3 and
+  6/255. Met. Without item 16's grid test the pass read 28/255 on the teamfight.
 - **3. White furnace:** worst 0.9861 over roughness 0–1 and N·V 0.05–1, a CPU model of the
   shader's fetch (item 10). Met; a rendered furnace is not measured.
-- **4. Hidden information (decals):** with bloom off, all 38,813 unit pixels of the teamfight
-  keep their G-buffer albedo bytes with decals on and off, while 35,010 other pixels change. `MOBA_DECALS=off` also removes the
-  overlay's glow decals, so the `Paint` pass is not isolated. Partial; N2e runs the full gate
-  with rims.
+- **4. Hidden information (decals):** with bloom off, all 38,838 unit pixels of the teamfight
+  keep their G-buffer albedo bytes with decals on and off, with item 31's inline decals
+  (35,063 other pixels change) and with the decal pass (35,010). `MOBA_DECALS=off` also
+  removes the overlay's glow decals, so the `Paint` decals are not isolated. Partial; N2e runs
+  the full gate with rims.
 - **5. Goldens:**
   - Every Compat golden scene, and both sentinel heroes, are byte-identical to `ceca947`.
   - The `materials` and `decals` tiered goldens are two-run identical with TAAU and FSR 3.1.
   - Validation and sync validation are clean on lavapipe and on the RTX 5070 Ti.
-- **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay, the review's
-  head: GPU total 1.036–1.073×, GPU span 1.053–1.086× (Low, High, Ultra, Overdrive, Low and
-  High with FSR 3.1), 1.010–1.020× N2b's; Compat Ultra 0.999×. **`gpu_total` is the gate
-  metric** (perf/0036's gate column); `gpu_span`, which adds the gaps between passes, is
-  advisory. Met on the replay the gate is defined on, which has no extended-model pixel. The
-  overview: item 23.
-  - **Headroom** against 1.10× N1 (`gpu_total`, ms): Low 0.0138, High 0.0209, Ultra 0.0209,
-    Overdrive 0.0322, Low with FSR 3.1 0.0276, High with FSR 3.1 0.0367 (span: 0.0074 at
-    Low, 0.0146 at High).
-  - **Extended-model pixels reach the gate:** the material sheet, with 6.9 % and 14.1 % of
-    its tiles extended, is 1.102× and 1.117× N1's frame without the spheres at High (N1 cannot
-    draw them; an estimate of N1 drawing them puts the close view at about 1.10×). The
-    teamfight's split G-buffer costs 0.007–0.011 ms over N2b's single pass.
-  - **Budget for N2d–N2f** (measured as now: the teamfight, plus the sheet's close view as the
-    extended-model check): N2d (LTC area lights and the light record) at most 0.005 ms at Low
-    and 0.008 ms at High; N2e (team rims, with the stylisation layer removed) at most 0.005 ms
-    at Low and 0.008 ms at High, net of what the removal saves; N2f (the `glass` pass,
-    Medium+) nothing at Low and at most 0.005 ms at High. That leaves about 0.004 ms at Low for
-    noise, and nothing for heroes with extended models, so **N2d opens with a recovery step**
-    before its own work, in this order: the wave-uniform (scalarised) light loop amendment 2
-    item 5 deferred (`deferred_light` is 0.053 ms at Low); folding the `Paint` decals back
-    into the receivers' G-buffer stage from the decal grid, as N2b's terrain did (a departure
-    from §7a's decal pass, so an amendment), which removes the split's second pass boundary;
-    and `light_classify` (0.009 ms) folded into the deferred dispatch. A phase that cannot
-    meet its budget after that is an amendment that names the preset and the overrun.
+- **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay, the second
+  review's head (item 31's inline decals): GPU total 1.014–1.063× (Low, High, Ultra,
+  Overdrive, Low and High with FSR 3.1), GPU span 1.029–1.074×, 0.998–1.002× N2b's on both
+  p50 and p95; Compat Ultra 0.999×. **`gpu_total` is the gate metric** (perf/0036's gate
+  column); `gpu_span`, which adds the gaps between passes, is advisory. Met on the replay the
+  gate is defined on, which has no extended-model pixel. The overview: item 23.
+  - **Headroom** against 1.10× N1 (`gpu_total`, ms): Low 0.0188, High 0.0288, Ultra 0.0288,
+    Overdrive 0.0432, Low with FSR 3.1 0.0346, High with FSR 3.1 0.0446 (span: 0.0135 at
+    Low, 0.0224 at High). The decal pass forced on (item 31) costs 0.006 ms of total at Low
+    and 0.009 ms at High (by lane 0.008 and 0.012 ms).
+  - **The extended-model check** is the material sheet's close view at High (14 % of tiles
+    extended). N1 cannot draw the spheres, so it is checked against an estimate of N1 drawing
+    them: N1's frame of the same view without them (0.586 ms) plus what the spheres cost the
+    forward Tiered frame (`MOBA_DEFERRED=off`) in the lanes N1 has: `scene` 0.005, `shadow`
+    0.003, `ao` 0.003 and `overlay_prepass` 0.006 ms, so 0.603 ms; the spheres' forward
+    `prepass` delta (0.009 ms) is left out, since N1's prepass writes no G-buffer.
+    **Criterion: the deferred frame within 1.10× that estimate.** It is 0.658 ms, 1.091×
+    (1.075× with the prepass delta in), so 0.005 ms of headroom. Against N1's view without
+    the spheres it is 1.127×, and the far view 1.108×.
+  - **Budget for N2d–N2f** (measured as now: the teamfight, plus the extended-model check):
+    N2d (LTC area lights and the light record) at most 0.005 ms at Low and 0.008 ms at High;
+    N2e (team rims, with the stylisation layer removed) at most 0.005 ms at Low and 0.008 ms
+    at High, net of what the removal saves; N2f (the `glass` pass, Medium+) nothing at Low
+    and at most 0.005 ms at High.
+    - On the teamfight that leaves 0.0088 ms at Low and 0.0078 ms at High. Before item 31,
+      High and Ultra had none: 0.008 + 0.008 + 0.005 = 0.021 ms against 0.0209 ms.
+    - Spending the whole budget puts `gpu_span` at about 1.093× N1 at Low and 1.098× at High;
+      span is advisory, so that is reported, not gated.
+    - **The extended-model check has 0.005 ms**, less than any phase's High budget. A phase
+      that adds cost on extended tiles therefore recovers it first. Item 31 already folded
+      the `Paint` decals back, so the levers left are: the wave-uniform (scalarised) light loop
+      amendment 2 item 5 deferred (`deferred_light` is 0.053 ms at Low); the terrain's
+      permutation without decal code on frames with no live `Paint` decal (0.005 ms on such
+      views, item 31); and `light_classify` (0.009 ms) folded into the deferred dispatch.
+    - **N2d and N2f record what they light**, as item 30 does for the tiles: the area lights
+      lit per frame (N2d) and the glass pixels or tiles (N2f) go in the frame log. A budget
+      measured on a scene without the feature does not pass.
+    - A phase that cannot meet its budget after its levers is an amendment that names the
+      preset and the overrun.
 - **8. Compat contract:** `content-check` passes every shipped material under both evaluators,
   and `every_sample_material_loads_on_compat` builds each model's sample on Compat. Met.
 

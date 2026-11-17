@@ -4,8 +4,8 @@
 # section from a CI run on that class only (its artifact's hashes-*.txt, or sha256sum of its
 # *-1.ppm captures); never from a local run or local WRITE_HASHES=1.
 device llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8) cpu=amd
-decals 022f2c7fb5912be1ae767752f4d3e8fcd064ec8099c47920d536c787f3e33216
-fsr3-decals 66559e4b9b1de54713c483d5489fca130f70ea0ac4a55a462f10799657875a56
+decals d89c7c83fb97c31ab5d38bc45b9d94fce94be36f0bb811a7869248c6f9803f85
+fsr3-decals 5225f0f0507ee8c2a74ba09ee2fcc908996771b110524780ee607653bae5a8db
 fsr3-high af782c3df3a8a84857257b6022c8a64e7528b147564a785b17e22c54ccdf073b
 fsr3-low 93aa34769bc3cd67f402f1518613cbe61f1fbae66e62569e612fe67e01886b1a
 fsr3-materials 5f7862e2e195dfd993278571ceec071a9d5b48b252216347cce5f36355cfd8f0
@@ -17,8 +17,8 @@ materials b00debe7cf3565c43181b3f3a91770134d41bcbf702dfb16eb123c037836c4ea
 native 644215bec396a7658c29955045d5a175c8c5e5ec957140a88c06efbe91f06efd
 overlay cdf484b2e93060d94ace525d369f58089f26a998093fe9620bcc154b630de4dd
 device llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8) cpu=intel
-decals 1f7e2e085b9f8cd74ab99f55cce753fe288ec76b5a4352b73076f82cd15223fb
-fsr3-decals 17d908c0c1b7addcca273b2938727e761eb4fc4a03c3bd7098ca11166e12a5f8
+decals a2c0829b106a6a08e25c88c01d1868f9de182dfa19aec02e5aae99ca6f7d0fe6
+fsr3-decals e2a6b5c784157138f53f4d40992fa4b653b478355d4039f5d51a52f2caa34b9c
 fsr3-high 9c79b41d9bc6a908d0a84dce978956e099f6a1c89c5e2c9d11b246b48775b910
 fsr3-low bffc6e5a92133c2bbdbfa48329329098bf379225c7919f5bafde909d9fd7a59c
 fsr3-materials 9f55de52bee9d7e833ed86ec3935bc949e1898eace43e025495d1d1b12d44e98
