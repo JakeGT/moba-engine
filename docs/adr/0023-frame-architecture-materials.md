@@ -1980,9 +1980,12 @@ item here.
   comparison is not measured.
 - **5. Goldens:** Compat's 11 scenes byte-identical to `fa661a7` and its SPIR-V unchanged;
   all fourteen tiered goldens two-run identical, the new `ltc` and `fsr3-ltc` among them;
-  exact hashes from CI, where only `decals` and `fsr3-decals` moved (the teamfight's bolts).
-  Validation and sync validation clean on lavapipe and on the RTX 5070 Ti (36 captures,
-  both pipelines of item 10's choice). Met.
+  after review round 1 the twelve older fingerprints pass and the two `ltc` ones were
+  retaken. The exact hashes are still the first round's (CI's, where only `decals` and
+  `fsr3-decals` moved): review round 1 moves `ltc`, `fsr3-ltc`, `decals` and `fsr3-decals`
+  again on lavapipe, and the one `cpu_sample` dispatch waits on item 14's decision.
+  Validation and sync validation clean on lavapipe and on the RTX 5070 Ti (37 runs after
+  review round 1, every area mode). Met except the exact hashes, pending.
 - **7. Performance: not met; pending the maintainer's decision (item 14).** Every area
   mode exceeds N2d's budget on the frames that carry shaped lights, after the levers (area
   sheet at High: LTC +0.055 ms, the representative point +0.018 over `off`; Low's point
