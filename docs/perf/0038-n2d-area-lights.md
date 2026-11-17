@@ -92,7 +92,9 @@ a capsule and a rect light over open ground, lit with LTC on both paths. Pixels 
 | R3b teamfight (its bolts are capsule lights) | 99.999 % | 6 | 7 (five at 3, one at 4, one at 6) |
 | area-light sheet | 100.000 % | 3 | 2 |
 
-[[PARITY_PAINTPASS]]
+With the G-buffer decal pass forced on (`MOBA_PAINT_DECAL_PASS=1`, CI's second parity step)
+every scene reads the same. N2c's four scenes read exactly as in perf/0037 (worst pixel and
+count alike).
 
 ## Goldens
 
