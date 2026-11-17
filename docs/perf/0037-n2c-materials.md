@@ -12,7 +12,9 @@ Captured 2026-11-17 for ADR-0023 (N2c) and its
   windows are 960×540 and 1920×1080, and the HUD no longer matches the committed fingerprints:
   `ceca947` itself then fails the `low` fingerprint (mean 2.21, max 97, all in the HUD).
 - **Toolchain:** rustc stable, the pinned `slangc`.
-- **Branch:** `feat/n2c-material-model` at `7106fb2`, on origin/main `ceca947` (N2b).
+- **Branch:** `feat/n2c-material-model`, on origin/main `ceca947` (N2b): the first build at
+  `7106fb2`, and the review's code at `5e7062b`, where every measurement marked "the review's
+  head" ran (later commits change only docs and the hash file).
 - **Baselines:** detached release builds in their own temporary worktrees, deleted after the
   review's measurements: `ab42718` (the N1 tiered forward frame, ADR-0023 §9b's baseline) and
   `ceca947` (N2b).
@@ -128,10 +130,11 @@ decals (§7a). The full gate, with rims, is N2e's.
     were rewritten (mean 0.133, max 39 against the first build's): the anisotropic sphere's
     direction now follows its tangent (amendment 3 item 26), the thin film's Fresnel is taken
     at N·V and its AO is read (items 25 and 27), and the LUT's texels moved (item 10).
-  - The exact hashes come from CI only: `render-golden.yml` dispatched on `7106fb2` with
-    `cpu_sample=true` (run 43992116303), eight sampling legs, its `tiered-hash-sections`
-    artefact pasted with both the `cpu=amd` and `cpu=intel` sections of all twelve names,
-    sorted with `LC_ALL=C`. Every later commit touches only docs and the hash file.
+  - The exact hashes come from CI only: `render-golden.yml` dispatched on `5e7062b` with
+    `cpu_sample=true` (run 44013048172), its `tiered-hash-sections` artefact pasted with
+    both the `cpu=amd` and `cpu=intel` sections of all twelve names, sorted with
+    `LC_ALL=C` (the first build's came from run 43992116303 on `7106fb2`). Every later commit
+    touches only docs and the hash file.
 
 ## Gate 7: performance
 
