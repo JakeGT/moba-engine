@@ -98,7 +98,19 @@ count alike).
 
 ## Goldens
 
-[[GOLDENS]]
+- **Compat is byte-identical** to `fa661a7` on lavapipe (`compat-n2d.sh`, `cmp`): the default,
+  Ultra, Low at 0.75, VAT, horizon, river, river Low, river Ultra and teamfight-decals scenes
+  and the textured and skinned sentinel heroes over the local server, **all 11 identical**,
+  0 validation messages. Compat's SPIR-V is byte-identical (below), and Compat lights every
+  shape as the point at its centre: the area-light sheet on Compat draws with 3 shaped lights
+  on every frame and no validation message. The material sheet still draws its 8 spheres.
+- **Tiered goldens** at 640×360 (`goldens.sh`, `r1/goldens/`): all fourteen cases are two-run
+  byte-identical with no validation messages, the twelve existing ones and the new `ltc`
+  with TAAU and FSR 3.1 (the material sheet under the area-light sheet at Medium, the lowest
+  preset with LTC; the extended models' spheres lit at the representative point). Both
+  mid-stream resets are clean. The twelve existing fingerprints still pass (mean ≤ 0.145,
+  max ≤ 5) and are kept; the two `ltc` fingerprints are new.
+- **Exact hashes from CI only:** [[HASHES]]
 
 ## Gate 7: performance
 
@@ -137,8 +149,7 @@ of GPU total against `fa661a7`, although only 11 % of its frames hold a shaped l
 
 ## Register counts on the RTX 5070 Ti
 
-`MOBA_PIPELINE_STATS=1`, High, the area-light sheet (`r1/rtx`'s stats run and the probes'
-logs):
+`MOBA_PIPELINE_STATS=1` on the area-light sheet at High and Low (`r1/stats/`):
 
 | Pipeline | Registers | Local memory |
 |---|---|---|
@@ -146,8 +157,8 @@ logs):
 | `deferred_light_extended`, LTC | 128 | none |
 | `deferred_light_plain` (mode 0, frames without a shaped light) | 74 | none |
 | `deferred_light_extended_plain` | 105 | none |
-| `deferred_light`, Low (mode 1, the representative point) | 80 | none |
-| `deferred_light_extended`, Low | 102 | none |
+| `deferred_light`, Low (mode 1, the representative point) | 77 | none |
+| `deferred_light_extended`, Low | 105 | none |
 | `light_classify` | 17 | none |
 
 ## SPIR-V
@@ -160,7 +171,19 @@ the Tiered forward stages that include the lighting (`unit_tiered`, `unit_textur
 
 ## Validation on the RTX 5070 Ti
 
-[[RTX]]
+`MOBA_VULKAN_VALIDATION=required` (validation and synchronisation validation), 1280×720, the
+branch's release build (`realgpu-n2d.sh`, `r1/rtx/`). Each of the seven gate-7 presets (Tiered
+Low, High, Ultra and Overdrive with TAAU, Low and High with FSR 3.1, Compat Ultra) captured
+the default scene, the material sheet, the teamfight and the area-light sheet (the material
+sheet under the three shaped lights, every frame with a shaped light). Eight more: the
+material sheet and the area-light sheet on the forward Tiered frame (`MOBA_DEFERRED=off`), the
+area-light sheet at Medium and at High with `MOBA_AREA_LIGHTS=point` and `off`, the
+teamfight with the tile counts read back, and the teamfight with the decal pass at Low and
+High. **All 36 ran with 0 validation messages.** The default scene and the material sheet
+hold no shaped light (`area_frames=0`), so they ran the mode-0 pipelines; the area-light
+captures ran LTC (or the representative point, Low) on every frame, so both pipelines of the
+per-frame choice were validated. `deferred-parity.sh` on the RTX (information only): worst
+pixel 3, 3, 3, 6 and 3/255 (default, sky off, river, teamfight, area-light sheet).
 
 ## What is not measured
 
