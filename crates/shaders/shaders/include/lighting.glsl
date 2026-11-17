@@ -373,12 +373,29 @@ vec3 moba_representative_point(float tag, vec4 shape, vec3 to_light, vec3 r) {
 // One shaped light by LTC: `(diffuse form factor, specular lobe integral)` and, in
 // `radiance_scale`, the radiance per unit of colour that gives the shape the point light's
 // total power: sphere 1 / R², capsule 1 / (R² + R h), one-sided rect pi / (w h) for the
-// half-length h and half-extents w, h. Every shape is one quad (`ltc.glsl`).
+// half-length h and half-extents w, h. A sphere is its own vector form factor (the diffuse)
+// and the disk spanning its cone (the lobe); a capsule and a rect are one quad (`ltc.glsl`).
+// Everything is evaluated in the shading frame (t1 toward v, t2, n).
 vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 n, vec3 v, float n_dot_v,
                          float roughness, out vec2 magnitude_fresnel, out float radiance_scale) {
-    vec3 q[4];
+    vec3 t1 = v - n * dot(v, n);
+    float t1_length2 = dot(t1, t1);
+    vec3 helper = abs(n.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    t1 = t1_length2 > 1e-8 ? t1 * inversesqrt(t1_length2) : normalize(cross(n, helper));
+    vec3 t2 = cross(n, t1);
+    vec2 coord = vec2(roughness, sqrt(1.0 - clamp(n_dot_v, 0.0, 1.0)));
+    magnitude_fresnel = ltc_fetch(1.0, coord).xy;
+    vec4 m = ltc_fetch(0.0, coord);
     float radius = shape.w;
     float distance = length(to_light);
+    vec3 centre = vec3(dot(to_light, t1), dot(to_light, t2), dot(to_light, n));
+    if (tag < 1.5) {
+        radiance_scale = 1.0 / max(radius * radius, 1e-6);
+        float grow = ltc_grow(distance, radius);
+        return vec2(ltc_sphere_form(centre, radius * grow), ltc_sphere(m, centre, radius * grow))
+            / (grow * grow);
+    }
+    vec3 q[4];
     float grow;
     if (tag > 2.5) {
         vec3 normal;
@@ -386,7 +403,6 @@ vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 n, vec3 v, f
         vec3 ey;
         moba_rect_axes(shape, normal, ex, ey);
         radiance_scale = MOBA_PI / max(length(ex) * length(ey), 1e-6);
-        magnitude_fresnel = vec2(0.0);
         if (dot(to_light, normal) >= 0.0) {
             return vec2(0.0); // Behind the emitting side.
         }
@@ -397,7 +413,7 @@ vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 n, vec3 v, f
         q[1] = to_light - ex + ey;
         q[2] = to_light + ex + ey;
         q[3] = to_light + ex - ey;
-    } else if (tag > 1.5) {
+    } else {
         float half_length = length(shape.xyz);
         radiance_scale = 1.0 / max(radius * radius + radius * half_length, 1e-6);
         grow = ltc_grow(distance, radius + half_length);
@@ -405,32 +421,15 @@ vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 n, vec3 v, f
         radius *= grow;
         ltc_facing_quad(to_light - half_axis, to_light + half_axis, radius,
                         0.25 * MOBA_PI * radius, q);
-    } else {
-        // The square of the silhouette disk's area: the disk spans the sphere's cone.
-        radiance_scale = 1.0 / max(radius * radius, 1e-6);
-        grow = ltc_grow(distance, radius);
-        radius *= grow;
-        float distance2 = distance * distance;
-        float disk = radius * sqrt(distance2 / max(distance2 - radius * radius, 1e-6));
-        float half_side = 0.5 * sqrt(MOBA_PI) * disk;
-        ltc_facing_quad(to_light, to_light, half_side, half_side, q);
     }
-    // The corners into the shading frame once (t1 toward v, t2, n), then the clamped cosine
-    // (the diffuse) and the lobe (the table's inverse matrix, four terms) over them in turn.
-    vec3 t1 = v - n * dot(v, n);
-    float t1_length2 = dot(t1, t1);
-    vec3 helper = abs(n.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-    t1 = t1_length2 > 1e-8 ? t1 * inversesqrt(t1_length2) : normalize(cross(n, helper));
-    vec3 t2 = cross(n, t1);
     for (int k = 0; k < 4; k++) {
         q[k] = vec3(dot(q[k], t1), dot(q[k], t2), dot(q[k], n));
     }
-    vec2 coord = vec2(roughness, sqrt(1.0 - clamp(n_dot_v, 0.0, 1.0)));
+    // The clamped cosine (the diffuse), then the lobe, over the same corners.
     vec2 integral;
     for (int k = 0; k < 2; k++) {
-        integral[k] = ltc_quad(k == 0 ? vec4(1.0, 0.0, 0.0, 1.0) : ltc_fetch(0.0, coord), q);
+        integral[k] = ltc_quad(k == 0 ? vec4(1.0, 0.0, 0.0, 1.0) : m, q);
     }
-    magnitude_fresnel = ltc_fetch(1.0, coord).xy;
     return integral / (grow * grow);
 }
 #endif

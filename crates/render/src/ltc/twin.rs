@@ -173,7 +173,7 @@ fn polygon(frame: &Frame, minv: Minv, corners: [Vec3; 4]) -> f32 {
     sphere_clip(if form.dot(toward) < 0.0 { -form } else { form })
 }
 
-/// `ltc_facing_quad`: the quad facing the shaded point standing in for a sphere or capsule,
+/// `ltc_facing_quad`: the quad facing the shaded point standing in for a capsule,
 /// `half_width` either side across the view at each end and `reach` beyond each end along the
 /// axis (`ltc.glsl`).
 fn facing_quad(p1: Vec3, p2: Vec3, half_width: f32, reach: f32) -> [Vec3; 4] {
@@ -194,20 +194,135 @@ fn facing_quad(p1: Vec3, p2: Vec3, half_width: f32, reach: f32) -> [Vec3; 4] {
     [c1 - s1, c1 + s1, c2 + s2, c2 - s2]
 }
 
-/// A sphere of radius `radius` at `centre` (relative to the shaded point): the square, facing
-/// the point, of the area of the disk spanning the sphere's cone.
+/// `SolveCubic` (`ltc_disk.fs`, after Peters, "How to solve a cubic equation, revisited"):
+/// the three real roots of `c.w x³ + c.z x² + c.y x + c.x`, sorted so that `x` is the
+/// largest... as the reference orders them (`x`, `y`, `z` with `y` the middle root).
+#[allow(clippy::many_single_char_names)] // The reference's names.
+fn solve_cubic(coefficient: [f32; 4]) -> [f32; 3] {
+    let pi = core::f32::consts::PI;
+    let w = coefficient[3];
+    let (cx, cy, cz) = (
+        coefficient[0] / w,
+        coefficient[1] / w / 3.0,
+        coefficient[2] / w / 3.0,
+    );
+    let (a, b, c, d) = (1.0f32, cz, cy, cx);
+    let delta = [-cz * cz + cy, -cy * cz + cx, cz * cx - cy * cy];
+    let discriminant = 4.0 * delta[0] * delta[2] - delta[1] * delta[1];
+    // Algorithm A.
+    let xlc = {
+        let c_a = delta[0];
+        let d_a = -2.0 * b * delta[0] + delta[1];
+        let theta = discriminant.sqrt().atan2(-d_a) / 3.0;
+        let x_1a = 2.0 * (-c_a).sqrt() * theta.cos();
+        let x_3a = 2.0 * (-c_a).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
+        let xl = if x_1a + x_3a > 2.0 * b { x_1a } else { x_3a };
+        [xl - b, a]
+    };
+    // Algorithm D.
+    let xsc = {
+        let c_d = delta[2];
+        let d_d = -d * delta[1] + 2.0 * c * delta[2];
+        let theta = (d * discriminant.sqrt()).atan2(-d_d) / 3.0;
+        let x_1d = 2.0 * (-c_d).sqrt() * theta.cos();
+        let x_3d = 2.0 * (-c_d).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
+        let xs = if x_1d + x_3d < 2.0 * c { x_1d } else { x_3d };
+        [-d, xs + c]
+    };
+    let e = xlc[1] * xsc[1];
+    let f = -xlc[0] * xsc[1] - xlc[1] * xsc[0];
+    let g = xlc[0] * xsc[0];
+    let xmc = [c * f - b * g, -b * f + c * e];
+    let mut root = [xsc[0] / xsc[1], xmc[0] / xmc[1], xlc[0] / xlc[1]];
+    if root[0] < root[1] && root[0] < root[2] {
+        root = [root[1], root[0], root[2]];
+    } else if root[2] < root[0] && root[2] < root[1] {
+        root = [root[0], root[2], root[1]];
+    }
+    root
+}
+
+/// A sphere of radius `radius` at `centre` (relative to the shaded point): with the identity
+/// (the diffuse) its own vector form factor, `R² / d²` toward its centre; otherwise the disk
+/// spanning its cone of directions, through `minv`, then the ellipse's form factor
+/// (`ltc_disk.fs`'s `LTC_Evaluate`). In the shading frame, as `ltc.glsl`.
 pub(crate) fn sphere(frame: &Frame, minv: Minv, centre: Vec3, radius: f32) -> f32 {
     let grow = grow(centre, radius);
     let radius = radius * grow;
+    let centre = frame.local(centre);
     let distance2 = centre.length_squared();
     let radius2 = radius * radius;
-    let disk = radius * (distance2 / (distance2 - radius2).max(1e-6)).sqrt();
-    let half_side = 0.5 * core::f32::consts::PI.sqrt() * disk;
-    polygon(
-        frame,
-        minv,
-        facing_quad(centre, centre, half_side, half_side),
-    ) / (grow * grow)
+    let integral = if distance2 <= radius2 * 1.0001 {
+        // Inside the light: the whole (transformed) upper hemisphere.
+        1.0
+    } else if minv == Minv::IDENTITY {
+        sphere_clip(centre * (radius2 / (distance2 * distance2.sqrt())))
+    } else {
+        disk(minv, centre, radius)
+    };
+    integral / (grow * grow)
+}
+
+/// `ltc_sphere`'s disk: the one at the centre's distance spanning the sphere's cone,
+/// `tan(asin(R / d)) × d` across, facing the point (`centre` in the shading frame).
+fn disk(minv: Minv, centre: Vec3, radius: f32) -> f32 {
+    let distance2 = centre.length_squared();
+    let disk = radius * (distance2 / (distance2 - radius * radius)).sqrt();
+    let axis = centre / distance2.sqrt();
+    let e1 = axis.cross(helper(axis)).normalize();
+    let e2 = axis.cross(e1);
+    let c = minv.apply(centre);
+    let mut v1 = minv.apply(e1 * disk);
+    let mut v2 = minv.apply(e2 * disk);
+    let d11 = v1.dot(v1);
+    let d22 = v2.dot(v2);
+    let d12 = v1.dot(v2);
+    let (a, b);
+    if d12.abs() / (d11 * d22).sqrt() > 0.0001 {
+        let tr = d11 + d22;
+        let det = (-d12 * d12 + d11 * d22).sqrt();
+        let u = 0.5 * (tr - 2.0 * det).max(0.0).sqrt();
+        let v = 0.5 * (tr + 2.0 * det).sqrt();
+        let e_max = (u + v) * (u + v);
+        let e_min = (u - v) * (u - v);
+        let (v1_, v2_) = if d11 > d22 {
+            (d12 * v1 + (e_max - d11) * v2, d12 * v1 + (e_min - d11) * v2)
+        } else {
+            (d12 * v2 + (e_max - d22) * v1, d12 * v2 + (e_min - d22) * v1)
+        };
+        a = 1.0 / e_max;
+        b = 1.0 / e_min;
+        v1 = v1_.normalize();
+        v2 = v2_.normalize();
+    } else {
+        a = 1.0 / d11;
+        b = 1.0 / d22;
+        v1 *= a.sqrt();
+        v2 *= b.sqrt();
+    }
+    let mut v3 = v1.cross(v2);
+    if c.dot(v3) < 0.0 {
+        v3 = -v3;
+    }
+    let l = v3.dot(c);
+    let x0 = v1.dot(c) / l;
+    let y0 = v2.dot(c) / l;
+    let (a, b) = (a * l * l, b * l * l);
+    let c0 = a * b;
+    let c1 = a * b * (1.0 + x0 * x0 + y0 * y0) - a - b;
+    let c2 = 1.0 - a * (1.0 + x0 * x0) - b * (1.0 + y0 * y0);
+    let [e1r, e2r, e3r] = solve_cubic([c0, c1, c2, 1.0]);
+    let average = Vec3::new(a * x0 / (a - e2r), b * y0 / (b - e2r), 1.0);
+    let average = (v1 * average.x + v2 * average.y + v3 * average.z).normalize();
+    let l1 = (-e2r / e3r).sqrt();
+    let l2 = (-e2r / e1r).sqrt();
+    let form_factor = l1 * l2 / ((1.0 + l1 * l1) * (1.0 + l2 * l2)).sqrt();
+    // A degenerate ellipse (the roots coincide) adds nothing rather than a NaN.
+    if form_factor > 0.0 {
+        sphere_clip(average * form_factor)
+    } else {
+        0.0
+    }
 }
 
 /// A capsule: the segment from `p1` to `p2` (relative to the shaded point) of radius

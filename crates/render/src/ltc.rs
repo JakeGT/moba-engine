@@ -5,19 +5,20 @@
 //! The table is `assets/ltc-ggx.bin`, baked once by `moba-tools ltc-bake` (a port of the LTC
 //! reference code's `fitLTC.cpp`, THIRD_PARTY.md): two `RGBA16F` 64 × 64 layers, layer 0 the
 //! inverse matrix's four terms, layer 1 the lobe's magnitude, average Fresnel and the
-//! horizon-clipped sphere table. Its sampling and the polygon's evaluation follow the
-//! reference's WebGL demo `ltc_quad.fs` (Heitz, Dupuy, Hill and Neubelt 2016), adapted. Every
-//! shape is one quad (ours, ADR-0023 §4a and amendment 4):
+//! horizon-clipped sphere table. Its sampling and the evaluations follow the reference's
+//! WebGL demos `ltc_quad.fs` and `ltc_disk.fs` (Heitz, Dupuy, Hill and Neubelt 2016; Heitz
+//! and Hill 2017), adapted (ADR-0023 §4a and amendment 4):
 //!
 //! - **`Rect`**: itself, one-sided (four edge vectors, then the sphere table for the horizon);
-//! - **`Sphere`**: the square, facing the shaded point, of the area of the disk spanning the
-//!   sphere's cone (the disk is exactly the sphere's silhouette);
-//! - **`Capsule`**: the quad facing the point with the capsule's projected area at every angle:
-//!   the radius either side across the view, π R / 4 beyond each end along the axis.
+//! - **`Sphere`**: the diffuse its own vector form factor; the lobe over the disk spanning its
+//!   cone (exactly its silhouette), the ellipse's form factor through a cubic solve;
+//! - **`Capsule`**: the quad facing the point with the capsule's projected area at every angle
+//!   (ours): the radius either side across the view, π R / 4 beyond each end along the axis.
+//!   The demos' line (a second integral plus end caps) misses more on glossy lobes.
 //!
-//! The demos' disk (an ellipse's form factor through a cubic solve) and line (a second
-//! integral plus end caps) forms were measured against these: the line misses most on glossy
-//! lobes, and both cost about 40 more registers in the deferred lighting (perf/0038).
+//! A light spanning less than 1% of its distance is evaluated grown to that and its integrals
+//! scaled back by the growth squared (`twin::grow`): below it `f32` loses the shape, while
+//! its integral is already its area times the lobe's value.
 //!
 //! Every evaluation returns the integral of the (transformed) clamped cosine over the shape,
 //! in 0..=1: with the identity it is the form factor (the diffuse), with the table's matrix
