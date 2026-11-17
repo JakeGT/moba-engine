@@ -1838,13 +1838,18 @@ item here.
     (specialisation constant 1) and at 0, and each frame picks by whether its light list
     holds a shaped light. With LTC the standard permutation needs 117 registers on the RTX
     5070 Ti (74 without; 80 is the occupancy boundary), which cost the whole pass about
-    0.009 ms at High on the teamfight whether a shaped light was near or not. Mode 0 lights
-    a point light exactly as LTC's pipeline does (a point skips the area code), so the
-    choice moves no pixel. The forward stages read the mode from the camera's
+    0.009 ms at High on the teamfight whether a shaped light was near or not. A point light
+    skips the area code in both pipelines, so the choice should move no pixel; CI's
+    unchanged hashes show the mode-0 pipelines draw N2c's frames, but no capture compares
+    the two pipelines on the same frame. The forward stages read the mode from the camera's
     `occlusion.z`.
 11. **The water lights shapes at their representative point** (`MOBA_AREA_LTC 0` in
-    `water.frag`), LTC or not: its registers cost the water pass 0.006 ms on every frame.
-    The water's specular is its own mirror and ripples; the other forward Tiered stages
+    `water.frag`), LTC or not: with the LTC code the water pass cost 0.006 ms more on every
+    frame (one round at 1280×720). The representative point's code still costs it 0.002–
+    0.003 ms at 1920×1080 (0.020 → 0.023 ms at High, 0.019 → 0.021 at Low), most of N2d's
+    cost on the teamfight; compiling the water at mode 0 (shapes as points at their centres)
+    is the lever left for it. The water's specular is its own mirror and ripples; the other
+    forward Tiered stages
     (units, terrain, foliage) keep LTC, so the forward frame lights area lights as the
     deferred one does (gate 2).
 12. **Effects:** the `[light]` table takes `shape = "point" | "sphere" | "capsule" | "rect"`,

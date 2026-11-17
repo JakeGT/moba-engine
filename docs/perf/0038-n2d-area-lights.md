@@ -110,11 +110,73 @@ count alike).
   preset with LTC; the extended models' spheres lit at the representative point). Both
   mid-stream resets are clean. The twelve existing fingerprints still pass (mean ≤ 0.145,
   max ≤ 5) and are kept; the two `ltc` fingerprints are new.
-- **Exact hashes from CI only:** [[HASHES]]
+- **Exact hashes from CI only:** `render-golden.yml` dispatched on `164d590` with
+  `cpu_sample=true` (run 44083568862, all eight sample legs green), its
+  `tiered-hash-sections` artefact pasted whole, both the `cpu=amd` and `cpu=intel` sections,
+  sorted with `LC_ALL=C`. Besides the new `ltc` and `fsr3-ltc`, only `decals` and
+  `fsr3-decals` moved, in both sections: the teamfight's bolts are capsule lights now. `low`,
+  `high`, `native`, `overlay` and `materials` (and their FSR 3.1 twins) keep N2c's hashes, so
+  the atlas and the per-frame mode-0 pipelines change no byte of a frame without a shaped
+  light. The `ltc` fingerprints pass on CI's Mesa (26.0.8). An earlier dispatch (run
+  44078987962, on `277c09e`) failed only because the `ltc` fingerprints were not committed
+  yet.
 
 ## Gate 7: performance
 
-[[GATE7]]
+- **Builds:** `ab42718` (N1), `fa661a7` (N2c) and the branch, release builds.
+- **Machine:** the RTX 5070 Ti, a 1920×1080 window (perf/0037's extent; the probes below ran
+  at 1280×720).
+- **Replay:** the teamfight replay (`MOBA_WARMUP_TICKS=330`). Vsync off, the 240 fps limit,
+  validation off, the pipeline cache off, 3,000 frames per run.
+- **Rounds:** three, interleaved, each under `flock handoff/gpu.lock`, no other `moba-client`
+  running (`perf.sh`, `r1/gate7/`). Medians of the rounds' p50 (and p95), ms.
+- **What the frames held:** the teamfight's bolts are capsule lights: **a shaped light on
+  326 of 3,000 frames** (`area_frames`, 0.16 per frame on average; Compat counts 330). Those
+  frames run the LTC pipelines (the representative point on Low), the rest the mode-0 ones.
+- **The gate metric is `gpu_total`**; `gpu_span` is advisory (amendment 3, gate 7).
+
+| Configuration | N1 total | N2c total | branch total | branch p95 | branch span | `deferred_light` N2c → branch | `water` N2c → branch | ÷ N1 total (span) | branch − N2c, p50 (p95) |
+|---|---|---|---|---|---|---|---|---|---|
+| Tiered Low (TAAU) | 0.554 | 0.589 | 0.591 | 0.603 | 0.606 | 0.055 → 0.056 | 0.019 → 0.021 | **1.067** (1.082) | +0.002 (+0.003) |
+| Tiered High (TAAU) | 0.603 | 0.634 | 0.638 | 0.655 | 0.652 | 0.058 → 0.060 | 0.020 → 0.023 | **1.058** (1.069) | +0.004 (+0.010) |
+| Tiered Ultra (TAAU) | 0.604 | 0.635 | 0.639 | 0.656 | 0.654 | 0.058 → 0.060 | 0.020 → 0.023 | **1.058** (1.070) | +0.004 (+0.010) |
+| Tiered Overdrive | 0.545 | 0.551 | 0.556 | 0.570 | 0.572 | 0.037 → 0.038 | 0.016 → 0.019 | **1.020** (1.036) | +0.005 (+0.007) |
+| Tiered Low, FSR 3.1 | 0.712 | 0.753 | 0.755 | 0.767 | 0.769 | 0.055 → 0.056 | 0.019 → 0.021 | **1.060** (1.070) | +0.002 (+0.003) |
+| Tiered High, FSR 3.1 | 0.764 | 0.799 | 0.801 | 0.822 | 0.816 | 0.058 → 0.060 | 0.021 → 0.023 | **1.048** (1.060) | +0.002 (+0.011) |
+| Compat Ultra | 0.731 | 0.732 | 0.733 | 0.744 | 0.738 | — | 0.031 → 0.032 | **1.003** (1.003) | +0.001 (+0.001) |
+
+Within each configuration and build the three rounds agree within 0.006 ms.
+
+- **Every preset is within 1.10× N1** on `gpu_total` (1.020–1.067×; span 1.036–1.082×).
+- **N2d's budget is met on p50** (amendment 3: at most 0.005 ms at Low, 0.008 ms at High):
+  +0.002 at Low (TAAU and FSR 3.1), +0.004 at High and Ultra, +0.005 at Overdrive, +0.002 at
+  High with FSR 3.1. **On p95 the High presets read +0.010–0.011 ms**: the 11 % of frames
+  with a shaped light run the LTC pipelines, which is the cost a budget measured on p50
+  does not show. Most of the p50 cost is the water lane (above).
+- **The extended-model check** (the close material sheet, High): the branch is +0.001 ms
+  over N2c on p50 in the same rounds (0.706 against 0.705; +0.007 on p95), so amendment 3's
+  0.005 ms of headroom becomes about 0.004 ms. The sheet holds a shaped light on 258 of
+  3,000 frames (the preview's own effects). This round's absolute numbers are about 9 %
+  above perf/0037's on every build (N1 Tiered Low 0.554 against 0.508) while the ratios
+  reproduce (N2c Low 1.063× both times), so only the delta is quoted.
+
+**Headroom against 1.10× N1 after N2d** (ms; `gpu_total`, and `gpu_span` advisory):
+
+| Configuration | 1.10× N1 total | branch | headroom | N2c's headroom, same rounds | after N2e and N2f's budgets |
+|---|---|---|---|---|---|
+| Tiered Low (TAAU) | 0.6094 | 0.591 | +0.0184 | +0.0204 | +0.0134 (N2e 0.005, N2f 0) |
+| Tiered High (TAAU) | 0.6633 | 0.638 | +0.0253 | +0.0293 | +0.0123 (N2e 0.008, N2f 0.005) |
+| Tiered Ultra (TAAU) | 0.6644 | 0.639 | +0.0254 | +0.0294 | +0.0124 |
+| Tiered Overdrive | 0.5995 | 0.556 | +0.0435 | +0.0485 | +0.0305 |
+| Tiered Low, FSR 3.1 | 0.7832 | 0.755 | +0.0282 | +0.0302 | +0.0232 |
+| Tiered High, FSR 3.1 | 0.8404 | 0.801 | +0.0394 | +0.0414 | +0.0264 |
+| Compat Ultra | 0.8041 | 0.733 | +0.0711 | +0.0721 | — |
+
+Span headroom: Low +0.0100, High +0.0190, Ultra +0.0181, Overdrive +0.0352, Low FSR 3.1
++0.0219, High FSR 3.1 +0.0310. N2e and N2f keep their amendment 3 budgets; the least
+headroom after them is Tiered High's 0.0123 ms of total.
+
+[[AREA]]
 
 ## How the cost was recovered
 
@@ -140,12 +202,19 @@ of GPU total against `fa661a7`, although only 11 % of its frames hold a shaped l
   stays (it is three times closer to the reference).
 - **A frame without a shaped light runs the mode-0 pipelines** (amendment 4 item 10): 74 and
   105 registers, N2c's.
-- **The water pass** was the other 0.006 ms: `water.frag` includes the lighting and carried
-  the LTC code on every frame. It now lights shapes at their representative point (item 11).
-- **The amendment 3 levers** were not needed for the teamfight: the scalarised light loop,
+- **The water pass** was the other 0.006 ms at 1280×720: `water.frag` includes the lighting
+  and carried the LTC code on every frame. It now lights shapes at their representative
+  point (item 11). At 1920×1080 that code still costs the water lane 0.002–0.003 ms on every
+  teamfight frame (0.020 → 0.023 ms at High and Ultra, 0.019 → 0.021 at Low, 0.016 → 0.019
+  at Overdrive), most of N2d's teamfight cost. Compiling the water at mode 0 (shapes as
+  points at their centres) is the lever left for it; it was not done here, since it would
+  invalidate every capture and hash above for 0.003 ms inside the budget.
+- **The amendment 3 levers were not tried:** the scalarised light loop (amendment 2 item 5);
   the terrain without decal code on frames without a live `Paint` decal (the teamfight has
-  about 3.3 per frame, so it would not run there) and `light_classify` folded into the
-  dispatch are left for N2e and N2f.
+  about 3.3 per frame, so it would rarely run there); `light_classify` (0.005 ms) folded into
+  the dispatch. The teamfight met the budget without them; on the area-light sheet the cost
+  is LTC's arithmetic on the pixels the shapes reach (below). They stay open for N2e and
+  N2f; what they would recover on the area-light sheet is not measured.
 
 ## Register counts on the RTX 5070 Ti
 
