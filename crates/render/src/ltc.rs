@@ -1,0 +1,332 @@
+//! LTC area lights (N2d, ADR-0023 §4): the fitted GGX table and the Rust twin of
+//! `include/ltc.glsl`, which the gate-3 tests hold against a Monte Carlo reference.
+//!
+//! The table is `assets/ltc-ggx.bin`, baked once by `moba-tools ltc-bake` (a port of the LTC
+//! reference code's `fitLTC.cpp`, THIRD_PARTY.md) and uploaded as one two-layer `RGBA16F`
+//! 64 × 64 array: layer 0 the inverse matrix's four terms, layer 1 the lobe's magnitude,
+//! average Fresnel and the horizon-clipped sphere table. Its sampling, and the evaluation of
+//! each shape, follow the reference's WebGL demos (`ltc_quad.fs`, `ltc_line.fs`,
+//! `ltc_disk.fs`; Heitz, Dupuy, Hill and Neubelt 2016; Heitz and Hill 2017), adapted:
+//!
+//! - **`Rect`**: the clipless polygon (four edge vectors, then the sphere table for the
+//!   horizon), one-sided;
+//! - **`Sphere`**: the disk facing the shaded point with the sphere's own cone of directions
+//!   (a disk across the cone is exactly the sphere's silhouette), then the ellipse's vector
+//!   form factor and the sphere table, as `ltc_disk.fs` does;
+//! - **`Capsule`**: the line integral of a thin cylinder (`ltc_line.fs`) plus two half-sphere
+//!   ends, each a point evaluation of the LTC distribution over half the sphere's disk; the
+//!   composition is ours (ADR-0023 §4a).
+//!
+//! Every evaluation returns the integral of the (transformed) clamped cosine over the shape,
+//! in 0..=1: with the identity it is the form factor (the diffuse), with the table's matrix
+//! the specular lobe before its magnitude and Fresnel (`ltc_2.xy`).
+
+// The reference's (and the maths') single-letter names, kept for side-by-side reading.
+#![allow(clippy::many_single_char_names)]
+
+use moba_core::math::Vec3;
+
+/// The table's side (`ltc-bake`'s `N`).
+pub(crate) const LTC_SIZE: usize = 64;
+
+/// The committed table: two layers of `LTC_SIZE`² `RGBA16F` texels.
+pub(crate) const LTC_TABLE: &[u8] = include_bytes!("../assets/ltc-ggx.bin");
+
+/// Bytes in one layer.
+pub(crate) const LTC_LAYER_BYTES: usize = LTC_SIZE * LTC_SIZE * 8;
+
+/// One texel of `layer` as `f32`.
+fn texel(layer: usize, x: usize, y: usize) -> [f32; 4] {
+    let at = layer * LTC_LAYER_BYTES + (y * LTC_SIZE + x) * 8;
+    core::array::from_fn(|channel| {
+        let bytes = [LTC_TABLE[at + 2 * channel], LTC_TABLE[at + 2 * channel + 1]];
+        moba_assets::f32_from_f16(u16::from_le_bytes(bytes))
+    })
+}
+
+/// `ltc_fetch` in `ltc.glsl`: a bilinear fetch of `layer` at `coord` in 0..=1 on both axes,
+/// texel `i` at `i / (size − 1)` (the upstream's `LUT_SCALE`/`LUT_BIAS`).
+pub(crate) fn fetch(layer: usize, coord: [f32; 2]) -> [f32; 4] {
+    let last = (LTC_SIZE - 1) as f32;
+    let x = coord[0].clamp(0.0, 1.0) * last;
+    let y = coord[1].clamp(0.0, 1.0) * last;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..=63.
+    let (x0, y0) = (
+        (x.floor() as usize).min(LTC_SIZE - 2),
+        (y.floor() as usize).min(LTC_SIZE - 2),
+    );
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let [a, b, c, d] = [
+        texel(layer, x0, y0),
+        texel(layer, x0 + 1, y0),
+        texel(layer, x0, y0 + 1),
+        texel(layer, x0 + 1, y0 + 1),
+    ];
+    core::array::from_fn(|i| {
+        let top = a[i] + (b[i] - a[i]) * fx;
+        let bottom = c[i] + (d[i] - c[i]) * fx;
+        top + (bottom - top) * fy
+    })
+}
+
+/// The inverse LTC matrix `[a 0 c; 0 1 0; b 0 d]` (rows), from `ltc_1`'s `(a, b, c, d)`:
+/// the shader's `mat3(vec3(a, 0, b), vec3(0, 1, 0), vec3(c, 0, d))` (columns).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Minv(pub(crate) [f32; 4]);
+
+impl Minv {
+    pub(crate) const IDENTITY: Self = Self([1.0, 0.0, 0.0, 1.0]);
+
+    pub(crate) fn apply(self, p: Vec3) -> Vec3 {
+        let [a, b, c, d] = self.0;
+        Vec3::new(a * p.x + c * p.z, p.y, b * p.x + d * p.z)
+    }
+
+    pub(crate) fn determinant(self) -> f32 {
+        let [a, b, c, d] = self.0;
+        a * d - b * c
+    }
+}
+
+/// The fitted lobe at `(n_dot_v, roughness)`: the inverse matrix, its magnitude and average
+/// Fresnel (`ltc_lobe` in `ltc.glsl`).
+pub(crate) fn lobe(n_dot_v: f32, roughness: f32) -> (Minv, [f32; 2]) {
+    let coord = [roughness, (1.0 - n_dot_v.clamp(0.0, 1.0)).sqrt()];
+    let t1 = fetch(0, coord);
+    let t2 = fetch(1, coord);
+    (Minv(t1), [t2[0], t2[1]])
+}
+
+/// The horizon-clipped sphere's integral for a vector form factor `form` (its length is the
+/// unclipped sphere's form factor, its direction the average): `len × table(z, len)`.
+fn sphere_clip(form: Vec3) -> f32 {
+    let len = form.length();
+    if len <= 0.0 {
+        return 0.0;
+    }
+    let z = form.z / len;
+    len * fetch(1, [z * 0.5 + 0.5, len])[3]
+}
+
+/// `IntegrateEdgeVec`: the edge's vector form factor, with the reference's rational fit of
+/// `θ / sin θ` (the `1 / 2π` included).
+fn edge(v1: Vec3, v2: Vec3) -> Vec3 {
+    let x = v1.dot(v2);
+    let y = x.abs();
+    let a = 0.854_398_5 + (0.496_515_5 + 0.014_520_6 * y) * y;
+    let b = 3.417_594 + (4.161_672_4 + y) * y;
+    let v = a / b;
+    let theta_sintheta = if x > 0.0 {
+        v
+    } else {
+        0.5 / (1.0 - x * x).max(1e-7).sqrt() - v
+    };
+    v1.cross(v2) * theta_sintheta
+}
+
+/// The shading frame: `p` (relative to the shaded point, world axes) in `(t1, t2, n)`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Frame {
+    pub(crate) t1: Vec3,
+    pub(crate) t2: Vec3,
+    pub(crate) n: Vec3,
+}
+
+impl Frame {
+    /// `t1` is V projected onto the tangent plane (any tangent when V is the normal).
+    pub(crate) fn new(n: Vec3, v: Vec3) -> Self {
+        let projected = v - n * v.dot(n);
+        let t1 = if projected.length_squared() > 1e-12 {
+            projected.normalize()
+        } else {
+            n.any_orthonormal_vector()
+        };
+        Self {
+            t1,
+            t2: n.cross(t1),
+            n,
+        }
+    }
+
+    pub(crate) fn local(&self, p: Vec3) -> Vec3 {
+        Vec3::new(self.t1.dot(p), self.t2.dot(p), self.n.dot(p))
+    }
+}
+
+/// A rect seen from the shaded point: the integral over it (one-sided: zero from behind).
+/// `centre` is relative to the shaded point (world axes); `ex`, `ey` the half-extent vectors
+/// with `ex × ey` the emitting normal.
+pub(crate) fn rect(frame: &Frame, minv: Minv, centre: Vec3, ex: Vec3, ey: Vec3) -> f32 {
+    if centre.dot(ex.cross(ey)) >= 0.0 {
+        return 0.0; // The shaded point is behind (or in) the emitting plane.
+    }
+    polygon(
+        frame,
+        minv,
+        [
+            centre - ex - ey,
+            centre - ex + ey,
+            centre + ex + ey,
+            centre + ex - ey,
+        ],
+    )
+}
+
+/// The clipless quad (`ltc_quad.fs`): the edges' vector form factor, then the sphere table
+/// for the horizon. Either winding: the form factor's sign is taken toward the quad.
+fn polygon(frame: &Frame, minv: Minv, corners: [Vec3; 4]) -> f32 {
+    let l = corners.map(|corner| minv.apply(frame.local(corner)).normalize());
+    let form = edge(l[0], l[1]) + edge(l[1], l[2]) + edge(l[2], l[3]) + edge(l[3], l[0]);
+    let toward = l[0] + l[1] + l[2] + l[3];
+    sphere_clip(if form.dot(toward) < 0.0 { -form } else { form })
+}
+
+/// `SolveCubic` (`ltc_disk.fs`, after Peters, "How to solve a cubic equation, revisited"):
+/// the three real roots of `c.w x³ + c.z x² + c.y x + c.x`, sorted so that `x` is the
+/// largest... as the reference orders them (`x`, `y`, `z` with `y` the middle root).
+#[allow(clippy::many_single_char_names)] // The reference's names.
+fn solve_cubic(coefficient: [f32; 4]) -> [f32; 3] {
+    let pi = core::f32::consts::PI;
+    let w = coefficient[3];
+    let (cx, cy, cz) = (
+        coefficient[0] / w,
+        coefficient[1] / w / 3.0,
+        coefficient[2] / w / 3.0,
+    );
+    let (a, b, c, d) = (1.0f32, cz, cy, cx);
+    let delta = [-cz * cz + cy, -cy * cz + cx, cz * cx - cy * cy];
+    let discriminant = 4.0 * delta[0] * delta[2] - delta[1] * delta[1];
+    // Algorithm A.
+    let xlc = {
+        let c_a = delta[0];
+        let d_a = -2.0 * b * delta[0] + delta[1];
+        let theta = discriminant.sqrt().atan2(-d_a) / 3.0;
+        let x_1a = 2.0 * (-c_a).sqrt() * theta.cos();
+        let x_3a = 2.0 * (-c_a).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
+        let xl = if x_1a + x_3a > 2.0 * b { x_1a } else { x_3a };
+        [xl - b, a]
+    };
+    // Algorithm D.
+    let xsc = {
+        let c_d = delta[2];
+        let d_d = -d * delta[1] + 2.0 * c * delta[2];
+        let theta = (d * discriminant.sqrt()).atan2(-d_d) / 3.0;
+        let x_1d = 2.0 * (-c_d).sqrt() * theta.cos();
+        let x_3d = 2.0 * (-c_d).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
+        let xs = if x_1d + x_3d < 2.0 * c { x_1d } else { x_3d };
+        [-d, xs + c]
+    };
+    let e = xlc[1] * xsc[1];
+    let f = -xlc[0] * xsc[1] - xlc[1] * xsc[0];
+    let g = xlc[0] * xsc[0];
+    let xmc = [c * f - b * g, -b * f + c * e];
+    let mut root = [xsc[0] / xsc[1], xmc[0] / xmc[1], xlc[0] / xlc[1]];
+    if root[0] < root[1] && root[0] < root[2] {
+        root = [root[1], root[0], root[2]];
+    } else if root[2] < root[0] && root[2] < root[1] {
+        root = [root[0], root[2], root[1]];
+    }
+    root
+}
+
+/// A sphere of radius `radius` at `centre` (relative to the shaded point): the disk across
+/// its cone of directions, then the ellipse's form factor (`ltc_disk.fs`'s `LTC_Evaluate`).
+pub(crate) fn sphere(frame: &Frame, minv: Minv, centre: Vec3, radius: f32) -> f32 {
+    let distance2 = centre.length_squared();
+    let radius2 = radius * radius;
+    if distance2 <= radius2 * 1.0001 {
+        // Inside the light: the whole (transformed) upper hemisphere.
+        return 1.0;
+    }
+    if minv == Minv::IDENTITY {
+        // The diffuse: the sphere's own vector form factor, `R² / d²` toward its centre (the
+        // disk below would be a circle, where the cubic's roots coincide).
+        return sphere_clip(frame.local(centre) * (radius2 / (distance2 * distance2.sqrt())));
+    }
+    // The disk at the centre's distance spanning the sphere's cone: tan(asin(R / d)) × d.
+    let disk = radius * (distance2 / (distance2 - radius2)).sqrt();
+    let axis = centre / distance2.sqrt();
+    let (e1, e2) = axis.any_orthonormal_pair();
+    // `e1 × e2 = axis`: the disk faces the shaded point.
+    let c = minv.apply(frame.local(centre));
+    let mut v1 = minv.apply(frame.local(e1 * disk));
+    let mut v2 = minv.apply(frame.local(e2 * disk));
+    if v1.cross(v2).dot(c) < 0.0 {
+        // The transform mirrored the disk (it never does: the table's matrices keep their
+        // orientation); swap so that the ellipse still faces the origin.
+        core::mem::swap(&mut v1, &mut v2);
+    }
+    let d11 = v1.dot(v1);
+    let d22 = v2.dot(v2);
+    let d12 = v1.dot(v2);
+    let (a, b);
+    if d12.abs() / (d11 * d22).sqrt() > 0.0001 {
+        let tr = d11 + d22;
+        let det = (-d12 * d12 + d11 * d22).sqrt();
+        let u = 0.5 * (tr - 2.0 * det).max(0.0).sqrt();
+        let v = 0.5 * (tr + 2.0 * det).sqrt();
+        let e_max = (u + v) * (u + v);
+        let e_min = (u - v) * (u - v);
+        let (v1_, v2_) = if d11 > d22 {
+            (d12 * v1 + (e_max - d11) * v2, d12 * v1 + (e_min - d11) * v2)
+        } else {
+            (d12 * v2 + (e_max - d22) * v1, d12 * v2 + (e_min - d22) * v1)
+        };
+        a = 1.0 / e_max;
+        b = 1.0 / e_min;
+        v1 = v1_.normalize();
+        v2 = v2_.normalize();
+    } else {
+        a = 1.0 / d11;
+        b = 1.0 / d22;
+        v1 *= a.sqrt();
+        v2 *= b.sqrt();
+    }
+    let mut v3 = v1.cross(v2);
+    if c.dot(v3) < 0.0 {
+        v3 = -v3;
+    }
+    let l = v3.dot(c);
+    let x0 = v1.dot(c) / l;
+    let y0 = v2.dot(c) / l;
+    let (a, b) = (a * l * l, b * l * l);
+    let c0 = a * b;
+    let c1 = a * b * (1.0 + x0 * x0 + y0 * y0) - a - b;
+    let c2 = 1.0 - a * (1.0 + x0 * x0) - b * (1.0 + y0 * y0);
+    let [e1r, e2r, e3r] = solve_cubic([c0, c1, c2, 1.0]);
+    let average = Vec3::new(a * x0 / (a - e2r), b * y0 / (b - e2r), 1.0);
+    let average = (v1 * average.x + v2 * average.y + v3 * average.z).normalize();
+    let l1 = (-e2r / e3r).sqrt();
+    let l2 = (-e2r / e1r).sqrt();
+    let form_factor = l1 * l2 / ((1.0 + l1 * l1) * (1.0 + l2 * l2)).sqrt();
+    if !form_factor.is_finite() {
+        return 0.0;
+    }
+    sphere_clip(average * form_factor)
+}
+
+/// A capsule as the quad facing the shaded point that covers the same solid angle: at each
+/// end, `radius` either side across the view and `π radius / 4` beyond it along the axis,
+/// so that a distant view sees `2 radius × projected length + π radius²`, the capsule's own
+/// projected area at every angle (ours, ADR-0023 §4a).
+pub(crate) fn capsule(frame: &Frame, minv: Minv, p1: Vec3, p2: Vec3, radius: f32) -> f32 {
+    let axis = (p2 - p1).normalize_or_zero();
+    let reach = 0.25 * core::f32::consts::PI * radius;
+    let end = |p: Vec3, sign: f32| {
+        let view = p.normalize_or_zero();
+        let across = view.cross(axis);
+        let across = if across.length_squared() > 1e-8 {
+            across.normalize()
+        } else {
+            view.any_orthonormal_vector()
+        };
+        let along = across.cross(view) * sign;
+        (p + along * reach, across * radius)
+    };
+    let (c1, s1) = end(p1, -1.0);
+    let (c2, s2) = end(p2, 1.0);
+    polygon(frame, minv, [c1 - s1, c1 + s1, c2 + s2, c2 - s2])
+}
+
+#[cfg(test)]
+mod tests;

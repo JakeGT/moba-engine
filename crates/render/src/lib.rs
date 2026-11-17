@@ -35,6 +35,7 @@ mod graph;
 mod instance;
 mod lighting;
 mod lights;
+mod ltc;
 mod material;
 mod memory;
 mod mesh;
