@@ -164,7 +164,7 @@ the semver check):
     `gbuffer_rest`; new frame-log lanes `gpu_gbuffer_decals` and `gpu_gbuffer_rest`.
   - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
     (worst pixel 3, 3, 3 and 6/255 locally); Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the
-    emissive mask, which no shipped material has). On the RTX 5070 Ti the frame is
+    emissive mask, which only the N2c samples carry). On the RTX 5070 Ti the frame is
     1.040–1.077× N1's forward frame (gate ≤ 1.10×; GPU span up to 1.091×) and 1.012–1.026×
     N2b's, after `FOLIAGE` moved to the standard tiles (1.108× at Low before).
 - **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;

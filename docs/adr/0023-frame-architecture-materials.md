@@ -1537,25 +1537,42 @@ amendment that names C1's consequence.
       - **FX hooks:** ADR-0013.
       - **N6's wetness** (§6a): N6.
 
+21. **`content-check` does not check the bible's per-class ranges** (§6e: coat roughness
+    0.05–0.25, the glass F0 range, the rough metals' roughness, the thin film's straw-to-purple
+    limit on thickness) and does not bake `THIN_FILM`'s tint into the albedo (§10's G2 bake;
+    item 3 computes it at load instead). Its rules are the frozen spec's checks above. The
+    ranges wait for the bible's accepted numbers (PR #347); C1 or the asset track adds them.
+22. **The forward Tiered frame draws every model but `STANDARD` with its Compat fallback**
+    (`MOBA_DEFERRED=off`, and a device that lights forward under amendment 2 item 17): the
+    forward textured stages read the parameter block, which is the fallback. §5b's one shared
+    shade, and so gate 2's parity, hold for `STANDARD` only. The material sheet is not a parity
+    scene, since its other seven spheres differ by design; it is a golden (`materials`).
+23. **Gate 7's wall-heavy overview** (§9b: `gbuffer_receivers` against N1's prepass) is
+    measured on a low orbit across the map, not the teamfight: the receivers' pass (the
+    `prepass` lane, terrain alone) is 0.105 ms against N1's 0.122 ms, and the frame is 1.016×
+    N1's. Walls stay in `gbuffer_rest`.
+
 **Gates** ([perf/0037](../perf/0037-n2c-materials.md)):
 
 - **1. Encoding and interfaces:** the record and push block against the Slang reflection, and
-  the interface test (item 6). Met.
-- **2. Parity:** `deferred-parity.sh` at 1280×720 on lavapipe gives the worst pixels 3
-  (default), 3 (sky off), 3 (river) and 6/255 (teamfight), each within 2/255 on at least
-  99.999 % of pixels. Met. Without item 16's grid test the teamfight read 28/255.
+  the interface test (item 6). The Rust twin (`every_model_round_trips`,
+  `stored_texels_are_fixed_points`) and `gbuffer-smoke` cover all eight models. Met.
+- **2. Parity** (`STANDARD` only, item 22): `deferred-parity.sh` at 1280×720 on lavapipe
+  gives the worst pixels 3 (default), 3 (sky off), 3 (river) and 6/255 (teamfight), each
+  within 2/255 on at least 99.999 % of pixels. Met. Without item 16's grid test the teamfight read 28/255.
 - **3. White furnace:** worst 0.9861 over roughness 0–1 and N·V 0.05–1, a CPU model of the
   shader's fetch (item 10). Met; a rendered furnace is not measured.
-- **4. Hidden information (decals):** units away from a glow decal keep their G-buffer albedo
-  bytes with decals on and off. `MOBA_DECALS=off` also removes the overlay's glow decals, so
-  the `Paint` pass is not isolated. Partial; N2e runs the full gate with rims.
+- **4. Hidden information (decals):** with bloom off, all 38,813 unit pixels of the teamfight
+  keep their G-buffer albedo bytes with decals on and off. `MOBA_DECALS=off` also removes the
+  overlay's glow decals, so the `Paint` pass is not isolated. Partial; N2e runs the full gate
+  with rims.
 - **5. Goldens:**
   - Every Compat golden scene, and both sentinel heroes, are byte-identical to `ceca947`.
   - The `materials` and `decals` tiered goldens are two-run identical with TAAU and FSR 3.1.
   - Validation and sync validation are clean on lavapipe and on the RTX 5070 Ti.
 - **7. Performance** on the RTX 5070 Ti against `ab42718`: GPU total 1.040–1.077×, GPU span
   1.057–1.091× (Low, High, Ultra, Overdrive, Low and High with FSR 3.1); Compat Ultra 0.999×.
-  Met.
+  The wall-heavy overview: receivers 0.105 ms against N1's 0.122 ms prepass (item 23). Met.
 - **8. Compat contract:** `content-check` passes every shipped material under both evaluators,
   and `every_sample_material_loads_on_compat` builds each model's sample on Compat. Met.
 

@@ -22,12 +22,12 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 
 | Gate | Result |
 |---|---|
-| 1. Encoding and interfaces | **Met.** `MaterialRecord` and `MaterialPush` against the Slang reflection; the GLSL-vertex / Slang-fragment interface test; the record's model word |
-| 2. Deferred–forward parity | **Met** locally at 1280×720: worst pixel 3, 3, 3 and 6/255 (default, default without the sky, river, teamfight); CI below |
+| 1. Encoding and interfaces | **Met.** `MaterialRecord` and `MaterialPush` against the Slang reflection; the GLSL-vertex / Slang-fragment interface test; the record's model word; the Rust twin and `gbuffer-smoke` cover all eight models |
+| 2. Deferred–forward parity | **Met** locally at 1280×720: worst pixel 3, 3, 3 and 6/255 (default, default without the sky, river, teamfight), `STANDARD` only (amendment 3 item 22); CI below |
 | 3. White furnace | **Met** (CPU model of the shader's fetch): worst 0.9861 over roughness 0–1 and N·V 0.05–1 |
-| 4. Hidden information (decals) | **Partly:** unit pixels away from a glow decal keep their G-buffer albedo with decals on and off; see below |
+| 4. Hidden information (decals) | **Partly:** with bloom off, every unit pixel keeps its G-buffer albedo with decals on and off; the `Paint` pass is not isolated from the glow decals; see below |
 | 5. Goldens | **Met.** Compat byte-identical (11 scenes); `materials` and `decals` tiered goldens two-run identical; exact hashes from CI |
-| 7. Performance (≤ 1.10× N1) | **Met** on every preset: GPU total 1.040–1.077× `ab42718` (GPU span 1.057–1.091×), 1.012–1.026× `ceca947`; Compat 0.999× |
+| 7. Performance (≤ 1.10× N1) | **Met** on every preset: GPU total 1.040–1.077× `ab42718` (GPU span 1.057–1.091×), 1.012–1.026× `ceca947`; Compat 0.999×; the wall-heavy overview's receivers 0.105 ms against N1's 0.122 ms prepass |
 | 8. Compat contract | **Met.** `content-check` passes every shipped material under both evaluators; a test builds each model's sample on Compat |
 
 ## Gate 1: encoding and interfaces
@@ -56,14 +56,13 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | R3b river | 100.000 % | 3 | 2 |
 | R3b teamfight | 99.999 % | 6 | 7 (five at 3, one at 4, one at 6) |
 
-Two fixes made the teamfight pass. Before them, the worst pixel was 28/255:
-
-- splat droplets outside the forward decal grid's cell drew only in the deferred frame. The
-  decal pass now reads the grid (amendment 3 item 16);
-- the white furnace's LUT (amendment 3 item 10).
+One fix made the teamfight pass. Before it, the worst pixel was 28/255: splat droplets outside
+the forward decal grid's cell drew only in the deferred frame. The decal pass now reads the
+grid (amendment 3 item 16).
 
 The 6/255 pixel is on a unit's edge inside a glow decal's ring (N2b's teamfight worst was
-5/255). CI: PARITYCI.
+5/255). CI's `tiered-temporal` check runs the same script on the PR's head; its numbers are
+in the PR.
 
 ## Gate 3: the white furnace
 
@@ -81,9 +80,10 @@ lighting), Native mode at 1280×720 on lavapipe, with decals on and off, and
 `MOBA_DEBUG_VIEW=flags` for the `UNIT` mask. Pixels of the pure unit colour in the flags view
 number 38,813: eight units and a structure.
 
-- Three units and the structure keep every albedo byte.
-- The five units inside or at the edge of a glow decal's ring differ on 830 pixels by at most
-  1/255. 775 of those pixels are on the two units inside the rings.
+- With `MOBA_BLOOM=off`, **all 38,813 keep every albedo byte**.
+- With bloom on, three units and the structure keep every byte; the five units inside or at
+  the edge of a glow decal's ring differ on 830 pixels by at most 1/255 (775 of them on the two
+  units inside the rings). That is the glow's bloom on top of the debug view, not `gb0`.
 
 `MOBA_DECALS=off` also removes the `Glow` decals, which the overlay draws over the debug view,
 so this does not isolate the `Paint` pass. By construction the units overwrite `gb0` after the
@@ -100,7 +100,8 @@ decals (§7a). The full gate, with rims, is N2e's.
   8 spheres, each "drawn with its material".
 - **SPIR-V:** 105 of the 115 modules on both sides are byte-identical.
   - Compat's one change is `unit_textured.frag`, which reads the emissive mask (amendment 3
-    item 2); no shipped material has a mask.
+    item 2). The N2c samples carry a mask (their MR maps are `rgba8`, item 18); no material
+    in the Compat golden scenes does, so their images do not move.
   - The other nine are Tiered: `deferred_light`, `deferred_light_extended`, `light_classify`,
     the tiered terrain, foliage, water and water-refraction stages, and the two terrain
     G-buffer `_hdr` stages, which have no decal code now.
@@ -114,7 +115,10 @@ decals (§7a). The full gate, with rims, is N2e's.
   - The eight existing fingerprints still pass (mean ≤ 0.146, max ≤ 5), so they are not
     rewritten.
   - The four new ones were written locally at 640×360.
-  - The exact hashes come from CI only: HASHES.
+  - The exact hashes come from CI only: `render-golden.yml` dispatched on `7106fb2` with
+    `cpu_sample=true` (run 43992116303), eight sampling legs, its `tiered-hash-sections`
+    artefact pasted with both the `cpu=amd` and `cpu=intel` sections of all twelve names,
+    sorted with `LC_ALL=C`. Every later commit touches only docs and the hash file.
 
 ## Gate 7: performance
 
@@ -161,6 +165,21 @@ decals (§7a). The full gate, with rims, is N2e's.
     against N2b's 0.063 ms `prepass`;
   - the decal pass itself is 0.006 ms on the teamfight's decals;
   - the rest is the extra pass boundary and `gb0`'s load.
+- **The wall-heavy overview** (§9b gate 7's decal-overdraw check): a low orbit across the
+  whole map, walls in front of the terrain (`MOBA_PREVIEW_CAMERA=-0.7,0.12,170`, local preview,
+  no decal in view), Tiered High with TAAU, the same settings, builds and three interleaved
+  rounds:
+
+  | Build | GPU total p50 | GPU span p50 | `prepass` | `gbuffer_decals` | `gbuffer_rest` | `deferred_light` | ÷ N1 total (span) |
+  |---|---|---|---|---|---|---|---|
+  | `ab42718` | 0.698 | 0.705 | 0.122 | — | — | — | |
+  | `ceca947` | 0.696 | 0.711 | 0.240 | — | — | 0.036 | 0.997 (1.009) |
+  | branch | 0.709 | 0.723 | 0.105 | 0.001 | 0.144 | 0.037 | 1.016 (1.026) |
+
+  The receivers' pass (`prepass`, the terrain alone) is 0.105 ms against N1's 0.122 ms
+  `prepass`. The split G-buffer totals 0.250 ms against N2b's single 0.240 ms pass: the
+  terrain under the walls is shaded and then overdrawn, as §7's ordering accepts, for 0.010 ms
+  here. Walls do not need the receivers' depth-only pre-draw (the ADR's decal-ordering risk).
 - **Before `FOLIAGE` moved to the standard tiles** (amendment 3 item 11), round 1 of the same
   replay measured Tiered Low at 1.108× total and 1.123× span: over the gate. That is why it
   moved.
@@ -197,4 +216,4 @@ teamfight with `MOBA_DECALS=off`. All 23 ran on the RTX with **0 validation mess
 
 The teamfight's two pixels are at (1716–1717, 964), on a unit's edge. N2b's own RTX run
 (`ceca947`'s review) had the same two pixels at 13 and 15/255, so N2c did not introduce them.
-They are NVIDIA's arithmetic, not a path difference: lavapipe and CI read 6/255 at most.
+They pre-exist at N2b (the same two pixels); the cause is not known. Lavapipe reads 6/255 at most.
