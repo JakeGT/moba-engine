@@ -1468,8 +1468,12 @@ amendment that names C1's consequence.
     item 10). The foliage's back light needs no model code beyond `STANDARD`'s, and the map's
     foliage covers much of the frame: in the extended class it pushed gate 7 to 1.108× at Low.
     The extended class is now only `CLEARCOAT`, `SHEEN`, `ANISOTROPIC` and `THIN_FILM`.
-12. **The roughness floor** (`MOBA_MIN_ROUGHNESS`, 0.045) applies to every lobe, the coat's
-    included.
+12. **The roughness floors stay.** The lighting's floor (`MOBA_MIN_ROUGHNESS`, 0.045) applies
+    to every lobe, the coat's included. The G-buffer's floor on a unit's stored base roughness
+    (0.08, amendment 2 item 9) is kept: amendment 2 left it for N2c to revisit, and moving it
+    would move the encoding that `gbuffer-smoke` and C1's spec rely on. Below 0.08 a unit's
+    base lobe is therefore rougher on the deferred frame than on the forward one. The coat,
+    sheen and film keep their own roughness in the model data.
 13. **The dust colour is a constant** (ash, `(0.30, 0.28, 0.25)`) until a map has a dust colour.
 14. **`UNLIT` is unfogged** on both Tiered frames: the deferred pass leaves its `hdr` (amendment 2
     item 6) and the forward Tiered frame writes the emissive alone, before height fog.
@@ -1533,7 +1537,27 @@ amendment that names C1's consequence.
       - **FX hooks:** ADR-0013.
       - **N6's wetness** (§6a): N6.
 
-**Gates.** (filled from the measurements)
+**Gates** ([perf/0037](../perf/0037-n2c-materials.md)):
+
+- **1. Encoding and interfaces:** the record and push block against the Slang reflection, and
+  the interface test (item 6). Met.
+- **2. Parity:** `deferred-parity.sh` at 1280×720 on lavapipe gives the worst pixels 3
+  (default), 3 (sky off), 3 (river) and 6/255 (teamfight), each within 2/255 on at least
+  99.999 % of pixels. Met. Without item 16's grid test the teamfight read 28/255.
+- **3. White furnace:** worst 0.9861 over roughness 0–1 and N·V 0.05–1, a CPU model of the
+  shader's fetch (item 10). Met; a rendered furnace is not measured.
+- **4. Hidden information (decals):** units away from a glow decal keep their G-buffer albedo
+  bytes with decals on and off. `MOBA_DECALS=off` also removes the overlay's glow decals, so
+  the `Paint` pass is not isolated. Partial; N2e runs the full gate with rims.
+- **5. Goldens:**
+  - Every Compat golden scene, and both sentinel heroes, are byte-identical to `ceca947`.
+  - The `materials` and `decals` tiered goldens are two-run identical with TAAU and FSR 3.1.
+  - Validation and sync validation are clean on lavapipe and on the RTX 5070 Ti.
+- **7. Performance** on the RTX 5070 Ti against `ab42718`: GPU total 1.040–1.077×, GPU span
+  1.057–1.091× (Low, High, Ultra, Overdrive, Low and High with FSR 3.1); Compat Ultra 0.999×.
+  Met.
+- **8. Compat contract:** `content-check` passes every shipped material under both evaluators,
+  and `every_sample_material_loads_on_compat` builds each model's sample on Compat. Met.
 
 ## Corrections to the roadmap
 
