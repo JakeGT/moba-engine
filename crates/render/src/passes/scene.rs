@@ -563,7 +563,8 @@ pub(crate) struct EnvironmentLayouts {
     pub(crate) water: vk::PipelineLayout,
     pub(crate) full_water: bool,
     /// Decals are on (`EnvironmentConfig::decals`); off, the terrain uses
-    /// `terrain_nodecals.frag`, its decal code compiled out.
+    /// `terrain_nodecals.frag` (and on the deferred frame `terrain_gbuffer_nodecals*_hdr`),
+    /// its decal code compiled out.
     pub(crate) decals: bool,
     /// The textured units' G-buffer layout (N2c, Tiered: camera, instances, the bindless
     /// set, and [`MaterialPush`]); `None` on Compat.
@@ -959,7 +960,9 @@ impl ScenePipelines {
                 skinned.is_some(),
                 vat.is_some(),
                 deferred.then_some(color_format),
-                paint_pass,
+                // The G-buffer terrain without decal code: the decal pass draws them, or
+                // decals are off (as the forward terrain's `terrain_nodecals*.frag`).
+                paint_pass || !environment.decals,
                 (!world_sky).then(|| clear_color.map(f32::from_bits)),
                 environment.material_gbuffer,
             )?)
@@ -1188,7 +1191,7 @@ impl ScenePipelines {
         skinned: bool,
         vat: bool,
         hdr: Option<vk::Format>,
-        paint_pass: bool,
+        terrain_nodecals: bool,
         sky_clear: Option<[f32; 4]>,
         material_layout: Option<vk::PipelineLayout>,
     ) -> RenderResult<PrepassPipelines> {
@@ -1276,8 +1279,10 @@ impl ScenePipelines {
         let suffixed = |base: &'static str| -> &'static str {
             match (base, hdr.is_some()) {
                 (_, false) => base,
-                ("terrain_gbuffer.frag", true) if paint_pass => "terrain_gbuffer_nodecals_hdr.frag",
-                ("terrain_gbuffer_ids.frag", true) if paint_pass => {
+                ("terrain_gbuffer.frag", true) if terrain_nodecals => {
+                    "terrain_gbuffer_nodecals_hdr.frag"
+                }
+                ("terrain_gbuffer_ids.frag", true) if terrain_nodecals => {
                     "terrain_gbuffer_nodecals_ids_hdr.frag"
                 }
                 ("terrain_gbuffer.frag", true) => "terrain_gbuffer_hdr.frag",

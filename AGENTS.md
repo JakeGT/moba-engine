@@ -177,7 +177,7 @@ cargo run --release -p moba-tools --bin grade-bake -- bake --preset ember out.cu
 cargo run --release --locked --manifest-path crates/tools/font-bake/Cargo.toml   # MSDF HUD font (R7a)
 cargo run --release -p moba-tools --bin teamfight     # regenerate tests/replays/teamfight-5v5.mbr
 MOBA_VFX_PREVIEW=nova cargo run -p moba-client        # live-reload effect preview (content/vfx/)
-scripts/terrain-decal-check.sh                          # terrain decal-cost guard: timing + registers (after decals.glsl/terrain.frag changes; real GPU)
+scripts/terrain-decal-check.sh                          # terrain decal-cost guard, Compat + Tiered: timing + registers (after decals.glsl/terrain*.frag changes; real GPU)
 cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/render-fingerprint.rgb
 cargo run -p moba-tools --bin vulkan-probe
 MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin bindless-smoke   # tiered path; MOBA_RENDER_PATH=tiered on lavapipe

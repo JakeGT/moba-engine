@@ -18,8 +18,12 @@ Captured 2026-11-17 for ADR-0023 (N2c) and its
   start-up log lines, stops compiling the `paint` frame-graph variants when the decal pass is
   off, and adds a CI step; gate 2 on all four scenes, the tiered goldens and Compat were
   re-run on it on lavapipe, and all 48 of its captures are byte-identical to `84e0904`'s
-  (`review3/` in the evidence directory). Other later commits change only docs and the
-  hash file.
+  (`review3/` in the evidence directory). The fourth review's commit builds the G-buffer
+  terrain without decal code under `MOBA_DECALS=off`, logs the decal plan of a captured frame
+  when the decal pass exists, and fixes `terrain-decal-check.sh`; the same lavapipe re-run, and
+  `MOBA_DECALS=off` and on captures of the default scene and the teamfight against the
+  previous build, are byte-identical (`review4/`). Other later commits change only docs and
+  the hash file.
 - **Baselines:** detached release builds in their own temporary worktrees
   (`build-baselines.sh`), deleted after the measurements: `ab42718` (the N1 tiered forward
   frame, ADR-0023 §9b's baseline) and `ceca947` (N2b).
@@ -375,7 +379,20 @@ statistics; NVIDIA reports `Register_Count`. The logs are in the evidence direct
 | `terrain_gbuffer` fragment without decal code (`MOBA_PAINT_DECAL_PASS=1`) | 64 | `pstats-pass.log` |
 
 `scripts/terrain-decal-check.sh` now fails if the inline stage needs more than 48
-(`GBUFFER_REGISTERS`).
+(`GBUFFER_REGISTERS`). `MOBA_DECALS=off` selects the stage without decal code on the deferred
+frame (64 registers, 24,448 bytes against the inline stage's 42,368), and the script times the
+two: since N2b its old comparison read the Tiered `scene` lane, which is empty (0.000 against
+0.000 ms always passed), so it now pins that half to Compat and adds the `prepass` lane on
+Tiered. On the RTX 5070 Ti (the networked Ultra overview, no `Paint` decal in view, two
+rounds, the faster kept; `review4/terrain-decal-check/`):
+
+| Path, lane | Decals inline (rounds) | Without decal code (rounds) | Ratio (gate ≤ 1.15) |
+|---|---|---|---|
+| Compat, `scene` | 0.235 ms (0.235, 0.236) | 0.231 ms (0.231, 0.234) | 1.017 |
+| Tiered, `prepass` | 0.114 ms (0.121, 0.114) | 0.106 ms (0.106, 0.112) | 1.075 |
+
+The Tiered difference is the inline decal code's fixed cost on the G-buffer terrain, the lever
+amendment 3 item 31 leaves to N2d.
 
 ## Validation on the RTX 5070 Ti
 

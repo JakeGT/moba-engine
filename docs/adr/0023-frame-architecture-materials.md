@@ -588,9 +588,12 @@ gbuffer_rest        walls, props, structures, units  → gb0–gb2, depth, motio
 - **Water** is forward on Tiered, so it keeps evaluating `Paint` decals inline through the
   shared module.
 - **The terrain register problem goes away on Tiered** while the decal pass is on: the tiered
-  terrain G-buffer shader then has no decal code. `scripts/terrain-decal-check.sh` keeps
-  guarding Compat's `terrain.frag`, and since amendment 3 item 31 (the decals inline by
-  default) also the tiered terrain G-buffer stage (`GBUFFER_REGISTERS`, 48 on the RTX 5070 Ti).
+  terrain G-buffer shader then has no decal code. Since amendment 3 item 31 the decals are
+  inline by default, so `scripts/terrain-decal-check.sh` guards both stages that inline them,
+  each against its permutation without decal code (`MOBA_DECALS=off`) on the networked Ultra
+  overview: Compat's `terrain.frag` by the `scene` lane (pinned to `MOBA_RENDER_PATH=compat`)
+  and the tiered `terrain_gbuffer*_hdr` stage by the `prepass` lane, each within 1.15×, a
+  missing or zero p50 failing; and their fragment registers (64 and 48 on the RTX 5070 Ti).
 - *Amendment 3 item 31:* while the terrain is the only `Paint` receiver, the tiered terrain
   G-buffer stage keeps the decals inline (as N2b's did) and this pass is built only on request
   (`RenderConfig::paint_decal_pass`), for the first receiver other than the terrain.
@@ -1647,12 +1650,17 @@ amendment that names C1's consequence.
     `tiered-temporal` job runs gate 2 on the teamfight (the scene with `Paint` decals) with
     `MOBA_PAINT_DECAL_PASS=1` and validation and sync validation, whenever its renderer
     filter runs it (pull requests that touch the renderer, and dispatches), and fails unless
-    the start-up log says the pass was built (`[render] paint decals: gbuffer pass`). Parity
+    the start-up log says the pass was built (`[render] paint decals: gbuffer pass`) and the
+    captured frame had a live `Paint` decal and drew through it (`[render] capture frame:
+    paint_decals=N plan=gbuffer_decals`, logged on a capture frame with the pass). Parity
     on all four scenes, validation on the RTX 5070 Ti and gate 4 with the pass on were run by
     hand for this PR (perf/0037), not by CI. Without the pass no `paint` frame-graph variant
-    is compiled. A further 0.005 ms is available on views with no live `Paint` decal: the
-    permutation without decal code is that much cheaper there (the close sheet camera's
-    `prepass`, 0.119 against 0.124 ms), but choosing it per frame changes no pixel only if
+    is compiled. `MOBA_DECALS=off` builds the G-buffer terrain from the permutation without
+    decal code too, as it does the forward terrain (byte-identical captures on lavapipe;
+    `terrain-decal-check.sh` times one against the other). A further 0.005 ms is available on
+    views with no live `Paint` decal: the permutation without decal code is that much cheaper
+    there (the close sheet camera's `prepass`, 0.119 against 0.124 ms; the overview's, 0.106
+    against 0.114 ms), but choosing it per frame changes no pixel only if
     the driver compiles the rest identically, so it is left as an N2d lever (gate 7 below).
 32. **Register counts are evidence.** With `MOBA_PIPELINE_STATS=1` every pipeline, compute
     included, keeps the driver's statistics, and the log prints the G-buffer terrain's and
@@ -1671,8 +1679,10 @@ amendment that names C1's consequence.
     renderer's creation; the `Paint` decal count is taken once per frame, while the upload is
     built. After the third review: without the decal pass the `paint` frame-graph variants
     are not compiled; the renderer logs `[render] validation: <mode>` at creation, so each
-    capture log shows whether validation ran; and `terrain-decal-check.sh` bounds the inline
-    terrain G-buffer stage's registers (§7a).
+    capture log shows whether validation ran. After the fourth: `terrain-decal-check.sh`
+    times and bounds the registers of both stages that inline the decals (§7a), and its
+    timing fails rather than passes when a lane did not run (since N2b the Tiered `scene`
+    lane is empty, so its old comparison of 0 against 0 always passed).
 
 **Gates** ([perf/0037](../perf/0037-n2c-materials.md)):
 

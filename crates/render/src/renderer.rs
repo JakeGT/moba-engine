@@ -3216,6 +3216,15 @@ impl Renderer {
         let haze = self.vfx.as_ref().and_then(VfxPass::distortion_region);
         // N2c: the decal split only when this frame's upload has a `Paint` decal.
         let paint = self.gbuffer_decals.is_some() && self.paint_decals > 0;
+        if capturing && self.gbuffer_decals.is_some() {
+            // With the decal pass (amendment 3 item 31) the captured frame says whether it drew
+            // through it: deferred-parity.sh's decal-pass step requires a live `Paint` decal.
+            eprintln!(
+                "[render] capture frame: paint_decals={} plan={}",
+                self.paint_decals,
+                if paint { "gbuffer_decals" } else { "single" }
+            );
+        }
         let plan = &self.plans[Self::plan_index(capturing, offscreen_mask, haze.is_some(), paint)];
         let resources = plan.resources;
         let hdr_view = self.transient(resources.hdr).view();

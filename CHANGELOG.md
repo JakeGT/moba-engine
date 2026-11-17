@@ -180,8 +180,14 @@ the semver check):
     start-up, and a deferred Tiered frame `[render] paint decals: inline|gbuffer pass`; CI's
     `tiered-temporal` job runs the teamfight's deferred–forward parity with the decal pass
     forced on (`PARITY_SCENES` limits `deferred-parity.sh`'s scenes), and
-    `terrain-decal-check.sh` also bounds the tiered terrain G-buffer stage's registers
-    (`GBUFFER_REGISTERS`, 48).
+    `terrain-decal-check.sh` times both stages that inline the decals against their
+    permutations without decal code (`MOBA_DECALS=off`, which now also selects
+    `terrain_gbuffer_nodecals*_hdr` on the deferred frame): Compat's `scene` lane (pinned to
+    Compat; on Tiered it has been empty since N2b, so the old check always passed) and the
+    Tiered `prepass` lane, failing on a missing or zero p50; it also bounds their registers
+    (`REGISTERS` 64, `GBUFFER_REGISTERS` 48). With the decal pass a captured frame logs
+    `[render] capture frame: paint_decals=N plan=...`, and the CI step requires a live `Paint`
+    decal drawn through the pass.
   - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
     (worst pixel 3, 3, 3 and 6/255 locally, with the inline decals and with the decal pass);
     Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the emissive mask,
