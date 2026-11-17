@@ -311,6 +311,12 @@ float moba_luminance(vec3 color) {
 #ifndef MOBA_AREA_MODE
 #define MOBA_AREA_MODE uint(camera.occlusion.z)
 #endif
+// Whether this stage has the LTC evaluation at all: the water defines it 0 and lights shaped
+// lights at their representative point in mode 2 too (its registers cost the water pass
+// 0.006 ms every frame, shaped light or not; ADR-0023 amendment 4).
+#ifndef MOBA_AREA_LTC
+#define MOBA_AREA_LTC 1
+#endif
 // Where the shapes start in the light list, in `vec4`s (`SHAPE_BASE` in lights.rs).
 #define MOBA_LIGHT_SHAPE_BASE 512u
 
@@ -409,16 +415,23 @@ vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 n, vec3 v, f
         float half_side = 0.5 * sqrt(MOBA_PI) * disk;
         ltc_facing_quad(to_light, to_light, half_side, half_side, q);
     }
+    // The corners into the shading frame once (t1 toward v, t2, n), then the clamped cosine
+    // (the diffuse) and the lobe (the table's inverse matrix, four terms) over them in turn.
     vec3 t1 = v - n * dot(v, n);
     float t1_length2 = dot(t1, t1);
     vec3 helper = abs(n.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
     t1 = t1_length2 > 1e-8 ? t1 * inversesqrt(t1_length2) : normalize(cross(n, helper));
-    mat3 basis = transpose(mat3(t1, cross(n, t1), n));
+    vec3 t2 = cross(n, t1);
+    for (int k = 0; k < 4; k++) {
+        q[k] = vec3(dot(q[k], t1), dot(q[k], t2), dot(q[k], n));
+    }
     vec2 coord = vec2(roughness, sqrt(1.0 - clamp(n_dot_v, 0.0, 1.0)));
-    vec4 m = ltc_fetch(0.0, coord);
+    vec2 integral;
+    for (int k = 0; k < 2; k++) {
+        integral[k] = ltc_quad(k == 0 ? vec4(1.0, 0.0, 0.0, 1.0) : ltc_fetch(0.0, coord), q);
+    }
     magnitude_fresnel = ltc_fetch(1.0, coord).xy;
-    mat3 lobe = mat3(vec3(m.x, 0.0, m.y), vec3(0.0, 1.0, 0.0), vec3(m.z, 0.0, m.w)) * basis;
-    return vec2(ltc_quad(basis, q), ltc_quad(lobe, q)) / (grow * grow);
+    return integral / (grow * grow);
 }
 #endif
 
@@ -458,6 +471,7 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
         float shape_tag = light_list.lights[index * 2u + 1u].w;
         if (shape_tag > 0.5 && MOBA_AREA_MODE != 0u) {
             vec4 shape = light_list.lights[MOBA_LIGHT_SHAPE_BASE + index];
+#if MOBA_AREA_LTC
 #ifdef MOBA_SHADING_MODELS
             // The extended models' own lobes (coat, sheen, anisotropy, film) are lit at the
             // representative point, as §4d does for sheen.
@@ -487,6 +501,7 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
                 irradiance += moba_luminance(radiance) * integral.x;
                 continue;
             }
+#endif
             vec3 point = moba_representative_point(shape_tag, shape, to_light, reflect(-v, n));
             l = point * inversesqrt(max(dot(point, point), 1e-8));
             if (shape_tag > 2.5) {

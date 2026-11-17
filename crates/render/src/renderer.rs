@@ -3273,6 +3273,7 @@ impl Renderer {
                 camera: self.scene.camera_set(frame_index),
                 lighting: self.lighting.set(frame_index),
                 render_size: render_extent,
+                area_lights: self.lighting.light_stats().area > 0,
             });
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.

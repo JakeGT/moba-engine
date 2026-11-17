@@ -68,13 +68,18 @@ float ltc_grow(float distance, float extent) {
     return max(MOBA_LTC_MIN_SPAN * distance / max(extent, 1e-6), 1.0);
 }
 
-// The clipless quad: `m` takes the corners (offsets from the shaded point) into the lobe's
-// space. Either winding (the form factor is turned toward the quad).
-float ltc_quad(mat3 m, vec3 q[4]) {
-    vec3 l0 = normalize(m * q[0]);
-    vec3 l1 = normalize(m * q[1]);
-    vec3 l2 = normalize(m * q[2]);
-    vec3 l3 = normalize(m * q[3]);
+// The clipless quad: `m` is the table's inverse matrix (a, b, c, d), the 3 x 3
+// ((a, 0, c), (0, 1, 0), (b, 0, d)) by rows, taking the corners (offsets from the shaded
+// point, in the shading frame) into the lobe's space; (1, 0, 0, 1) is the clamped cosine's.
+// Either winding (the form factor is turned toward the quad).
+vec3 ltc_apply(vec4 m, vec3 p) {
+    return normalize(vec3(m.x * p.x + m.z * p.z, p.y, m.y * p.x + m.w * p.z));
+}
+float ltc_quad(vec4 m, vec3 q[4]) {
+    vec3 l0 = ltc_apply(m, q[0]);
+    vec3 l1 = ltc_apply(m, q[1]);
+    vec3 l2 = ltc_apply(m, q[2]);
+    vec3 l3 = ltc_apply(m, q[3]);
     vec3 form = ltc_edge(l0, l1) + ltc_edge(l1, l2) + ltc_edge(l2, l3) + ltc_edge(l3, l0);
     return ltc_sphere_clip(dot(form, l0 + l1 + l2 + l3) < 0.0 ? -form : form);
 }

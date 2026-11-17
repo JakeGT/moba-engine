@@ -131,14 +131,25 @@ pub(crate) struct DeferredTargets {
     pub(crate) camera: vk::DescriptorSet,
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) render_size: vk::Extent2D,
+    /// Whether this frame's light list holds a shaped light (N2d): without one the lighting
+    /// runs its `AREA_MODE` 0 pipelines, which light every point light the same way.
+    pub(crate) area_lights: bool,
+}
+
+/// The pass's pipelines: the classification, the two lighting permutations at the
+/// configured `AREA_MODE` and, when that mode is not 0, the same two at mode 0 for frames
+/// without a shaped light.
+pub(crate) struct DeferredPipelines {
+    classify: GraphicsPipeline,
+    standard: GraphicsPipeline,
+    extended: GraphicsPipeline,
+    plain: Option<[GraphicsPipeline; 2]>,
 }
 
 /// The `light_classify` and `deferred_light` passes and their tile buffer.
 pub(crate) struct DeferredPass {
     device: ash::Device,
-    classify: GraphicsPipeline,
-    standard: GraphicsPipeline,
-    extended: GraphicsPipeline,
+    pipelines: DeferredPipelines,
     classify_layout: PipelineLayout,
     light_layout: PipelineLayout,
     _classify_set_layout: DescriptorSetLayout,
@@ -158,7 +169,10 @@ pub(crate) struct DeferredPass {
     /// [`crate::post::TemporalDebugView::deferred_view`]).
     debug: u32,
     /// Their `AREA_MODE` constant ([`crate::AreaLights`], N2d): the value the forward stages
-    /// read from the camera's `occlusion.z`.
+    /// read from the camera's `occlusion.z`. A frame without a shaped light runs the mode-0
+    /// pipelines instead ([`DeferredTargets::area_lights`]): the LTC evaluation's registers
+    /// (121 against 80 on the RTX 5070 Ti, perf/0038) cost the whole pass occupancy even
+    /// where no shaped light reaches.
     area_mode: u32,
 }
 
@@ -307,7 +321,7 @@ impl DeferredPass {
             ],
             &push(core::mem::size_of::<DeferredPush>()),
         )?;
-        let [classify, standard, extended] = Self::build(
+        let pipelines = Self::build(
             device,
             shaders,
             classify_layout.handle(),
@@ -326,9 +340,7 @@ impl DeferredPass {
         )?;
         Ok(Self {
             device: device.device.clone(),
-            classify,
-            standard,
-            extended,
+            pipelines,
             classify_layout,
             light_layout,
             _classify_set_layout: classify_set_layout,
@@ -365,7 +377,7 @@ impl DeferredPass {
         classify_layout: vk::PipelineLayout,
         light_layout: vk::PipelineLayout,
         [debug, area_mode]: [u32; 2],
-    ) -> RenderResult<[GraphicsPipeline; 3]> {
+    ) -> RenderResult<DeferredPipelines> {
         // `deferred_light.comp`'s `DEBUG_VIEW` (constant_id 0) and `AREA_MODE` (constant_id 1,
         // N2d); `light_classify` has neither, and unused entries are ignored.
         let size = core::mem::size_of::<u32>();
@@ -379,13 +391,13 @@ impl DeferredPass {
                 .offset(size as u32)
                 .size(size),
         ];
-        let mut data = [0u8; 8];
-        data[..4].copy_from_slice(&debug.to_ne_bytes());
-        data[4..].copy_from_slice(&area_mode.to_ne_bytes());
-        let specialization = vk::SpecializationInfo::default()
-            .map_entries(&entries)
-            .data(&data);
-        let pipeline = |name, layout| -> RenderResult<GraphicsPipeline> {
+        let pipeline = |name, layout, area_mode: u32| -> RenderResult<GraphicsPipeline> {
+            let mut data = [0u8; 8];
+            data[..4].copy_from_slice(&debug.to_ne_bytes());
+            data[4..].copy_from_slice(&area_mode.to_ne_bytes());
+            let specialization = vk::SpecializationInfo::default()
+                .map_entries(&entries)
+                .data(&data);
             let module = shaders.module(device, name)?;
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
@@ -399,20 +411,32 @@ impl DeferredPass {
             )?;
             Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
         };
-        let pipelines = [
-            pipeline("light_classify.slang", classify_layout)?,
-            pipeline("deferred_light.comp", light_layout)?,
-            pipeline("deferred_light_extended.comp", light_layout)?,
-        ];
+        let pipelines = DeferredPipelines {
+            classify: pipeline("light_classify.slang", classify_layout, area_mode)?,
+            standard: pipeline("deferred_light.comp", light_layout, area_mode)?,
+            extended: pipeline("deferred_light_extended.comp", light_layout, area_mode)?,
+            plain: if area_mode == 0 {
+                None
+            } else {
+                Some([
+                    pipeline("deferred_light.comp", light_layout, 0)?,
+                    pipeline("deferred_light_extended.comp", light_layout, 0)?,
+                ])
+            },
+        };
         // `RenderConfig::pipeline_stats`: the permutations' registers (amendment 3 item 32).
+        let plain = pipelines.plain.as_ref();
         for (name, pipeline) in [
-            "light_classify",
-            "deferred_light",
-            "deferred_light_extended",
-        ]
-        .iter()
-        .zip(&pipelines)
-        {
+            ("light_classify", Some(&pipelines.classify)),
+            ("deferred_light", Some(&pipelines.standard)),
+            ("deferred_light_extended", Some(&pipelines.extended)),
+            ("deferred_light_plain", plain.map(|[standard, _]| standard)),
+            (
+                "deferred_light_extended_plain",
+                plain.map(|[_, extended]| extended),
+            ),
+        ] {
+            let Some(pipeline) = pipeline else { continue };
             for line in device.pipeline_statistics(pipeline.handle()) {
                 eprintln!("[render] pipeline-stats {name} {line}");
             }
@@ -426,7 +450,7 @@ impl DeferredPass {
         &self,
         device: &DeviceContext,
         shaders: &ShaderSource,
-    ) -> RenderResult<[GraphicsPipeline; 3]> {
+    ) -> RenderResult<DeferredPipelines> {
         Self::build(
             device,
             shaders,
@@ -437,13 +461,8 @@ impl DeferredPass {
     }
 
     /// Replaces the pipelines (the device is idle).
-    pub(crate) fn install_pipelines(
-        &mut self,
-        [classify, standard, extended]: [GraphicsPipeline; 3],
-    ) {
-        self.classify = classify;
-        self.standard = standard;
-        self.extended = extended;
+    pub(crate) fn install_pipelines(&mut self, pipelines: DeferredPipelines) {
+        self.pipelines = pipelines;
     }
 
     /// Re-sizes the tile buffer for rendered sub-rectangles up to `extent` (the device is
@@ -640,7 +659,7 @@ impl DeferredPass {
             self.device.cmd_bind_pipeline(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
-                self.classify.handle(),
+                self.pipelines.classify.handle(),
             );
         }
         // SAFETY: the layout and set are live, and the set was written by `bind_targets`.
@@ -714,9 +733,13 @@ impl DeferredPass {
             );
         }
         let size = targets.render_size;
+        let [standard, extended] = match &self.pipelines.plain {
+            Some([standard, extended]) if !targets.area_lights => [standard, extended],
+            _ => [&self.pipelines.standard, &self.pipelines.extended],
+        };
         for (class, pipeline) in [
-            (TileClass::Standard, &self.standard),
-            (TileClass::Extended, &self.extended),
+            (TileClass::Standard, standard),
+            (TileClass::Extended, extended),
         ] {
             let push = DeferredPush {
                 render_size: [size.width, size.height],

@@ -20,6 +20,8 @@
 //   real thickness sets the fade.
 
 #include "camera.glsl"
+// Shaped lights at their representative point, LTC or not (lighting.glsl, N2d).
+#define MOBA_AREA_LTC 0
 #include "lighting.glsl"
 #include "atmosphere.glsl"
 #include "decals.glsl"
