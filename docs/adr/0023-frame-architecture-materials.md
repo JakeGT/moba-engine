@@ -6,7 +6,9 @@
 [Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built), N2b in
 [Amendment 2](#amendment-2-2026-11-15-n2b-deferred-lighting-for-standard-as-built) and N2c, with the
 frozen material spec, in
-[Amendment 3](#amendment-3-2026-11-17-n2c-the-material-model-as-built-and-the-frozen-material-spec).
+[Amendment 3](#amendment-3-2026-11-17-n2c-the-material-model-as-built-and-the-frozen-material-spec)
+and N2d in
+[Amendment 4](#amendment-4-2026-11-17-n2d-ltc-area-lights-and-the-light-record-as-built).
 Proposed 2026-11-02. This is phase N2 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§3, §4, §5.2, §6.2, §6.6, §8
 and §12), written before the code.
@@ -1751,6 +1753,112 @@ amendment that names C1's consequence.
       preset and the overrun.
 - **8. Compat contract:** `content-check` passes every shipped material under both evaluators,
   and `every_sample_material_loads_on_compat` builds each model's sample on Compat. Met.
+
+### Amendment 4 (2026-11-17, N2d): LTC area lights and the light record as built
+
+N2d builds §4 (the shapes, the LTC table, the light record and the effect descriptor's
+`[light]` shape) and gate 3's LTC checks. The evidence is in
+[perf/0038](../perf/0038-n2d-area-lights.md). Every departure from §4, §9 and the gates is an
+item here.
+
+**Items.**
+
+1. **The light record keeps its 32 bytes; the shapes are a second part** (departs from §4c's
+   48-byte `Light`). The light buffer's first part is unchanged for Compat (position and
+   radius; colour), with the shape's tag in the colour's `w` (0 point, 1 sphere, 2 capsule,
+   3 rect); one `vec4` per light follows from `SHAPE_BASE` (`MAX_LIGHTS × 2` = 512 `vec4`s):
+   a sphere's radius in `w`; a capsule's half-axis in `xyz` and radius in `w`; a rect's
+   normal times its half-width in `xyz` and half-height in `w`. Compat's shaders and SPIR-V
+   do not change, and the buffer grows by 4 KiB per frame in flight, as §9c planned.
+   `Light` (`position`, `radius`, `color`, `shape`; `#[non_exhaustive]`, `Light::new` and
+   `with_shape`) replaces `PointLight`, which stays as a deprecated alias until the release
+   after 0.5.0 (it was never in a release). `LightShape` is `Point`, `Sphere { radius }`,
+   `Capsule { axis, radius }` (`axis` is half the segment) and
+   `Rect { normal, half_width, half_height }`. Sizes are clamped to 1 mm..=16 m (a smaller or
+   non-finite one makes the light a point, and a capsule without length its sphere), and the
+   light's radius is raised to cover the shape, so binning by the bounding sphere (§4a)
+   holds.
+2. **The rect's axes:** the width runs along the horizontal `normalize(Y × normal)` (+X when
+   the normal is vertical) and the height along `normal × that`. A rect is one-sided: nothing
+   behind its plane is lit, and its LTC polygon is the rect itself (no horizon clipping of the
+   polygon: the clipless form's sphere table stands in for it, as everywhere below).
+3. **The shapes' integrals** (§4a's table, as built; `include/ltc.glsl`, `ltc_quad.fs` and
+   `ltc_disk.fs` adapted, THIRD_PARTY.md):
+   - **Sphere:** the lobe over the disk spanning the sphere's cone, which is exactly its
+     silhouette, as planned; its **diffuse is the sphere's own vector form factor**
+     (`R² / d²` toward the centre, horizon-clipped by the same table) rather than the disk
+     through the identity, where the cubic's roots coincide.
+   - **Capsule: one quad, not a line and two spheres** (departs from §4a). The quad faces the
+     shaded point: at each end, the radius either side across the view and `π R / 4` beyond
+     the end along the axis, so a distant view sees `2 R × projected length + π R²`, the
+     capsule's own projected area at every angle. Against the Monte Carlo reference the
+     line-and-caps form missed by far more on glossy lobes, and cost a second integral.
+   - **A square instead of the sphere's disk was tried and dropped:** it was no faster on the
+     RTX 5070 Ti (the area-light sheet within 0.001 ms over 3 rounds; 119 registers with the
+     disk against 118 in that build, 117 as shipped) and three times further from the
+     reference on the lobe (0.176 against 0.058).
+   - Every integral is taken in the shading frame (`t1` toward `v`, `t2`, `n`), the lobe's
+     matrix applied as its four terms.
+4. **Small lights are grown, then scaled back.** A shape whose largest half-extent spans less
+   than 1 % of its distance (`MOBA_LTC_MIN_SPAN`) is evaluated at that span and its integrals
+   divided by the growth squared. Below it the quad's corners are too close for `f32` (the
+   edges' cross products cancel to the normalisation's noise: 10 % off at a span of 1e-3),
+   while its integral is already its area times the lobe's value, so the result is the small
+   shape's to `O(span²)`. This is what makes the radius → 0 limit hold (gate 3).
+5. **The same total power as the point light:** the radiance per unit of colour is `1 / R²`
+   (sphere), `1 / (R² + R h)` (capsule of half-length `h`) and `π / (w h)` (rect of
+   half-extents `w`, `h`), times the point light's window² at the centre's distance. Under
+   LTC the diffuse's Fresnel is taken at the half vector toward the centre (the point
+   light's, exactly, as the shape shrinks) and **the area diffuse has no wrap**: the wrap is
+   the stylisation's point-light term, which N2e removes from Tiered.
+6. **The table is `RGBA16F` and lives in an atlas, not two bindless handles** (departs from
+   §4b's last line). Half precision passes gate 3, and the bake's half-float rounding is at
+   most 4.9e-4 relative. Tiered's lighting binding 3 becomes an `RGBA16F` atlas, 160 × 64:
+   the split-sum LUT at its origin (32 × 32, `rg`) and the two 64 × 64 layers at x = 32 and
+   x = 96 (`lut_atlas`; each fetch lands on texel centres inside its own rectangle). The
+   scene layout already has the 16 samplers a stage may use on the minimum device and on
+   MoltenVK, and `deferred_light` has no bindless set. 80 KiB instead of 64.
+7. **Tiered takes the area mode from the quality preset** (`LightingConfig::area_lights`):
+   Low lights shapes at the representative point (§4a), Medium and up with LTC. A Tiered
+   device runs the High configuration tier at every preset, so the tier alone would have
+   given Low LTC. `MOBA_AREA_LIGHTS=off|point|ltc` overrides it; `off` lights every shape as
+   the point at its centre, which is what Compat does (byte-identical, gate 5).
+8. **The representative point** (Karis 2013, §4a's Low): the shape's closest point to the
+   reflection ray, used for every lobe on Low; a rect is also weighted by `4 cos θ` toward
+   its front and dark behind, which keeps its power. The point light's attenuation at the
+   centre's distance is kept.
+9. **The extended models' lobes stay at the representative point under LTC** (extends §4d
+   from sheen to `CLEARCOAT`, `ANISOTROPIC` and `THIN_FILM`): the table fits GGX's
+   isotropic lobe, not a coat over a base, an anisotropic lobe or a film's Fresnel, and the
+   extended permutation already needs 128 registers with LTC for its standard pixels. `STANDARD`,
+   `FOLIAGE` and `TRANSMISSIVE_FALLBACK` pixels get LTC in either permutation, so tile
+   classes do not change how a standard pixel is lit.
+10. **A frame without a shaped light runs the mode-0 lighting pipelines.** `deferred_light`
+    and `deferred_light_extended` are built twice, at the configured `AREA_MODE`
+    (specialisation constant 1) and at 0, and each frame picks by whether its light list
+    holds a shaped light. With LTC the standard permutation needs 117 registers on the RTX
+    5070 Ti (74 without; 80 is the occupancy boundary), which cost the whole pass about
+    0.009 ms at High on the teamfight whether a shaped light was near or not. Mode 0 lights
+    a point light exactly as LTC's pipeline does (a point skips the area code), so the
+    choice moves no pixel. The forward stages read the mode from the camera's
+    `occlusion.z`.
+11. **The water lights shapes at their representative point** (`MOBA_AREA_LTC 0` in
+    `water.frag`), LTC or not: its registers cost the water pass 0.006 ms on every frame.
+    The water's specular is its own mirror and ripples; the other forward Tiered stages
+    (units, terrain, foliage) keep LTC, so the forward frame lights area lights as the
+    deferred one does (gate 2).
+12. **Effects:** the `[light]` table takes `shape = "point" | "sphere" | "capsule" | "rect"`,
+    `source_radius` (sphere and capsule, 0.01..=2 m, default 0.1), `length` (capsule, the
+    whole segment along the effect's forward axis, 0.01..=8 m) and `width` with `length`
+    (rect, facing the effect's forward axis, 0.01..=8 m); a key without its shape is an
+    error. The bolt is a capsule (0.8 m, radius 0.06 m) and the arc bolt a sphere (0.25 m).
+    Client-local, no content-hash change.
+13. **What N2d records:** the frame log's `area_lights_avg` and `area_frames` (shaped lights
+    in the light list per frame, and the frames with one), and `MOBA_AREA_LIGHT_SHEET=1`, a
+    sphere, a capsule and a rect light over open ground at the material sheet's spot, the
+    scene gate 2, the `ltc` golden and gate 7's area-light rows use.
+
+[[GATES]]
 
 ## Corrections to the roadmap
 
