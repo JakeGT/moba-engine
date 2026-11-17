@@ -481,6 +481,8 @@ pub(crate) struct TargetsSpec<'a> {
     pub(crate) samples: vk::SampleCountFlags,
     /// The depth test: the main view's convention, like the scene pipelines.
     pub(crate) depth_compare: vk::CompareOp,
+    /// `NONE` but for the G-buffer decals' boxes, which draw their back faces only.
+    pub(crate) cull_mode: vk::CullModeFlags,
 }
 
 /// `target`'s blend state.
@@ -511,7 +513,7 @@ fn blend_attachment(target: &ColorTarget) -> vk::PipelineColorBlendAttachmentSta
         .color_write_mask(target.write_mask)
 }
 
-/// Creates a [`TargetsSpec`] pipeline: no culling, no depth bias, depth tested with
+/// Creates a [`TargetsSpec`] pipeline: `spec.cull_mode`, no depth bias, depth tested with
 /// `spec.depth_compare`, like the scene pipelines.
 pub(crate) fn create_targets(
     device: &DeviceContext,
@@ -562,13 +564,13 @@ pub(crate) fn create_targets(
         .depth_clamp_enable(false)
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
+        .cull_mode(spec.cull_mode)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .depth_bias_enable(false)
         .line_width(1.0);
     let multisample =
         vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(spec.samples);
-    // No depth attachment (`UNDEFINED`, the G-buffer decals): no depth test.
+    // No depth attachment (`UNDEFINED`): no depth test.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(spec.depth_format != vk::Format::UNDEFINED)
         .depth_write_enable(spec.depth_write)

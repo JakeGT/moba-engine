@@ -22,9 +22,12 @@ import material;
 [[vk::binding(0, 2)]] SamplerState bindless_samplers[];
 [[vk::binding(2, 2)]] Texture2D<float4> bindless_textures[];
 
-// The renderer's material sampler (`bindless::MATERIAL_SAMPLER`: repeat, trilinear, the
-// tier's anisotropy), the `Materials` sampler the forward path uses.
-static const uint MATERIAL_SAMPLER = 12;
+// Specialisation constants, set by the renderer from its own values (so they cannot drift):
+// the material sampler's bindless slot (`bindless::MATERIAL_SAMPLER`: repeat, trilinear, the
+// tier's anisotropy, the `Materials` sampler the forward path uses) and the table's length
+// (`material::MAX_MATERIALS`), which bounds the draw's index.
+[vk::constant_id(0)] const uint MATERIAL_SAMPLER = 12;
+[vk::constant_id(1)] const uint MAX_MATERIALS = 64;
 // The dust layer's colour (§6a), ash, until a map carries its own.
 static const float3 DUST_COLOR = float3(0.30, 0.28, 0.25);
 
@@ -98,10 +101,47 @@ float3 material_normal(float3 normal, float4 tangent, float2 xy_sample, float sc
     return normalize(t * tangent_normal.x + b * tangent_normal.y + normal * tangent_normal.z);
 }
 
+// Duff et al. 2017's orthonormal basis from a unit normal: `model_basis` in
+// include/shading_models.glsl, which the deferred lighting rebuilds from the stored normal.
+void model_basis(float3 n, out float3 t, out float3 b)
+{
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float c = n.x * n.y * a;
+    t = float3(1.0 + s * n.x * n.x * a, s * c, -s * n.x);
+    b = float3(c, s + n.y * n.y * a, -n.y);
+}
+
+// The anisotropy's direction as the G-buffer stores it (§6c, amendment 3): the authored
+// rotation turns the mesh's tangent about the normal (`KHR_materials_anisotropy`), and the
+// result is stored as its angle, modulo π, in the basis the lighting rebuilds from the stored
+// (quantised) normal. The basis flips across n.z = 0, the angle with it, so the direction is
+// as continuous as the mesh's tangents. Without a usable tangent, the rotation is taken in
+// that basis.
+float anisotropy_angle(float3 normal, float4 tangent, float rotation)
+{
+    float2 oct = floor(octahedral_encode(normal) * 1023.0 + 0.5) / 1023.0;
+    float3 stored = octahedral_decode(oct);
+    float3 t0;
+    float3 b0;
+    model_basis(stored, t0, b0);
+    float3 t = tangent.xyz - stored * dot(stored, tangent.xyz);
+    float length_squared = dot(t, t);
+    if (length_squared <= 1e-12)
+    {
+        return rotation;
+    }
+    t *= rsqrt(length_squared);
+    float3 b = cross(stored, t) * (tangent.w < 0.0 ? -1.0 : 1.0);
+    float3 direction = cos(rotation) * t + sin(rotation) * b;
+    float angle = atan2(dot(direction, b0), dot(direction, t0));
+    return angle < 0.0 ? angle + 3.14159265358979 : angle;
+}
+
 [shader("fragment")]
 GBufferOutput main(VertexOutput input)
 {
-    MaterialRecord record = push.table[push.material];
+    MaterialRecord record = push.table[min(push.material, MAX_MATERIALS - 1)];
     float3 geometric = normalize(input.normal);
     float4 base = sample_material(texture_lo(record.base_normal), input.uv)
         * record.base_color_factor;
@@ -115,8 +155,13 @@ GBufferOutput main(VertexOutput input)
         sample_material(texture_hi(record.base_normal), input.uv).rg, record.normal_scale);
     uint flags = record_flags(record);
     float mask = (flags & MATERIAL_FLAG_EMISSIVE_MASK) != 0 ? mr.b : 1.0;
-    float3 emissive = record.emissive * mask
-        * sample_material(texture_lo(record.emissive_model), input.uv).rgb;
+    // Unbound emissive and model textures are the 1×1 white defaults: their samples are
+    // skipped (the flags are uniform per draw).
+    float3 emissive = record.emissive * mask;
+    if ((flags & MATERIAL_FLAG_EMISSIVE_TEXTURE) != 0)
+    {
+        emissive *= sample_material(texture_lo(record.emissive_model), input.uv).rgb;
+    }
     // The dust layer (§6a): amount times how much the surface faces up.
     float dust = record.dust * saturate(normal.y);
     albedo = lerp(albedo, DUST_COLOR, dust);
@@ -125,7 +170,11 @@ GBufferOutput main(VertexOutput input)
     // G-buffer's units, then to the physical units `encode_gbuffer` takes.
     uint model = record_model(record);
     float3 bytes = record_model_bytes(record);
-    float3 texel = sample_material(texture_hi(record.emissive_model), input.uv).rgb;
+    float3 texel = float3(1.0);
+    if ((flags & MATERIAL_FLAG_MODEL_TEXTURE) != 0)
+    {
+        texel = sample_material(texture_hi(record.emissive_model), input.uv).rgb;
+    }
     float3 c = bytes * texel;
     SurfaceParams s;
     s.base_color = albedo;
@@ -140,9 +189,15 @@ GBufferOutput main(VertexOutput input)
         s.model_data = float3(0.16 * c.x * c.x, 0.0, 0.0);
         s.ao = c.y;
     }
-    else if (model == GBUFFER_MODEL_CLEARCOAT || model == GBUFFER_MODEL_ANISOTROPIC)
+    else if (model == GBUFFER_MODEL_CLEARCOAT)
     {
-        s.model_data = float3(c.x, model == GBUFFER_MODEL_ANISOTROPIC ? c.y * 3.14159265358979 : c.y, 0.0);
+        s.model_data = float3(c.x, c.y, 0.0);
+        s.ao = c.z;
+    }
+    else if (model == GBUFFER_MODEL_ANISOTROPIC)
+    {
+        s.model_data = float3(c.x, anisotropy_angle(normal, input.tangent, c.y * 3.14159265358979),
+                              0.0);
         s.ao = c.z;
     }
     else if (model == GBUFFER_MODEL_SHEEN)
@@ -151,9 +206,11 @@ GBufferOutput main(VertexOutput input)
     }
     else if (model == GBUFFER_MODEL_THIN_FILM)
     {
-        // r and b are the thickness range's ends; the model texture's r picks between them.
+        // r and b are the thickness range's ends; the model texture's r picks between them,
+        // its g scales the film's IOR and its b is the material AO, as on the other models.
         float thickness = lerp(bytes.x, bytes.z, texel.r);
         s.model_data = float3(100.0 + 300.0 * thickness, 1.0 + c.y, 0.0);
+        s.ao = texel.b;
     }
     else if (model == GBUFFER_MODEL_FOLIAGE)
     {

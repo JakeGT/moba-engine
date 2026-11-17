@@ -118,7 +118,8 @@ pub struct MaterialData {
     /// The shading model and its parameters (ADR-0023 §6c). The deferred Tiered frame shades
     /// it; Compat and the forward Tiered frame draw [`Self::compat`].
     pub model: ModelParams,
-    /// Dielectric F0, `0..=0.16` (Tiered; ADR-0023 §6b): 0.04 is IOR 1.5.
+    /// Dielectric F0, `0..=0.16` (Tiered; ADR-0023 §6b): 0.04 is IOR 1.5, and every model but
+    /// `STANDARD` and `TRANSMISSIVE_FALLBACK` has it (`MaterialDesc::model_dielectric_f0`).
     pub f0: f32,
     /// Dust layer amount, `0..=1` (Tiered; ADR-0023 §6a).
     pub dust: f32,
@@ -171,7 +172,7 @@ impl MaterialData {
             specular: desc.specular,
             specular_tint: desc.specular_tint,
             model: desc.model,
-            f0: desc.dielectric_f0(),
+            f0: desc.model_dielectric_f0(),
             dust: desc.dust,
             compat: Some(desc.compat_fallback()),
         }
@@ -258,6 +259,11 @@ struct MaterialParamsGpu {
 pub(crate) const MATERIAL_FLAG_EMISSIVE_MASK: u32 = 1;
 /// `UNLIT` (the UBO only): the forward Tiered frame draws the emissive alone.
 pub(crate) const MATERIAL_FLAG_UNLIT: u32 = 2;
+/// The record only: an emissive texture is bound (unbound, the G-buffer stage skips the
+/// sample of the 1×1 white default; `MATERIAL_FLAG_EMISSIVE_TEXTURE` in `material.slang`).
+pub(crate) const RECORD_FLAG_EMISSIVE_TEXTURE: u32 = 2;
+/// The record only: a model texture is bound (`MATERIAL_FLAG_MODEL_TEXTURE`).
+pub(crate) const RECORD_FLAG_MODEL_TEXTURE: u32 = 4;
 
 /// A finite `value` clamped to `0..=high` (0 for NaN or infinity).
 fn clamp(value: f32, high: f32) -> f32 {
@@ -357,11 +363,13 @@ fn unorm8(x: f32) -> u32 {
 }
 
 impl MaterialRecord {
-    /// The record of `material` with `textures` (bindless handles in [`TextureSlot`] order)
-    /// and `mask` (the emissive mask flag).
+    /// The record of `material` with `textures` (bindless handles in [`TextureSlot`] order),
+    /// `defaults` (the unbound slots' handles: a slot holding its default sets no texture
+    /// flag) and `mask` (the emissive mask flag).
     pub(crate) fn new(
         material: &MaterialData,
         textures: [u32; TextureSlot::COUNT],
+        defaults: &[u32; TextureSlot::COUNT],
         mask: bool,
     ) -> Self {
         let ao = 255;
@@ -399,6 +407,10 @@ impl MaterialRecord {
         let model = u32::from(material.model.model().gbuffer_id());
         let pack = |low: u32, high: u32| (low & 0xFFFF) | (high << 16);
         let slot = |slot: TextureSlot| textures[slot.index()];
+        let bound = |slot: TextureSlot| textures[slot.index()] != defaults[slot.index()];
+        let flags = u32::from(mask) * MATERIAL_FLAG_EMISSIVE_MASK
+            + u32::from(bound(TextureSlot::Emissive)) * RECORD_FLAG_EMISSIVE_TEXTURE
+            + u32::from(bound(TextureSlot::Model)) * RECORD_FLAG_MODEL_TEXTURE;
         Self {
             base_color_factor: material.base_color_factor.map(|value| clamp(value, 1.0)),
             emissive: material.emissive.map(|value| clamp(value, 16.0)),
@@ -413,11 +425,7 @@ impl MaterialRecord {
                 slot(TextureSlot::Mask),
             ),
             emissive_model: pack(slot(TextureSlot::Emissive), slot(TextureSlot::Model)),
-            model: r
-                | (g << 8)
-                | (b << 16)
-                | ((model & 0xF) << 24)
-                | (u32::from(mask) * MATERIAL_FLAG_EMISSIVE_MASK) << 28,
+            model: r | (g << 8) | (b << 16) | ((model & 0xF) << 24) | flags << 28,
         }
     }
 }
@@ -799,7 +807,12 @@ impl Materials {
                             .and_then(|texture| texture.bindless)
                             .map_or(self.default_handles[slot], TextureHandle::index)
                     });
-                    MaterialRecord::new(material, handles, self.emissive_mask(material))
+                    MaterialRecord::new(
+                        material,
+                        handles,
+                        &self.default_handles,
+                        self.emissive_mask(material),
+                    )
                 })
                 .collect();
             if let Some(table) = &mut self.table {
@@ -897,6 +910,7 @@ impl Materials {
 #[cfg(test)]
 mod tests {
     use super::{MaterialData, MaterialParamsGpu, MaterialRecord, TextureId};
+    use crate::gbuffer::ShadingModel;
     use moba_assets::{MaterialShader, TextureSlot};
 
     #[test]
@@ -986,7 +1000,8 @@ mod tests {
     }
 
     /// The record's model word: the model data as UNORM8 channels (§6c), the G-buffer
-    /// model ID, the emissive-mask flag; the texture words two handles each.
+    /// model ID, the flags (the emissive mask, a bound emissive or model texture); the
+    /// texture words two handles each.
     #[test]
     fn material_record_packs_the_model_word() {
         use moba_assets::ModelParams;
@@ -995,26 +1010,40 @@ mod tests {
         textures[TextureSlot::BaseColor.index()] = 7;
         textures[TextureSlot::Normal.index()] = 9;
         textures[TextureSlot::Model.index()] = 11;
-        let record = MaterialRecord::new(&material, textures, true);
-        // STANDARD (1): F0 0.04 as sqrt(F0 / 0.16) = 0.5, AO 1.
-        assert_eq!(record.model, 128 | (255 << 8) | (1 << 24) | (1 << 28));
+        let defaults = [0_u32; TextureSlot::COUNT];
+        let record = MaterialRecord::new(&material, textures, &defaults, true);
+        // STANDARD (1): F0 0.04 as sqrt(F0 / 0.16) = 0.5, AO 1; the mask and a model texture.
+        assert_eq!(record.model, 128 | (255 << 8) | (1 << 24) | (5 << 28));
         assert_eq!(record.base_normal, 7 | (9 << 16));
         assert_eq!(record.emissive_model, 11 << 16);
+        // Every slot at its default: no texture flag.
+        let record = MaterialRecord::new(&material, defaults, &defaults, false);
+        assert_eq!(record.model >> 28, 0);
+        let mut emissive = defaults;
+        emissive[TextureSlot::Emissive.index()] = 3;
+        let record = MaterialRecord::new(&material, emissive, &defaults, false);
+        assert_eq!(record.model >> 28, super::RECORD_FLAG_EMISSIVE_TEXTURE);
         material.model = ModelParams::ThinFilm {
             thickness_min: 100.0,
             thickness_max: 400.0,
             ior: 1.3,
         };
-        let record = MaterialRecord::new(&material, textures, false);
+        let record = MaterialRecord::new(&material, textures, &defaults, false);
         // (1.3 − 1) · 255 rounds to 76 in f32.
-        assert_eq!(record.model, (76 << 8) | (255 << 16) | (5 << 24));
+        assert_eq!(
+            record.model,
+            (76 << 8) | (255 << 16) | (5 << 24) | (4 << 28)
+        );
         material.model = ModelParams::Anisotropic {
             strength: 1.0,
             rotation: -core::f32::consts::FRAC_PI_2,
         };
-        let record = MaterialRecord::new(&material, textures, false);
+        let record = MaterialRecord::new(&material, textures, &defaults, false);
         // −π/2 is π/2 modulo π: 0.5.
-        assert_eq!(record.model, 255 | (128 << 8) | (255 << 16) | (4 << 24));
+        assert_eq!(
+            record.model,
+            255 | (128 << 8) | (255 << 16) | (4 << 24) | (4 << 28)
+        );
     }
 
     /// The reflected fields of a Slang struct type: (name, byte offset).
@@ -1030,6 +1059,205 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// Duff et al. 2017's basis (`model_basis` in `unit_material_gbuffer.slang` and
+    /// `shading_models.glsl`).
+    fn model_basis(n: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+        let s = if n[2] >= 0.0 { 1.0 } else { -1.0 };
+        let a = -1.0 / (s + n[2]);
+        let c = n[0] * n[1] * a;
+        (
+            [1.0 + s * n[0] * n[0] * a, s * c, -s * n[0]],
+            [c, s + n[1] * n[1] * a, -n[1]],
+        )
+    }
+
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    /// The Rust twin of `unit_material_gbuffer.slang`'s model block: the record's model word
+    /// and a model-texture texel to the model, its data in physical units and the AO, for a
+    /// shading `normal` and the vertex `tangent` (ADR-0023 gate 1, C7 of the N2c review).
+    #[allow(clippy::many_single_char_names)] // The shader's names.
+    fn record_surface(
+        record: &MaterialRecord,
+        texel: [f32; 3],
+        normal: [f32; 3],
+        tangent: [f32; 4],
+    ) -> (ShadingModel, [f32; 3], f32) {
+        use core::f32::consts::PI;
+        let byte = |shift: u32| ((record.model >> shift) & 0xFF) as f32 / 255.0;
+        let bytes = [byte(0), byte(8), byte(16)];
+        let c: [f32; 3] = core::array::from_fn(|i| bytes[i] * texel[i]);
+        let model = ShadingModel::from_id(((record.model >> 24) & 0xF) as u8).expect("model");
+        match model {
+            ShadingModel::Standard | ShadingModel::TransmissiveFallback => {
+                (model, [0.16 * c[0] * c[0], 0.0, 0.0], c[1])
+            }
+            ShadingModel::Clearcoat => (model, [c[0], c[1], 0.0], c[2]),
+            ShadingModel::Anisotropic => {
+                // `anisotropy_angle`: the mesh tangent rotated about the stored normal,
+                // as an angle in the stored normal's basis, modulo π.
+                let rotation = c[1] * PI;
+                let [u, v] = crate::gbuffer::octahedral_encode(normal);
+                let q = |x: f32| (x * 1023.0 + 0.5).floor() / 1023.0;
+                let stored = crate::gbuffer::octahedral_decode([q(u), q(v)]);
+                let (t0, b0) = model_basis(stored);
+                let along = dot(stored, [tangent[0], tangent[1], tangent[2]]);
+                let mut t: [f32; 3] = core::array::from_fn(|i| tangent[i] - stored[i] * along);
+                let length = dot(t, t).sqrt();
+                let angle = if length <= 1e-6 {
+                    rotation
+                } else {
+                    t = t.map(|x| x / length);
+                    let sign = if tangent[3] < 0.0 { -1.0 } else { 1.0 };
+                    let b = cross(stored, t).map(|x| x * sign);
+                    let direction: [f32; 3] =
+                        core::array::from_fn(|i| rotation.cos() * t[i] + rotation.sin() * b[i]);
+                    let angle = dot(direction, b0).atan2(dot(direction, t0));
+                    if angle < 0.0 { angle + PI } else { angle }
+                };
+                (model, [c[0], angle, 0.0], c[2])
+            }
+            ShadingModel::Sheen => (model, c, 1.0),
+            ShadingModel::ThinFilm => {
+                let thickness = bytes[0] + (bytes[2] - bytes[0]) * texel[0];
+                (
+                    model,
+                    [100.0 + 300.0 * thickness, 1.0 + c[1], 0.0],
+                    texel[2],
+                )
+            }
+            ShadingModel::Foliage => (model, [c[0], 0.0, 0.0], c[1]),
+            ShadingModel::Unlit => (model, [0.0; 3], 1.0),
+        }
+    }
+
+    /// The record → `SurfaceParams` → G-buffer bytes chain of the textured units' Slang
+    /// stage, through its Rust twin and `gbuffer::encode`: `STANDARD`'s F0 byte, the thin
+    /// film's thickness lerp and AO (the model texture's b), and the anisotropy's angle × π.
+    #[test]
+    fn material_record_to_gbuffer_bytes() {
+        use crate::gbuffer::{FLAG_UNIT, SurfaceParams, encode};
+        use moba_assets::ModelParams;
+        let defaults = [0_u32; TextureSlot::COUNT];
+        let up = [0.0, 1.0, 0.0];
+        let tangent = [1.0, 0.0, 0.0, 1.0];
+        let gb2 = |material: &MaterialData, texel: [f32; 3], normal: [f32; 3]| {
+            let record = MaterialRecord::new(material, defaults, &defaults, false);
+            let (model, model_data, ao) = record_surface(&record, texel, normal, tangent);
+            encode(&SurfaceParams {
+                base_color: [0.5; 3],
+                metallic: 0.0,
+                normal,
+                roughness: 0.5,
+                model,
+                model_data,
+                ao,
+                flags: FLAG_UNIT,
+                rim_slot: 0,
+            })
+            .gb2
+        };
+        let mut material = MaterialData::new(MaterialShader::Textured);
+        // STANDARD, F0 0.04: sqrt(0.04 / 0.16) = 0.5 → 128; AO from the texel's g.
+        assert_eq!(gb2(&material, [1.0, 0.5, 1.0], up)[..3], [128, 128, 0]);
+        material.f0 = 0.16;
+        assert_eq!(gb2(&material, [1.0, 1.0, 1.0], up)[0], 255);
+        // THIN_FILM 100–400 nm: the texel's r = 0.5 is 250 nm, (250 − 100) / 300 → 128; IOR
+        // 1.3 → 76; the texel's b is the AO.
+        material.model = ModelParams::ThinFilm {
+            thickness_min: 100.0,
+            thickness_max: 400.0,
+            ior: 1.3,
+        };
+        assert_eq!(gb2(&material, [0.5, 1.0, 0.25], up)[..3], [128, 76, 64]);
+        // ANISOTROPIC: rotation π/2 stores as 128 (angle / π); with this normal and tangent
+        // the basis is the mesh frame, so the angle is the rotation.
+        material.model = ModelParams::Anisotropic {
+            strength: 1.0,
+            rotation: core::f32::consts::FRAC_PI_2,
+        };
+        assert_eq!(gb2(&material, [1.0, 1.0, 1.0], up)[..3], [255, 128, 255]);
+    }
+
+    /// The anisotropy's stored direction follows the mesh tangent across n.z = 0, where
+    /// Duff's basis flips: rebuilt from the stored normal as the lighting does, the direction
+    /// on either side matches the tangent's (up to sign, the lobe being π-periodic).
+    #[test]
+    #[allow(clippy::many_single_char_names)] // The shader's names.
+    fn anisotropy_direction_is_continuous_across_the_basis_seam() {
+        use moba_assets::ModelParams;
+        let defaults = [0_u32; TextureSlot::COUNT];
+        let mut material = MaterialData::new(MaterialShader::Textured);
+        material.model = ModelParams::Anisotropic {
+            strength: 1.0,
+            rotation: 0.0,
+        };
+        let record = MaterialRecord::new(&material, defaults, &defaults, false);
+        for z in [-0.05_f32, -0.01, 0.01, 0.05] {
+            let length = (1.0 + z * z).sqrt();
+            let normal = [1.0 / length, 0.0, z / length];
+            // The mesh tangent runs along +y, perpendicular to the normal.
+            let tangent = [0.0, 1.0, 0.0, 1.0];
+            let (_, data, _) = record_surface(&record, [1.0; 3], normal, tangent);
+            let [u, v] = crate::gbuffer::octahedral_encode(normal);
+            let q = |x: f32| (x * 1023.0 + 0.5).floor() / 1023.0;
+            let stored = crate::gbuffer::octahedral_decode([q(u), q(v)]);
+            let (t0, b0) = model_basis(stored);
+            let direction: [f32; 3] =
+                core::array::from_fn(|i| data[1].cos() * t0[i] + data[1].sin() * b0[i]);
+            assert!(
+                dot(direction, [0.0, 1.0, 0.0]).abs() > 0.999,
+                "n.z {z}: direction {direction:?}"
+            );
+        }
+    }
+
+    /// The Slang material stage takes the material sampler's slot and the table's length
+    /// as specialisation constants 0 and 1 (`unit_material_gbuffer.slang`), which the
+    /// prepass sets from `bindless::MATERIAL_SAMPLER` and [`MAX_MATERIALS`]: every
+    /// permutation's SPIR-V decorates both IDs (`OpDecorate … SpecId`), so neither value can
+    /// silently fall back to the shader's default.
+    #[test]
+    fn material_stage_specialises_the_sampler_and_the_table_length() {
+        const OP_DECORATE: u32 = 71;
+        const SPEC_ID: u32 = 1;
+        for module in [
+            "unit_material_gbuffer.slang",
+            "unit_material_gbuffer_ids.slang",
+            "unit_material_gbuffer_hdr.slang",
+            "unit_material_gbuffer_ids_hdr.slang",
+        ] {
+            let bytes = moba_shaders::module(module).expect("module");
+            let words: Vec<u32> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
+                .collect();
+            let mut ids = Vec::new();
+            let mut at = 5; // past the header
+            while at < words.len() {
+                let count = (words[at] >> 16) as usize;
+                if words[at] & 0xFFFF == OP_DECORATE && count == 4 && words[at + 2] == SPEC_ID {
+                    ids.push(words[at + 3]);
+                }
+                at += count.max(1);
+            }
+            ids.sort_unstable();
+            assert_eq!(ids, [0, 1], "{module}: specialisation constants");
+        }
     }
 
     /// ADR-0023 gate 1: `MaterialRecord` and the material push match their Slang twins in

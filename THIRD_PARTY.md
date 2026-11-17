@@ -175,6 +175,22 @@ the repository's MIT OR Apache-2.0 licence. See [ADR-0018](docs/adr/0018-culling
 licence). The engine supplies its own deterministic `acos`; see
 [ADR-0022](docs/adr/0022-provenance-gate-mikktspace.md).
 
+## Thin-film Fresnel (Khronos glTF Sample Viewer)
+
+The thin-film (iridescence) Fresnel of ADR-0023's `THIN_FILM` model is adapted from the Khronos
+glTF Sample Viewer's `iridescence.glsl`, whose renderer now lives in
+<https://github.com/KhronosGroup/glTF-Sample-Renderer> as
+`source/Renderer/shaders/iridescence.glsl` (last changed in commit
+`60f616a5209e43d1359ee106b747376065180095`, checked 2026-11-17). Both repositories are Apache
+License 2.0; the author is The Khronos Group Inc. (`package.json`); the file carries no
+copyright header and the repository has no `NOTICE` file. It implements Belcour and Barla 2017,
+"A Practical Extension to Microfacet Theory for the Modeling of Varying Iridescence". The
+adapted code is `model_f0_between`, `model_sensitivity` and `model_thin_film_fresnel` in
+`crates/shaders/shaders/include/shading_models.glsl`, and its Rust port `thin_film_reflectance`,
+`sensitivity` and `ior_to_f0_between` in `crates/assets/src/material.rs`. Changes: renamed, the
+GLSL evaluated once per pixel at N·V (ADR-0023 amendment 3), the Rust written per channel, and
+both files carry a notice of their origin. The Apache License 2.0 text is `LICENSE-APACHE`.
+
 ## Sample textures and material
 
 `content/textures/sentinel-{base,normal,mr,mask}.ktx2` (and the copy in `fuzz/corpus/ktx2/`)

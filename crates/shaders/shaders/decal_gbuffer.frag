@@ -6,8 +6,9 @@
 // (`OpTerminateInvocation`, core in Vulkan 1.3).
 #extension GL_EXT_terminate_invocation : require
 
-// `Paint` decals in the G-buffer (ADR-0023 §7a, N2c): each box's pixels reconstruct the
-// ground from the receivers' depth (sampled, not attached: the pass tests nothing), evaluate
+// `Paint` decals in the G-buffer (ADR-0023 §7a, N2c): each box's back-face pixels (front faces
+// culled, glow boxes collapsed by the vertex stage, back faces in front of the ground rejected
+// by the read-only depth test) reconstruct the ground from the receivers' depth, evaluate
 // the decal's shape with the shared `decals.glsl` and blend its colour into `gb0`'s sRGB view
 // with (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), so the blend is linear, as the forward terrain's
 // `apply_paint_decals` mixes; gb0's alpha (metallic) is kept by the blend and the mask.
@@ -35,12 +36,8 @@ void main() {
     // The world size of a pixel, in uniform control flow (derivatives).
     float aa = decal_pixel(world);
     uint index = in_index;
-    // The box is drawn without culling or a depth test: of its two layers over a pixel, only
-    // the back faces shade, so each covered pixel blends once.
-    if (gl_FrontFacing || DEPTH_IS_FAR(depth)
-        || (uint(MOBA_DECAL(index).params.y) & MOBA_DECAL_GLOW) != 0u) {
-        terminateInvocation;
-    }
+    // Only back faces reach here (one layer per pixel, so each covered pixel blends once),
+    // and the depth test has rejected the sky.
     // Only where the frame's decal grid lists the decal, as `apply_paint_decals` reads it: the
     // grid bins a decal by its radius, so a splat's droplets past it are clipped at the cell
     // edges on the forward terrain too (a known R3b limit, ADR-0023 amendment 3), and the

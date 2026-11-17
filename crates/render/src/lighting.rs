@@ -669,25 +669,52 @@ pub(crate) fn integrate_brdf(n_dot_v: f32, roughness: f32, samples: u32) -> (f32
 
 /// The LUT texels, `R16G16_SFLOAT` row-major: `u` = N·V, `v` = roughness (texel centres).
 pub(crate) fn brdf_lut() -> Vec<u8> {
-    brdf_lut_with(BRDF_LUT_SAMPLES)
+    brdf_lut_with(BRDF_LUT_SAMPLES, |index| {
+        (index as f32 + 0.5) / BRDF_LUT_SIZE as f32
+    })
 }
 
-/// Tiered's LUT: the same texels with [`BRDF_LUT_TIERED_SAMPLES`] samples each.
-pub(crate) fn brdf_lut_tiered() -> Vec<u8> {
-    brdf_lut_with(BRDF_LUT_TIERED_SAMPLES)
+/// Tiered's LUT (ADR-0023 amendment 3): [`BRDF_LUT_TIERED_SAMPLES`] samples per texel and the
+/// texel centres on the end points, texel `i` at `i / (size − 1)` on both axes, so
+/// `brdf_lut_sample` in `lighting.glsl` reads 0..=1 with one bilinear fetch. Integrated once
+/// per process, on scoped threads, and kept (a renderer re-created on a settings change
+/// reuses it).
+pub(crate) fn brdf_lut_tiered() -> &'static [u8] {
+    static LUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        brdf_lut_with(BRDF_LUT_TIERED_SAMPLES, |index| {
+            index as f32 / (BRDF_LUT_SIZE - 1) as f32
+        })
+    })
 }
 
-fn brdf_lut_with(samples: u32) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity((BRDF_LUT_SIZE * BRDF_LUT_SIZE * 4) as usize);
-    for row in 0..BRDF_LUT_SIZE {
-        let roughness = (row as f32 + 0.5) / BRDF_LUT_SIZE as f32;
-        for column in 0..BRDF_LUT_SIZE {
-            let n_dot_v = (column as f32 + 0.5) / BRDF_LUT_SIZE as f32;
-            let (scale, bias) = integrate_brdf(n_dot_v, roughness, samples);
-            bytes.extend_from_slice(&moba_assets::f16_from_f32(scale).to_le_bytes());
-            bytes.extend_from_slice(&moba_assets::f16_from_f32(bias).to_le_bytes());
+/// The LUT with `samples` per texel, texel `i` of either axis at `coordinate(i)`; the rows
+/// are integrated in parallel (each texel is independent, so the bytes do not depend on the
+/// thread count).
+fn brdf_lut_with(samples: u32, coordinate: impl Fn(u32) -> f32 + Sync) -> Vec<u8> {
+    let row_bytes = (BRDF_LUT_SIZE * 4) as usize;
+    let mut bytes = vec![0_u8; row_bytes * BRDF_LUT_SIZE as usize];
+    let threads = std::thread::available_parallelism()
+        .map_or(1, core::num::NonZeroUsize::get)
+        .clamp(1, BRDF_LUT_SIZE as usize);
+    let rows_per_thread = (BRDF_LUT_SIZE as usize).div_ceil(threads);
+    let coordinate = &coordinate;
+    std::thread::scope(|scope| {
+        for (chunk, rows) in bytes.chunks_mut(row_bytes * rows_per_thread).enumerate() {
+            scope.spawn(move || {
+                for (offset, row) in rows.chunks_mut(row_bytes).enumerate() {
+                    let row_index = (chunk * rows_per_thread + offset) as u32;
+                    let roughness = coordinate(row_index);
+                    for (column, texel) in row.chunks_mut(4).enumerate() {
+                        let n_dot_v = coordinate(column as u32);
+                        let (scale, bias) = integrate_brdf(n_dot_v, roughness, samples);
+                        texel[..2].copy_from_slice(&moba_assets::f16_from_f32(scale).to_le_bytes());
+                        texel[2..].copy_from_slice(&moba_assets::f16_from_f32(bias).to_le_bytes());
+                    }
+                }
+            });
         }
-    }
+    });
     bytes
 }
 
@@ -1203,10 +1230,12 @@ impl LightingResources {
                 bytes: &[0, 0, 0, 255].repeat(6),
             },
         )?;
-        let lut = if tiered {
+        let compat_lut;
+        let lut: &[u8] = if tiered {
             brdf_lut_tiered()
         } else {
-            brdf_lut()
+            compat_lut = brdf_lut();
+            &compat_lut
         };
         let brdf_lut = texture::upload_raw(
             device,
@@ -1219,7 +1248,7 @@ impl LightingResources {
                 },
                 layers: texture::RawLayers::Plain,
                 levels: &[(0, lut.len())],
-                bytes: &lut,
+                bytes: lut,
             },
         )?;
         let default_ramp = texture::upload_rgba(device, "default-ramp", 1, 1, &[255; 4])?;
@@ -1784,13 +1813,13 @@ mod tests {
             };
             half(0) + half(2)
         };
-        // `brdf_lut_sample` in lighting.glsl: bilinear, clamped in N·V; in roughness past the
-        // last row's centre, extrapolated from the last two rows.
+        // `brdf_lut_sample` in lighting.glsl: one bilinear fetch, texel `i` at `i / (size − 1)`
+        // on both axes.
         let sample = |n_dot_v: f32, roughness: f32| {
-            let p = (n_dot_v * BRDF_LUT_SIZE as f32 - 0.5).clamp(0.0, (size - 1) as f32);
+            let p = n_dot_v.clamp(0.0, 1.0) * (size - 1) as f32;
             let x = (p.floor() as usize).min(size - 2);
             let fx = p - x as f32;
-            let q = (roughness * BRDF_LUT_SIZE as f32 - 0.5).max(0.0);
+            let q = roughness.clamp(0.0, 1.0) * (size - 1) as f32;
             let y = (q.floor() as usize).min(size - 2);
             let fy = q - y as f32;
             let top = texel(x, y) * (1.0 - fx) + texel(x + 1, y) * fx;

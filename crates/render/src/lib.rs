@@ -105,9 +105,9 @@ pub use preset::{
 pub use profiler::{GpuTimings, PassTiming};
 pub use quality::QualityTier;
 pub use renderer::{
-    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, GhostFrame, GhostProbeReport,
-    MAX_UI_IMAGE_SIZE, MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PipelineStats,
-    PushCheck, RenderConfig, Renderer,
+    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, ExerciseStats, GhostFrame,
+    GhostProbeReport, MAX_UI_IMAGE_SIZE, MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport,
+    PipelineStats, PushCheck, RenderConfig, Renderer,
 };
 pub use scene::{
     BoneRange, Camera, ClearRect, MAX_OUTLINE_WIDTH, MeshId, OFFSCREEN_MAX_BONES,

@@ -272,7 +272,11 @@ impl DeviceContext {
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
-            .maintenance4(tiered);
+            .maintenance4(tiered)
+            // N2c: `decal_gbuffer.frag` ends its uncovered pixels with
+            // `OpTerminateInvocation` (ADR-0023 §7a). The feature is required by Vulkan 1.3,
+            // which admission already requires, so it is enabled, not checked.
+            .shader_terminate_invocation(tiered);
         // The tiered required set (ADR-0020 §1e, §3b). Admission checked every bit, so on a
         // tiered device each one is supported; Compat enables none of them, as before.
         let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()

@@ -555,6 +555,13 @@ fn deferred_lighting_from(value: Option<&str>) -> bool {
     !value.is_some_and(|value| value.trim().eq_ignore_ascii_case("off"))
 }
 
+/// `MOBA_TILE_COUNTS=1` reads the deferred lighting's tile counts back for the frame log's
+/// `tiles_standard_avg`, `tiles_extended_avg` and `extended_frames` (ADR-0023 amendment 3);
+/// off by default, since the copy costs GPU time. Read once at startup.
+pub(crate) fn tile_counts() -> bool {
+    std::env::var("MOBA_TILE_COUNTS").is_ok_and(|value| value.trim() == "1")
+}
+
 /// `MOBA_STYLISATION=off`: the map's stylisation (wrap, rim, ramp and painted specular) set
 /// to its neutral values, so a frame shows the plain BRDF (the deferred–forward parity gate,
 /// ADR-0023 gate 2, compares with stylisation off on both paths). Read once.
@@ -1381,9 +1388,14 @@ impl Drop for ClientApp {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join("/");
+            // N2c: what the run lit, so a lane that reads zero is not mistaken for a cheap
+            // one (over every frame rendered, warm-up included).
+            let exercise = renderer.exercise_stats();
+            let per = |sum: u64, frames: u64| sum as f64 / frames.max(1) as f64;
             format!(
                 "{} cull={} cull_candidates={} cull_drawn={} cull_casters={} cull_dropped={} \
-                 terrain_chunks={}/{} lod_instances={lods} ",
+                 terrain_chunks={}/{} lod_instances={lods} paint_decals_avg={:.2} \
+                 tiles_standard_avg={:.1} tiles_extended_avg={:.1} extended_frames={}/{} ",
                 memory_summary(&renderer.memory_stats()),
                 cull.mode,
                 cull.candidates,
@@ -1392,6 +1404,11 @@ impl Drop for ClientApp {
                 cull.dropped,
                 cull.terrain_chunks_drawn,
                 cull.terrain_chunks,
+                per(exercise.paint_decals, exercise.frames),
+                per(exercise.standard_tiles, exercise.lit_frames),
+                per(exercise.extended_tiles, exercise.lit_frames),
+                exercise.extended_frames,
+                exercise.lit_frames,
             )
         });
         // ADR-0021 §6b: the latency back end, who paced the frames, and Reflex's timings.

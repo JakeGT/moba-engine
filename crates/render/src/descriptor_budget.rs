@@ -533,6 +533,30 @@ mod tests {
         ));
     }
 
+    /// N2c's material G-buffer layout (ADR-0023 §6d: set 0 the camera, set 1 the instances,
+    /// set 2 the bindless table, `ScenePass`'s `material_pipeline_layout`) fits every device
+    /// the gate admits to Tiered: the bindless set's 17,408 resources plus the camera block
+    /// and the instance buffers, in each stage they reach.
+    #[test]
+    fn the_material_gbuffer_layout_fits_the_admission_minimums() {
+        let (camera, instances) = crate::passes::scene::buffer_set_layout_bindings();
+        let bindless = crate::bindless::set_layout_bindings();
+        let sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 3] = [&camera, &instances, &bindless];
+        let limits = admission_minimums();
+        assert!(check_tiered("material_gbuffer", &sets, limits).is_ok());
+        for stage in [vk::ShaderStageFlags::VERTEX, vk::ShaderStageFlags::FRAGMENT] {
+            let totals = tiered_totals(&sets, stage);
+            assert!(totals.resources <= limits.per_stage_resources, "{stage:?}");
+            assert!(totals.sampled_images <= limits.per_stage_sampled_images);
+            assert!(totals.samplers <= limits.per_stage_samplers);
+        }
+        // The fragment stage reads the camera block and the bindless set: 17,409 resources.
+        assert_eq!(
+            tiered_totals(&sets, vk::ShaderStageFlags::FRAGMENT).resources,
+            17_408 + 1
+        );
+    }
+
     /// Every stage a binding is visible to is checked, not only vertex, fragment and compute:
     /// `ALL` covers mesh and ray-tracing stages, `ALL_GRAPHICS` covers tessellation and
     /// geometry but not compute, and a mesh-only binding is checked in the mesh stage.

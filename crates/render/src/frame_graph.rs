@@ -528,12 +528,14 @@ pub(crate) fn build(
     capture: bool,
     offscreen: usize,
 ) -> Result<FramePlan, GraphError> {
-    build_variant(spec, capture, offscreen, true)
+    build_variant(spec, capture, offscreen, true, true)
 }
 
 /// Builds and compiles the frame graph for `spec`. Bit `s` of `offscreen` adds the pass that
 /// renders offscreen image `s` this frame; `capture` adds the readback; `haze` runs the heat
-/// haze's two passes (ADR-0019), which a frame without haze on screen only reserves. Every
+/// haze's two passes (ADR-0019), which a frame without haze on screen only reserves; `paint`
+/// runs the G-buffer decals' two passes (N2c, ADR-0023 §7a), which a frame without a `Paint`
+/// decal only reserves (its G-buffer pass then draws everything, as N2b's). Every
 /// variant of one renderer passes the same `spec` (shadows, the fog of war's texture edge,
 /// the post chain), so they share transients.
 ///
@@ -546,6 +548,7 @@ pub(crate) fn build_variant(
     capture: bool,
     offscreen: usize,
     haze: bool,
+    paint: bool,
 ) -> Result<FramePlan, GraphError> {
     let render = ImageSize::Render { shift: 0 };
     let half = ImageSize::Render { shift: 1 };
@@ -953,12 +956,18 @@ pub(crate) fn build_variant(
             pass
         };
         // N2c (ADR-0023 §7a): the `Paint` decals between the receivers (the pass above draws
-        // the terrain alone) and the rest, which loads every target and draws the rest.
+        // the terrain alone) and the rest, which loads every target and draws the rest. The
+        // decals attach the depth read-only, test their back faces against it and sample it
+        // in the same layout. Without a `Paint` decal both passes are only reserved and the
+        // pass above draws everything: the same transients, no split, no barriers.
         if let Some(temporal) = temporal.filter(|_| spec.has_gbuffer_decals()) {
-            let _ = graph
+            let decals = graph
                 .pass("gbuffer_decals", PassKind::GBufferDecals)
                 .access(temporal.gbuffer[0], Access::ColorReadWrite)
-                .access(depth, Access::SampledFragment);
+                .access(depth, Access::DepthReadSampled);
+            if !paint {
+                let _ = decals.reserved();
+            }
             let rest = graph
                 .pass("gbuffer_rest", PassKind::GBufferRest)
                 .access(bones, Access::VertexStorageRead)
@@ -971,7 +980,10 @@ pub(crate) fn build_variant(
                 Some(OutlineIdResources { ids, .. }) => rest.access(ids, Access::ColorReadWrite),
                 None => rest,
             };
-            let _ = rest.access(hdr, Access::ColorReadWrite);
+            let rest = rest.access(hdr, Access::ColorReadWrite);
+            if !paint {
+                let _ = rest.reserved();
+            }
         }
     }
     if let Some(temporal) = temporal {
@@ -2401,7 +2413,7 @@ mod tests {
                 for (capture, offscreen) in [(false, 0), (true, OFFSCREEN_VARIANTS - 1)] {
                     // Without haze on screen: the same transients, neither pass, and the
                     // particles straight after the water (or the scene).
-                    let idle = build_variant(&spec, capture, offscreen, false)
+                    let idle = build_variant(&spec, capture, offscreen, false, true)
                         .expect("the hazeless variant compiles");
                     assert!(idle.graph.shares_transients_with(&plain.graph), "{spec:?}");
                     assert_eq!(idle.graph.culled(), [] as [&str; 0]);
@@ -2507,11 +2519,27 @@ mod tests {
                 for haze in [false, true] {
                     for capture in [false, true] {
                         for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
-                            let frame = build_variant(&spec, capture, offscreen, haze)
-                                .expect("variant compiles");
-                            assert!(frame.graph.shares_transients_with(&base.graph));
-                            assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
-                            largest = largest.max(frame.graph.passes().len());
+                            for paint in [false, true] {
+                                let frame = build_variant(&spec, capture, offscreen, haze, paint)
+                                    .expect("variant compiles");
+                                assert!(frame.graph.shares_transients_with(&base.graph));
+                                assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
+                                largest = largest.max(frame.graph.passes().len());
+                                // N2c (§7a): without a `Paint` decal the split is reserved,
+                                // so the frame records one G-buffer pass.
+                                let frame_kinds = kinds(&frame);
+                                let split = gbuffer_decals && paint;
+                                assert_eq!(
+                                    frame_kinds.contains(&PassKind::GBufferDecals),
+                                    split,
+                                    "{spec:?}"
+                                );
+                                assert_eq!(
+                                    frame_kinds.contains(&PassKind::GBufferRest),
+                                    split,
+                                    "{spec:?}"
+                                );
+                            }
                         }
                     }
                 }
@@ -2570,7 +2598,7 @@ mod tests {
                     assert_eq!(layout(decals, gb0), L::COLOR_ATTACHMENT_OPTIMAL);
                     assert_eq!(
                         layout(decals, base.resources.depth),
-                        L::SHADER_READ_ONLY_OPTIMAL
+                        L::DEPTH_STENCIL_READ_ONLY_OPTIMAL
                     );
                     assert_eq!(
                         layout(rest, base.resources.depth),
@@ -2695,7 +2723,7 @@ mod tests {
             for haze in [false, true] {
                 for capture in [false, true] {
                     for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
-                        let frame = build_variant(&spec, capture, offscreen, haze)
+                        let frame = build_variant(&spec, capture, offscreen, haze, true)
                             .expect("variant compiles");
                         assert!(frame.graph.shares_transients_with(&base.graph), "{spec:?}");
                         assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
@@ -2734,7 +2762,7 @@ mod tests {
             for haze in [false, true] {
                 for capture in [false, true] {
                     for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
-                        let frame = build_variant(&spec, capture, offscreen, haze)
+                        let frame = build_variant(&spec, capture, offscreen, haze, true)
                             .expect("variant compiles");
                         assert!(frame.graph.shares_transients_with(&base.graph), "{spec:?}");
                         assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");

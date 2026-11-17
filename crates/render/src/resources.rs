@@ -395,6 +395,11 @@ impl GpuImage {
         srgb: vk::Format,
         usage: vk::ImageUsageFlags,
     ) -> RenderResult<Self> {
+        debug_assert_eq!(
+            srgb_twin(format),
+            Some(srgb),
+            "{name}: the sRGB view must be the UNORM format's twin"
+        );
         Self::create_with(
             device,
             allocator,
@@ -554,10 +559,11 @@ impl GpuImage {
         self.view
     }
 
-    /// The sRGB view of an image made with [`Self::with_srgb_view`]; its only view otherwise.
+    /// The sRGB view of an image made with [`Self::with_srgb_view`]; `None` for any other
+    /// image (never its UNORM view: blending through it would be in the wrong space).
     #[inline]
-    pub(crate) fn srgb_view(&self) -> vk::ImageView {
-        self.srgb_view.unwrap_or(self.view)
+    pub(crate) fn srgb_view(&self) -> Option<vk::ImageView> {
+        self.srgb_view
     }
 
     /// Device memory this image holds: its allocation's size.
@@ -954,5 +960,14 @@ impl Drop for CommandPool {
         // SAFETY: the pool belongs to this device, allocates no external children and is
         // destroyed once.
         unsafe { self.device.destroy_command_pool(self.pool, None) };
+    }
+}
+
+/// The `*_SRGB` format with `format`'s layout, for the UNORM formats that have one in use.
+pub(crate) const fn srgb_twin(format: vk::Format) -> Option<vk::Format> {
+    match format {
+        vk::Format::R8G8B8A8_UNORM => Some(vk::Format::R8G8B8A8_SRGB),
+        vk::Format::B8G8R8A8_UNORM => Some(vk::Format::B8G8R8A8_SRGB),
+        _ => None,
     }
 }

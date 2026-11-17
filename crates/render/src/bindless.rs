@@ -206,8 +206,8 @@ pub(crate) struct SamplerKey {
 pub(crate) const PALETTE_LEN: u32 = 12;
 /// The material textures' sampler (N2c, ADR-0023 §6d): `Materials`' own (repeat, trilinear,
 /// the quality tier's anisotropy, which the palette's device-maximum anisotropic entry is
-/// not), written by [`BindlessTable::set_material_sampler`]. `MATERIAL_SAMPLER` in
-/// `shaders/slang/unit_material_gbuffer.slang`.
+/// not), written by [`BindlessTable::set_material_sampler`]. The shader's `MATERIAL_SAMPLER`
+/// (`shaders/slang/unit_material_gbuffer.slang`) is specialisation constant 0, set from this.
 pub(crate) const MATERIAL_SAMPLER: SamplerHandle = SamplerHandle(PALETTE_LEN);
 /// The non-comparison entries are slots `0..NON_COMPARE_SAMPLERS`.
 pub(crate) const NON_COMPARE_SAMPLERS: u32 = 6;

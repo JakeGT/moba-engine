@@ -146,7 +146,11 @@ the semver check):
     lobes in `deferred_light`'s extended tiles (`include/shading_models.glsl`); `FOLIAGE` and
     `TRANSMISSIVE_FALLBACK` moved to the standard tiles; `UNLIT` is the emissive alone. Every
     Tiered lighting module adds multiscatter energy compensation and the material's dielectric
-    F0, with a 1024-sample split-sum LUT and an extrapolating fetch (white furnace within 2 %).
+    F0, with a 1024-sample split-sum LUT whose texels sit on the end points, read with one
+    fetch and integrated once per process on scoped threads (white furnace within 2 %). Each
+    model's light-invariant terms are prepared once per pixel, and the thin film's Fresnel is
+    evaluated once, at N·V. `ior` and `specular` shape only `standard`'s and `transmissive`'s
+    F0 (0.04 elsewhere, on every path); the anisotropy follows the mesh's tangent.
   - **Material table and bindless materials:** textured units are written into the G-buffer by
     `unit_material_gbuffer.slang`, the first Slang fragment stage, which reads 64-byte
     `MaterialRecord`s by device address and bindless textures; a reflection test pins the
@@ -159,14 +163,19 @@ the semver check):
     `materials/` against both evaluators and reports `material_models`.
     `content/materials/samples/` has one material per model, and `MOBA_MATERIAL_SHEET=samples`
     draws them as a sphere sheet.
-  - **G-buffer decals:** the G-buffer pass is split into `prepass` (the terrain),
-    `gbuffer_decals` (`Paint` decals blended into `gb0` from the sampled depth) and
-    `gbuffer_rest`; new frame-log lanes `gpu_gbuffer_decals` and `gpu_gbuffer_rest`.
+  - **G-buffer decals:** on frames with a `Paint` decal the G-buffer pass is split into
+    `prepass` (the terrain), `gbuffer_decals` (the decals' back faces against the read-only
+    depth, blended into `gb0`) and `gbuffer_rest`; frames without one keep N2b's single pass.
+    New frame-log lanes `gpu_gbuffer_decals` and `gpu_gbuffer_rest`, the field
+    `paint_decals_avg`, and with `MOBA_TILE_COUNTS=1` (off by default: the read-back costs
+    about 0.005 ms of GPU) `tiles_standard_avg`, `tiles_extended_avg` and `extended_frames`.
   - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
     (worst pixel 3, 3, 3 and 6/255 locally); Compat is byte-identical (its images; `unit_textured.frag`'s SPIR-V reads the
-    emissive mask, which only the N2c samples carry). On the RTX 5070 Ti the frame is
-    1.040–1.077× N1's forward frame (gate ≤ 1.10×; GPU span up to 1.091×) and 1.012–1.026×
-    N2b's, after `FOLIAGE` moved to the standard tiles (1.108× at Low before).
+    emissive mask, which only the N2c samples carry). On the RTX 5070 Ti the teamfight frame is
+    1.036–1.073× N1's forward frame (gate ≤ 1.10× on `gpu_total`; GPU span up to 1.086×) and
+    1.010–1.020× N2b's, after `FOLIAGE` moved to the standard tiles (1.108× at Low before); the
+    material sheet, the only scene with extended-model pixels, is 1.102–1.117× N1's frame
+    without the spheres, and the headroom left for N2d–N2f is budgeted in amendment 3.
 - **Deferred lighting for `STANDARD` on Tiered (ADR-0023 N2b and amendment 2;
   [perf/0036](docs/perf/0036-n2b-deferred.md)). The `scene` pass leaves the tiered frame;
   Compat is byte-identical (its images; every Compat SPIR-V module but `sky.frag`, whose body

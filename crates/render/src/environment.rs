@@ -540,6 +540,15 @@ impl DecalUpload {
     pub(crate) fn count(&self) -> usize {
         self.header.counts[0] as usize
     }
+
+    /// `Paint` decals in the upload: the ones the G-buffer decal pass draws (N2c, ADR-0023
+    /// §7a). Without any, the deferred frame runs one G-buffer pass.
+    pub(crate) fn paint_count(&self) -> usize {
+        self.decals[..self.count().min(MAX_DECALS)]
+            .iter()
+            .filter(|decal| (decal.params[1] as u32) & FLAG_GLOW == 0)
+            .count()
+    }
 }
 
 fn gpu_decal(decal: &Decal, floor: f32) -> GpuDecal {
@@ -1330,6 +1339,23 @@ mod tests {
         };
         let _ = upload.build(&[ally], 8, 0.35, None);
         assert!((upload.decals[0].color[3] - 0.05).abs() < 1e-6);
+    }
+
+    /// `paint_count` counts the records the G-buffer decal pass draws: not the glow ones.
+    #[test]
+    fn paint_count_skips_glow_decals() {
+        let mut upload = DecalUpload::boxed();
+        let decals = [
+            disc(0.0, DecalRole::Cosmetic).with_style(DecalStyle::Paint),
+            disc(1.0, DecalRole::EnemyTelegraph),
+            disc(2.0, DecalRole::Ally).with_style(DecalStyle::Paint),
+        ];
+        let _ = upload.build(&decals, 8, 0.35, None);
+        assert_eq!((upload.count(), upload.paint_count()), (3, 2));
+        let _ = upload.build(&decals[1..2], 8, 0.35, None);
+        assert_eq!((upload.count(), upload.paint_count()), (1, 0));
+        let _ = upload.build(&[], 8, 0.35, None);
+        assert_eq!(upload.paint_count(), 0);
     }
 
     #[test]

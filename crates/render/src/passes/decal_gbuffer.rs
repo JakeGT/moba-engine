@@ -6,7 +6,11 @@
 //! and blends the decal's colour into `gb0` through its sRGB view (`decal_gbuffer.frag`), so the
 //! blend is linear, as the forward terrain's `apply_paint_decals`; the rest (`gbuffer_rest`:
 //! units, walls, props, minions, foliage, sky) is drawn after it and overwrites it. The depth
-//! is sampled, not attached: the fragment rebuilds the ground from it, and nothing is tested.
+//! is attached read-only (`DEPTH_STENCIL_READ_ONLY_OPTIMAL`, §7a) and sampled in the same
+//! layout: the boxes draw their back faces only (front faces culled, so a camera inside a box
+//! still draws it), depth-tested so a back face in front of the ground (a box wholly above or
+//! beside it, or the sky) is rejected before shading, and the fragment rebuilds the ground
+//! from the sampled depth. Glow decals' boxes collapse in the vertex stage.
 //!
 //! Set 0 is the scene's camera set; set 1 is this pass's: binding 0 the depth (sampled image),
 //! binding 1 the frame's decal buffer (the lighting resources', as the overlay binds it).
@@ -33,21 +37,25 @@ pub(crate) struct DecalGBufferPass {
 pub(crate) struct DecalGBufferTarget {
     /// `gb0`'s sRGB view, loaded and stored.
     pub(crate) gb0_srgb: vk::ImageView,
+    /// The receivers' depth, attached read-only (also bound sampled, [`DecalGBufferPass::bind_depth`]).
+    pub(crate) depth: vk::ImageView,
     pub(crate) extent: vk::Extent2D,
     /// The main view's camera set for this frame.
     pub(crate) camera: vk::DescriptorSet,
-    /// Decals in this frame's buffer (paint and glow; the glow ones are discarded).
+    /// Decals in this frame's buffer (paint and glow; the glow ones collapse in the vertex
+    /// stage).
     pub(crate) decals: u32,
 }
 
 impl DecalGBufferPass {
     /// Creates the pass; `decals[f]` is frame slot `f`'s decal buffer (bound once: the
-    /// buffers live as long as the renderer).
+    /// buffers live as long as the renderer); `depth_format` is the main depth's.
     pub(crate) fn new(
         device: &DeviceContext,
         shaders: &ShaderSource,
         camera_layout: vk::DescriptorSetLayout,
         decals: &[vk::Buffer],
+        depth_format: vk::Format,
     ) -> RenderResult<Self> {
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
@@ -97,7 +105,7 @@ impl DecalGBufferPass {
             &[camera_layout, set_layout.handle()],
             &[],
         )?;
-        let pipeline = build_pipeline(device, shaders, pipeline_layout.handle())?;
+        let pipeline = build_pipeline(device, shaders, pipeline_layout.handle(), depth_format)?;
         Ok(Self {
             device: device.device.clone(),
             sets,
@@ -114,7 +122,7 @@ impl DecalGBufferPass {
         for &set in &self.sets {
             let info = [vk::DescriptorImageInfo::default()
                 .image_view(depth)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)];
             let write = vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(0)
@@ -143,13 +151,19 @@ impl DecalGBufferPass {
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::LOAD)
             .store_op(vk::AttachmentStoreOp::STORE);
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(target.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::NONE);
         let render_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: target.extent,
             })
             .layer_count(1)
-            .color_attachments(core::slice::from_ref(&color));
+            .color_attachments(core::slice::from_ref(&color))
+            .depth_attachment(&depth);
         device.cmd_begin_rendering(command_buffer, &render_info);
         if target.decals > 0 {
             super::set_viewport_scissor(
@@ -195,6 +209,7 @@ fn build_pipeline(
     device: &DeviceContext,
     shaders: &ShaderSource,
     layout: vk::PipelineLayout,
+    depth_format: vk::Format,
 ) -> RenderResult<GraphicsPipeline> {
     let vertex = shaders.module(device, "decal_gbuffer.vert")?;
     let fragment = shaders.module(device, "decal_gbuffer.frag")?;
@@ -214,10 +229,13 @@ fn build_pipeline(
             fragment: Some(fragment.handle()),
             fragment_specialization: None,
             colors: &colors,
-            depth_format: vk::Format::UNDEFINED,
+            depth_format,
             depth_write: false,
             samples: vk::SampleCountFlags::TYPE_1,
-            depth_compare: vk::CompareOp::ALWAYS,
+            // Reversed-Z (the deferred frame is Tiered's): a back face at or behind the
+            // ground passes; one in front of it, whose box cannot hold the ground, fails.
+            depth_compare: vk::CompareOp::LESS_OR_EQUAL,
+            cull_mode: vk::CullModeFlags::FRONT,
         },
     )
     .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))

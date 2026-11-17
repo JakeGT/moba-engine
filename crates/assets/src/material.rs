@@ -63,6 +63,12 @@ pub const MAX_MATERIAL_BYTES: u64 = 4 * 1024;
 /// material whose `ior` and `specular` give more is refused.
 pub const MAX_DIELECTRIC_F0: f32 = 0.16;
 
+/// The default `ior` (glTF's 1.5).
+const DEFAULT_IOR: f32 = 1.5;
+/// IOR 1.5's F0 against air, `((1.5 − 1)/(1.5 + 1))²`: the base layer of every model but
+/// `standard` and `transmissive` (ADR-0023 amendment 3).
+pub const DEFAULT_DIELECTRIC_F0: f32 = 0.04;
+
 /// The thin-film thickness range every material's film lies in, in nanometres (ADR-0023 §6c;
 /// `KHR_materials_iridescence`'s defaults). The G-buffer stores a thickness in this range.
 pub const THIN_FILM_THICKNESS_NM: (f32, f32) = (100.0, 400.0);
@@ -506,7 +512,7 @@ impl Default for MaterialDesc {
             specular: 1.0,
             specular_tint: [1.0; 3],
             model: ModelParams::Standard,
-            ior: 1.5,
+            ior: DEFAULT_IOR,
             dust: 0.0,
             transmission: None,
             compat: CompatOverride::default(),
@@ -1169,11 +1175,35 @@ impl MaterialDesc {
         self.model.model()
     }
 
-    /// The dielectric F0 the Tiered path shades with (ADR-0023 §6b):
+    /// The dielectric F0 of `ior` and `specular` (ADR-0023 §6b):
     /// `((ior − 1)/(ior + 1))² × specular`, at most [`MAX_DIELECTRIC_F0`]. 0.04 by default.
     #[must_use]
     pub fn dielectric_f0(&self) -> f32 {
         (ior_to_f0(self.ior) * self.specular).min(MAX_DIELECTRIC_F0)
+    }
+
+    /// Whether the model's base layer takes its dielectric F0 from `ior` and `specular`:
+    /// `standard` and `transmissive`, whose G-buffer channel stores it. Every other model's
+    /// base is IOR 1.5's 0.04 on every path (ADR-0023 amendment 3), and `content-check`
+    /// refuses an `ior` or `specular` on it.
+    #[must_use]
+    pub const fn model_takes_ior(&self) -> bool {
+        matches!(
+            self.model,
+            ModelParams::Standard | ModelParams::Transmissive
+        )
+    }
+
+    /// The dielectric F0 the Tiered paths shade the base layer with: [`Self::dielectric_f0`]
+    /// where [`Self::model_takes_ior`], 0.04 (IOR 1.5) otherwise. The deferred lighting, the
+    /// forward Tiered frame and the thin film's Compat tint all use this.
+    #[must_use]
+    pub fn model_dielectric_f0(&self) -> f32 {
+        if self.model_takes_ior() {
+            self.dielectric_f0()
+        } else {
+            DEFAULT_DIELECTRIC_F0
+        }
     }
 
     /// The Compat fallback (ADR-0023 §10): the model's collapse rule to today's forward
@@ -1213,7 +1243,10 @@ impl MaterialDesc {
                 thickness_max, ior, ..
             } => {
                 // The film over the base at normal incidence, as a tint of the base colour
-                // (the film's thickness without a model texture is its maximum).
+                // (the film's thickness without a model texture is its maximum). Only a
+                // metal's base colour is its F0: a dielectric's albedo is diffuse, which the
+                // film does not colour, so the tint is mixed in by `metallic` (otherwise
+                // 0.04's ratio would scale the albedo several-fold and clip it to white).
                 let f0 = self.base_f0_rgb();
                 let film = thin_film_reflectance(1.0, ior, thickness_max, f0);
                 for channel in 0..3 {
@@ -1222,6 +1255,7 @@ impl MaterialDesc {
                     } else {
                         1.0
                     };
+                    let tint = 1.0 + (tint - 1.0) * self.metallic;
                     out.base_color_factor[channel] =
                         (out.base_color_factor[channel] * tint).clamp(0.0, 1.0);
                 }
@@ -1258,8 +1292,11 @@ impl MaterialDesc {
     ///
     /// - every collapsed value is finite and in its key's range (base colour, metallic and
     ///   roughness 0..=1, emissive 0..=16), `[compat]` overrides included;
-    /// - an `unlit` material emits something on both evaluators (an emissive factor or, on
-    ///   Tiered, an emissive texture, and a Compat emissive), since both draw nothing else;
+    /// - an `unlit` material emits something on both evaluators (a non-zero `emissive`, which
+    ///   Tiered multiplies by any emissive texture, and a non-zero Compat emissive), since
+    ///   both draw nothing else;
+    /// - `ior` and `specular` are at their defaults (1.5 and 1) on every model but `standard`
+    ///   and `transmissive` ([`Self::model_takes_ior`]): the others' base is F0 0.04;
     /// - an `emissive_texture` with a non-zero `emissive` comes with the mask or a
     ///   `[compat] emissive`: Compat ignores the texture and would glow over the whole
     ///   surface (an `unlit` material is all emissive, so it may);
@@ -1288,6 +1325,12 @@ impl MaterialDesc {
         }
         let lit = |emissive: [f32; 3]| emissive.iter().any(|&value| value > 0.0);
         if self.shading_model() == ShadingModel::Unlit {
+            if !lit(self.emissive) {
+                return Err(MaterialError::Invalid(
+                    "an unlit material draws its emissive alone: its emissive is zero, so it is \
+                     black on Tiered",
+                ));
+            }
             if !lit(compat.emissive) {
                 return Err(MaterialError::Invalid(
                     "an unlit material draws its emissive alone: Compat's emissive is zero, so it \
@@ -1299,6 +1342,15 @@ impl MaterialDesc {
                     "model_texture is never read by an unlit material",
                 ));
             }
+        }
+        if !self.model_takes_ior()
+            && ((self.ior - DEFAULT_IOR).abs() > f32::EPSILON
+                || (self.specular - 1.0).abs() > f32::EPSILON)
+        {
+            return Err(MaterialError::Invalid(
+                "ior and specular shape only a standard or transmissive material's F0: every \
+                 other model's base layer is IOR 1.5 (F0 0.04) on Tiered",
+            ));
         }
         if self.shading_model() != ShadingModel::Unlit
             && self.texture(TextureSlot::Emissive).is_some()
@@ -1316,9 +1368,9 @@ impl MaterialDesc {
     }
 
     /// The base layer's F0 per channel from the factors (no texture): the base colour for a
-    /// metal, the dielectric F0 otherwise, mixed by `metallic`.
+    /// metal, the model's dielectric F0 otherwise, mixed by `metallic`.
     fn base_f0_rgb(&self) -> [f32; 3] {
-        let dielectric = self.dielectric_f0();
+        let dielectric = self.model_dielectric_f0();
         core::array::from_fn(|channel| {
             dielectric + (self.base_color_factor[channel] - dielectric) * self.metallic
         })
@@ -1342,8 +1394,12 @@ fn schlick(f0: f32, cosine: f32) -> f32 {
 /// `cos_theta`, in linear Rec. 709 (Belcour and Barla 2017, "A Practical Extension to
 /// Microfacet Theory for the Modeling of Varying Iridescence": the Airy sum to second order
 /// with the CIE sensitivities as Gaussians in Fourier space; the form
-/// `KHR_materials_iridescence` specifies). The CPU twin of `thin_film_fresnel` in
+/// `KHR_materials_iridescence` specifies). The CPU twin of `model_thin_film_fresnel` in
 /// `shaders/include/shading_models.glsl`; the Compat fallback uses it at normal incidence.
+///
+/// Adapted from the Khronos glTF Sample Viewer's `iridescence.glsl` (Copyright The Khronos
+/// Group Inc., Apache License 2.0; see `THIRD_PARTY.md`), as are `sensitivity` and
+/// `ior_to_f0_between`; changed: ported to Rust, per channel.
 #[must_use]
 #[allow(clippy::many_single_char_names)] // The paper's names.
 pub fn thin_film_reflectance(
@@ -1786,6 +1842,79 @@ roughness = 0.6
         assert!(
             check("emissive_texture = \"e\"", false).is_ok(),
             "no emissive factor"
+        );
+    }
+
+    /// An `unlit` material must emit on both evaluators: a Compat emissive alone (from
+    /// `[compat]`) leaves it black on Tiered, which draws its own `emissive`.
+    #[test]
+    fn unlit_emits_on_both_evaluators() {
+        let base = "shader = \"textured\"\nbase_color = \"x\"\nmodel = \"unlit\"\n";
+        let check = |extra: &str| {
+            MaterialDesc::parse(&format!("{base}{extra}\n"))
+                .expect(extra)
+                .check_evaluators(false)
+        };
+        let error = check("[compat]\nemissive = [1, 1, 1]").expect_err("black on Tiered");
+        assert!(error.to_string().contains("Tiered"), "{error}");
+        let error = check("emissive = [1, 1, 1]\n[compat]\nemissive = [0, 0, 0]")
+            .expect_err("black on Compat");
+        assert!(error.to_string().contains("Compat"), "{error}");
+        assert!(check("emissive = [1, 1, 1]").is_ok());
+    }
+
+    /// `ior` and `specular` shape only `standard`'s and `transmissive`'s F0: every other model's
+    /// base is 0.04 on every path, so `content-check` refuses them there, and the Tiered F0
+    /// (`model_dielectric_f0`) and the thin film's Compat tint use 0.04.
+    #[test]
+    fn ior_and_specular_apply_to_standard_and_transmissive_only() {
+        let base = "shader = \"textured\"\nbase_color = \"x\"\n";
+        let parse = |extra: &str| MaterialDesc::parse(&format!("{base}{extra}\n")).expect(extra);
+        for model in ShadingModel::ALL {
+            let name = model.name();
+            let emissive = if *model == ShadingModel::Unlit {
+                "\nemissive = [1, 1, 1]"
+            } else {
+                ""
+            };
+            let plain = parse(&format!("model = \"{name}\"{emissive}"));
+            for key in ["ior = 1.8", "specular = 0.5"] {
+                let desc = parse(&format!("model = \"{name}\"{emissive}\n{key}"));
+                let takes = matches!(model, ShadingModel::Standard | ShadingModel::Transmissive);
+                assert_eq!(desc.model_takes_ior(), takes, "{name}");
+                assert_eq!(desc.check_evaluators(false).is_ok(), takes, "{name} {key}");
+                if takes {
+                    assert!((desc.model_dielectric_f0() - desc.dielectric_f0()).abs() < 1e-7);
+                } else {
+                    assert!((desc.model_dielectric_f0() - DEFAULT_DIELECTRIC_F0).abs() < 1e-7);
+                }
+            }
+            assert!(
+                (plain.dielectric_f0() - DEFAULT_DIELECTRIC_F0).abs() < 1e-6,
+                "IOR 1.5's F0 is 0.04"
+            );
+        }
+    }
+
+    /// The thin film's Compat tint colours a metal's base colour (its F0) only: on a
+    /// dielectric it is mixed out by `metallic`, so 0.04's ratio cannot clip the albedo white.
+    #[test]
+    fn thin_film_tints_metals_not_dielectrics() {
+        let base = "shader = \"textured\"\nbase_color = \"x\"\n\
+                    base_color_factor = [0.4, 0.4, 0.4, 1]\nmodel = \"thin_film\"\n";
+        let dielectric = MaterialDesc::parse(&format!("{base}metallic = 0\n"))
+            .expect("dielectric")
+            .compat_fallback();
+        assert_eq!(dielectric.base_color_factor, [0.4, 0.4, 0.4, 1.0]);
+        let metal = MaterialDesc::parse(&format!("{base}metallic = 1\n"))
+            .expect("metal")
+            .compat_fallback();
+        assert_ne!(metal.base_color_factor, [0.4, 0.4, 0.4, 1.0]);
+        assert!(
+            metal
+                .base_color_factor
+                .iter()
+                .all(|&value| (0.0..=1.0).contains(&value))
         );
     }
 

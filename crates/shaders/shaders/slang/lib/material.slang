@@ -6,10 +6,14 @@
 //
 // Textures are bindless handles (`BindlessTable`, ADR-0020 §3a), two u16 per word. The model
 // word packs the model data as three UNORM8 G-buffer channels (§6c: what `gb2.rgb` stores, the
-// material AO at 1 where the model has an AO channel), the model ID and four flag bits.
+// material AO at 1 where the model has an AO channel), the model ID and four flag bits: the
+// emissive mask, and whether the emissive and the model textures are bound (unbound, they are
+// the 1×1 white defaults, so the stage skips their samples).
 module material;
 
 public static const uint MATERIAL_FLAG_EMISSIVE_MASK = 1; // metallic_roughness.b masks emissive
+public static const uint MATERIAL_FLAG_EMISSIVE_TEXTURE = 2; // an emissive texture is bound
+public static const uint MATERIAL_FLAG_MODEL_TEXTURE = 4; // a model texture is bound
 
 public struct MaterialRecord
 {

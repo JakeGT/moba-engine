@@ -1373,13 +1373,13 @@ amendment that names C1's consequence.
   | Key | Range (default) | Meaning |
   |---|---|---|
   | `model` | one of §6c's eight names, `thin_film` and `transmissive` spelled so (`standard`) | the shading model |
-  | `ior` | 1..=2.5 (1.5) | dielectric F0 = `((ior − 1)/(ior + 1))² × specular`; above 0.16 is an error |
+  | `ior` | 1..=2.5 (1.5) | `standard` and `transmissive` only: dielectric F0 = `((ior − 1)/(ior + 1))² × specular` on Tiered, above 0.16 an error; every other model's base is F0 0.04 on every path, and a non-default `ior` or `specular` on it is an error (item 24) |
   | `dust` | 0..=1 (0) | world-space dust on up-facing surfaces, Tiered only |
   | `emissive_texture` | a texture name | full-colour emissive, sRGB `bc7-srgb`/`rgba8-srgb`, times `emissive`, Tiered only |
-  | `model_texture` | a texture name | linear `bc7`/`rgba8`; R, G and B scale the model's three data channels per texel (thin film: R picks the thickness between min and max), Tiered only |
+  | `model_texture` | a texture name | linear `bc7`/`rgba8`; R, G and B scale the model's data channels per texel, the AO being G on `standard`, `transmissive` and `foliage` and B on `clearcoat` and `anisotropic` (`sheen` has no AO channel); thin film: R picks the thickness between min and max, G scales the film's IOR, B is the AO (item 27); Tiered only |
   | `[clearcoat]` | `weight` 0..=1 (1), `roughness` 0..=1 (0) | `KHR_materials_clearcoat` |
   | `[sheen]` | `weight` 0..=1 (1), `roughness` 0..=1 (0.5), `tint` 0..=1 (0 white, 1 base colour) | `KHR_materials_sheen` |
-  | `[anisotropic]` | `strength` 0..=1 (0.5), `rotation` −π..=π rad (0) | `KHR_materials_anisotropy`, angle in the normal's basis |
+  | `[anisotropic]` | `strength` 0..=1 (0.5), `rotation` −π..=π rad (0) | `KHR_materials_anisotropy`: the mesh's tangent turned by `rotation` about the normal (item 26) |
   | `[thin_film]` | `thickness_min`, `thickness_max` 100..=400 nm (100, 400; max ≥ min), `ior` 1..=2 (1.3) | `KHR_materials_iridescence` |
   | `[foliage]` | `translucency` 0..=1 (0.35) | `KHR_materials_diffuse_transmission` |
   | `[transmission]` | `transmission` 0..=1 (1), `thickness` 0..=10 m (0), `attenuation_color` 0..=1 (white), `attenuation_distance` 0.001..=1000 m (infinite) | `model = "transmissive"` only; parsed now, drawn by N2f |
@@ -1398,17 +1398,21 @@ amendment that names C1's consequence.
   | `standard`, `sheen`, `foliage`, `transmissive` | the base as it is (`transmissive`: opaque, with the emissive mask) |
   | `clearcoat` | roughness `mix(base, coat, 0.5 × weight)` |
   | `anisotropic` | isotropic GGX at `sqrt((α + α_t) / 2)`, `α_t = mix(α, 1, strength²)` |
-  | `thin_film` | base colour × the film's Fresnel at normal incidence (at `thickness_max`) over its F0, per channel, clamped to 0..=1 |
+  | `thin_film` | base colour × `1 + (t − 1) × metallic`, where `t` is the film's Fresnel at normal incidence (at `thickness_max`) over the base's F0, per channel, clamped to 0..=1: only a metal's base colour is its F0 |
   | `unlit` | base colour 0, metallic 0, painted specular and rim 0, the emissive |
 
 - **`content-check` rules** (both evaluators, gate 8): the collapsed values are finite and in
-  range; an `unlit` material has a non-zero Compat emissive and no `model_texture`; an
+  range; an `unlit` material has a non-zero `emissive` (Tiered's) and a non-zero Compat
+  emissive, and no `model_texture`; `ior` and `specular` keep their defaults (1.5, 1) on every
+  model but `standard` and `transmissive`; an
   `emissive_texture` with a non-zero `emissive` on a lit model has the mask or a
   `[compat] emissive`. Every descriptor under `materials/` and one level of subdirectories is
   checked, named by a unit or not (`moba_assets::check_material_dir`). The report counts the
   units' materials per model: text `models     standard 1`, JSON `"material_models"`.
 - **The record and the table** (Tiered only): `MaterialRecord`, 64 bytes, as
-  `shaders/slang/lib/material.slang`; 64 records (`MAX_MATERIALS`), host-written at load.
+  `shaders/slang/lib/material.slang`; 64 records (`MAX_MATERIALS`), host-written at load. The
+  model word's flags (bits 28–31) are the emissive mask (1), a bound emissive texture (2) and a
+  bound model texture (4).
 
 **Items.**
 
@@ -1425,7 +1429,8 @@ amendment that names C1's consequence.
    move Compat SPIR-V for every textured unit. C1 adds it.
 4. **`specular` is reused.** It is ADR-0011's painted-specular scale on Compat and
    `KHR_materials_specular`'s factor in Tiered's F0 (§6b): one key, as §6f lists it. Content
-   that sets it for the painted highlight also scales its Tiered F0.
+   that sets it for the painted highlight also scales its Tiered F0. Only `standard` and
+   `transmissive` may set it (item 24).
 5. **`deferred_light` stays GLSL** (§6d's `deferred_light.slang` with `IShadingModel` generics
    is not built, as amendment 2 item 1 began). The models past `STANDARD` are
    `include/shading_models.glsl`, compiled only into `deferred_light_extended.comp`
@@ -1447,23 +1452,32 @@ amendment that names C1's consequence.
    material belongs to a model today (item 20's gap). Textures are `BindlessTable` handles in
    set 2 of the stage's layout (samplers at binding 0, textures at binding 2). The material
    sampler is bindless sampler slot 12 (`MATERIAL_SAMPLER`, after the 12-entry palette): the
-   Compat `Materials` sampler (repeat, trilinear, the tier's anisotropy). Empty slots point at
-   the default textures (white, flat, metallic 0 / roughness 1, full mask, white emissive and
-   model data). Only the textured units read the table.
+   Compat `Materials` sampler (repeat, trilinear, the tier's anisotropy). The stage takes the
+   slot and the table's length as specialisation constants 0 and 1, which the renderer sets
+   from `bindless::MATERIAL_SAMPLER` and `MAX_MATERIALS` (a test checks both are decorated), and
+   clamps the draw's index to the table. Empty slots point at the default textures (white, flat,
+   metallic 0 / roughness 1, full mask, white emissive and model data); the stage skips the
+   emissive and model samples when the record's flags say those slots are the defaults. Only
+   the textured units read the table.
 8. **The record has no alpha cutoff and no style words.** No shipped material is a cutout
    (reserved for when one is); per-material wrap, rim and ramp stay off Tiered (§6b), which
    corrects amendment 2 item 9's "N2c's material table carries them".
 9. **Multiscatter and the stored F0** (`MOBA_TIERED_SHADING`) are in every Tiered lighting
    module, forward and deferred; Compat's expansion is unchanged (its SPIR-V is byte-identical
    but for item 2).
-10. **Tiered gets its own split-sum LUT and an extrapolating fetch** (§6b said no new LUT).
-    With the 128-sample LUT and a fetch clamped at the last row's centre, the `E_ss` read near
-    roughness 1 was far enough from the lobe's integral that the white furnace read 0.93.
-    Tiered bakes the same `(A, B)` table with 1024 samples (`brdf_lut_tiered`), and
-    `brdf_lut_sample` reads past the last roughness row's centre by linear extrapolation from
-    the last two rows instead of clamping. Compat keeps its 128-sample table and fetch. **C1 must
-    adopt both** when it brings multiscatter to Compat, or its furnace will fail the same way.
-    Gate 3's furnace is a CPU model of the shader's fetch (below).
+10. **Tiered gets its own split-sum LUT, with its texels on the end points** (§6b said no new
+    LUT). With the 128-sample LUT and a fetch clamped at the last row's centre, the `E_ss` read
+    near roughness 1 was far enough from the lobe's integral that the white furnace read 0.93.
+    Tiered's table (`brdf_lut_tiered`) integrates the same `(A, B)` with 1,024 samples per
+    texel and puts texel `i` at `i / (size − 1)` on both axes, so `brdf_lut_sample` reads N·V
+    and roughness 0..=1 with one bilinear fetch, `uv = (x · (size − 1) + 0.5) / size`, and
+    nothing is clamped or extrapolated. Every Tiered lit stage is built with
+    `MOBA_TIERED_SHADING` (the offscreen views share the main view's pipelines), so none reads
+    this table with Compat's fetch. The table is integrated once per process, on scoped threads,
+    and kept for a renderer rebuilt on a settings change: 5–8 ms of start-up on the 9800X3D's 16
+    threads, 43–77 ms on one. Compat keeps its 128-sample table with centred texels and its
+    fetch. **C1 must adopt both** when it brings multiscatter to Compat, or its furnace will
+    fail the same way. Gate 3's furnace is a CPU model of the shader's fetch (item 28).
 11. **`FOLIAGE` and `TRANSMISSIVE_FALLBACK` are lit in the standard tiles** (reverses amendment 2
     item 10). The foliage's back light needs no model code beyond `STANDARD`'s, and the map's
     foliage covers much of the frame: in the extended class it pushed gate 7 to 1.108× at Low.
@@ -1484,9 +1498,9 @@ amendment that names C1's consequence.
     - **The receivers are the terrain only.** Foliage is drawn after the decals, in the rest, as
       the forward frame draws grass over the terrain's inlined decals. The passes are
       `prepass` (receivers; the lane keeps N2b's name), `gbuffer_decals` and `gbuffer_rest`.
-    - **Depth is sampled, not attached.** The pass has no depth attachment and depth is in
-      `SHADER_READ_ONLY_OPTIMAL` for it; it reconstructs the ground from depth and tests
-      nothing.
+    - **Depth is attached read-only and sampled** (§7a): `DEPTH_STENCIL_READ_ONLY_OPTIMAL`,
+      loaded and not stored, and bound in the same layout as the texture the pass
+      reconstructs the ground from.
     - **Base colour only**, blended `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` into `gb0`'s sRGB view,
       so the blend is linear as in the forward `apply_paint_decals`; the write mask is RGB, so
       `gb0.a` (metallic) is kept. `gb0` gains
@@ -1498,12 +1512,20 @@ amendment that names C1's consequence.
       it, splat droplets outside their cell drew in deferred only (teamfight parity max 28/255).
       The grid bins a decal by its radius, so droplets past it are clipped at cell edges on both
       paths: a known R3b limit, kept so the two frames agree.
-    - **No culling and no depth test; front faces terminate**, so each covered pixel blends
-      once, with the camera inside a box too.
-    - **`terminateInvocation`, not `discard`**: glslc maps `discard` to
-      `OpDemoteToHelperInvocation` under SPIR-V 1.6, which validation rejects without the
-      demote feature.
-    - `Glow` decals in the same buffer are skipped (they are N1's overlay, §7b).
+    - **Back faces only, behind the ground.** Front faces are culled and the back faces are
+      tested `LESS_OR_EQUAL` against the reversed-Z depth, so a box face in front of the
+      ground rasterises nothing, the sky fails the test, and each covered pixel blends once,
+      with the camera inside a box too.
+    - **`terminateInvocation`, not `discard`**, for pixels outside the decal's grid cell or
+      shape: glslc maps `discard` to `OpDemoteToHelperInvocation` under SPIR-V 1.6, which
+      validation rejects without the demote feature. The device enables
+      `shaderTerminateInvocation` on Tiered (Vulkan 1.3 requires it, so admission is
+      unchanged).
+    - `Glow` decals in the same buffer (N1's overlay, §7b) are collapsed by the vertex stage,
+      every vertex outside the clip volume, so they rasterise nothing.
+    - **The split is only for frames with a `Paint` decal.** The frame graph has a `paint`
+      axis: without a live `Paint` decal, `gbuffer_decals` and `gbuffer_rest` are reserved and
+      `prepass` draws everything, as N2b's one pass did (twice the plans, the same resources).
     - `MOBA_DECALS=off` (§11) keeps one G-buffer pass, as in N2b, and no sRGB view on `gb0`.
 17. **The graph's largest tiered topology is 41 resources** (of `MAX_RESOURCES` 48; no `u128`
     mask). The frame log has the lanes `prepass`, `gbuffer_decals` and `gbuffer_rest` (38
@@ -1542,37 +1564,112 @@ amendment that names C1's consequence.
     limit on thickness) and does not bake `THIN_FILM`'s tint into the albedo (§10's G2 bake;
     item 3 computes it at load instead). Its rules are the frozen spec's checks above. The
     ranges wait for the bible's accepted numbers (PR #347); C1 or the asset track adds them.
-22. **The forward Tiered frame draws every model but `STANDARD` with its Compat fallback**
-    (`MOBA_DEFERRED=off`, and a device that lights forward under amendment 2 item 17): the
-    forward textured stages read the parameter block, which is the fallback. §5b's one shared
-    shade, and so gate 2's parity, hold for `STANDARD` only. The material sheet is not a parity
+22. **The forward Tiered frame draws every model but `STANDARD` and `UNLIT` with its Compat
+    fallback** (`MOBA_DEFERRED=off`, and a device that lights forward under amendment 2 item
+    17): `unit_textured_tiered.frag` reads the parameter block, which is the fallback, and
+    draws `UNLIT` as its emissive alone, as the deferred frame does. §5b's one shared shade,
+    and so gate 2's parity, hold for `STANDARD` (and `UNLIT`) only. The material sheet is not a parity
     scene, since its other seven spheres differ by design; it is a golden (`materials`).
-23. **Gate 7's wall-heavy overview** (§9b: `gbuffer_receivers` against N1's prepass) is
-    measured on a low orbit across the map, not the teamfight: the receivers' pass (the
-    `prepass` lane, terrain alone) is 0.105 ms against N1's 0.122 ms, and the frame is 1.016×
-    N1's. Walls stay in `gbuffer_rest`.
+23. **Gate 7's wall-heavy overview is not measured as such** (§9b: `gbuffer_receivers`
+    against N1's prepass). The shipped maps have four walls each, so no view is wall-heavy. A
+    low orbit across the whole map (`MOBA_PREVIEW_CAMERA=-0.7,0.12,170`: terrain, towers and
+    structures, little wall) costs what N2b's frame does (0.991× N1's; N2b 0.996×): with the `paint`
+    variant (item 16) it runs the single G-buffer pass except on the minority of frames with a
+    live `Paint` decal, so the receivers' pass cannot be read from it. On the teamfight, which
+    always splits, the receivers' `prepass` (terrain alone) is 0.045 ms at Low and 0.052 ms at
+    High, against N1's whole prepass of 0.020 and 0.024 ms, which writes no G-buffer. Walls
+    stay in `gbuffer_rest`; their overdraw of decal-shaded terrain waits for a map with walls
+    in view.
+24. **`ior` and `specular` shape the F0 of `standard` and `transmissive` only** (§6b gave every
+    model the stored F0). Only those two models store an F0 in the G-buffer; every other
+    model's channel holds its own data, so the deferred frame lit their base at 0.04 while the
+    forward Tiered frame and the thin film's Compat tint used the authored F0. Now all three
+    use `MaterialDesc::model_dielectric_f0()`: the authored F0 for `standard` and
+    `transmissive`, IOR 1.5's 0.04 for the rest, and `content-check` refuses a non-default
+    `ior` or `specular` on the rest, so the spec says what is drawn. A model that needs its own
+    F0 later is an amendment that names C1's consequence.
+25. **The models' light-invariant terms are computed once per pixel** (§6c's per-model BRDFs
+    are unchanged otherwise). `model_prepare` (`include/shading_models.glsl`), called by
+    `shade()` after the energy compensation, builds the anisotropic frame, the sheen colour
+    and its albedo scaling and the thin film's Fresnel; `model_direct` and the ambient read
+    them. **The thin film's Fresnel is evaluated once, at N·V** (the
+    `KHR_materials_iridescence` form evaluates it per light at V·H): each light's specular is
+    scaled by `film(N·V) / Schlick(F0, N·V)` and the ambient takes `film(N·V)` as its F0. The
+    film's colour therefore does not shift across a highlight, an approximation that is
+    largest where V·H and N·V differ most (wide highlights, grazing views). The Compat
+    collapse (normal incidence) is unchanged.
+26. **The anisotropy's direction is the mesh's tangent turned by `rotation`**
+    (`KHR_materials_anisotropy`; the first build took the angle in the stored normal's
+    orthonormal basis, which flips at `n.z = 0`, so a direction authored on a sphere jumped
+    there). The G-buffer still stores an angle modulo π in that basis, now of the tangent's
+    direction: the Slang stage quantises the normal as the G-buffer will, rebuilds the basis
+    the lighting uses and measures the turned tangent in it. The basis still flips at `n.z = 0`,
+    and the stored angle flips with it, so the lit direction is as continuous as the mesh's
+    tangents (`anisotropy_direction_is_continuous_across_the_basis_seam`). A mesh without a
+    usable tangent falls back to the rotation in the basis.
+27. **The thin film's `model_texture` B is the material AO**, as the clearcoat's and the
+    anisotropic model's B is (the first build left it unread, and the film's AO at 1).
+28. **Gate 3 stays a CPU model until N2e.** The furnace models the fetch and the compensation
+    with the painted-specular scale at 1 and no specular occlusion; a rendered furnace, with
+    the painted specular and the specular occlusion N2e's stylisation brings, is N2e's. **N2e's
+    gate 4 needs a `Paint`-only switch**, `MOBA_PAINT_DECALS=off` (not built in N2c):
+    `MOBA_DECALS=off` also removes the overlay's `Glow` decals, so it cannot isolate the
+    `Paint` pass.
+29. **Review hardening** (no behaviour change for valid content): a textured skinned pipeline
+    that fails to build, or a Tiered prepass without the material layout, is an error, not a
+    silent fallback; `gb0`'s sRGB view is asserted present when decals are on, and the UNORM
+    format's sRGB twin is a checked table (`srgb_twin`); a test checks that the material
+    G-buffer layout fits the Tiered admission minimums.
+30. **Timing evidence names what it measured.** The frame log reports `paint_decals_avg` (live
+    `Paint` decals per frame) and, with `MOBA_TILE_COUNTS=1`, `tiles_standard_avg`,
+    `tiles_extended_avg` and `extended_frames` (`light_classify`'s counts, copied to a
+    host-readable buffer in `mask_clear` and read a frame later). The copy's barriers cost
+    0.004–0.005 ms on the RTX 5070 Ti, so it is off by default and in gate 7's timings.
 
 **Gates** ([perf/0037](../perf/0037-n2c-materials.md)):
 
 - **1. Encoding and interfaces:** the record and push block against the Slang reflection, and
   the interface test (item 6). The Rust twin (`every_model_round_trips`,
   `stored_texels_are_fixed_points`) and `gbuffer-smoke` cover all eight models. Met.
-- **2. Parity** (`STANDARD` only, item 22): `deferred-parity.sh` at 1280×720 on lavapipe
+- **2. Parity** (`STANDARD` and `UNLIT` only, item 22): `deferred-parity.sh` at 1280×720 on lavapipe
   gives the worst pixels 3 (default), 3 (sky off), 3 (river) and 6/255 (teamfight), each
-  within 2/255 on at least 99.999 % of pixels. Met. Without item 16's grid test the teamfight read 28/255.
+  within 2/255 on at least 99.999 % of pixels (re-run on the review's head: 1, 1, 3 and 7
+  pixels past 2/255). Met. Without item 16's grid test the teamfight read 28/255.
 - **3. White furnace:** worst 0.9861 over roughness 0–1 and N·V 0.05–1, a CPU model of the
   shader's fetch (item 10). Met; a rendered furnace is not measured.
 - **4. Hidden information (decals):** with bloom off, all 38,813 unit pixels of the teamfight
-  keep their G-buffer albedo bytes with decals on and off. `MOBA_DECALS=off` also removes the
+  keep their G-buffer albedo bytes with decals on and off, while 35,010 other pixels change. `MOBA_DECALS=off` also removes the
   overlay's glow decals, so the `Paint` pass is not isolated. Partial; N2e runs the full gate
   with rims.
 - **5. Goldens:**
   - Every Compat golden scene, and both sentinel heroes, are byte-identical to `ceca947`.
   - The `materials` and `decals` tiered goldens are two-run identical with TAAU and FSR 3.1.
   - Validation and sync validation are clean on lavapipe and on the RTX 5070 Ti.
-- **7. Performance** on the RTX 5070 Ti against `ab42718`: GPU total 1.040–1.077×, GPU span
-  1.057–1.091× (Low, High, Ultra, Overdrive, Low and High with FSR 3.1); Compat Ultra 0.999×.
-  The wall-heavy overview: receivers 0.105 ms against N1's 0.122 ms prepass (item 23). Met.
+- **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay, the review's
+  head: GPU total 1.036–1.073×, GPU span 1.053–1.086× (Low, High, Ultra, Overdrive, Low and
+  High with FSR 3.1), 1.010–1.020× N2b's; Compat Ultra 0.999×. **`gpu_total` is the gate
+  metric** (perf/0036's gate column); `gpu_span`, which adds the gaps between passes, is
+  advisory. Met on the replay the gate is defined on, which has no extended-model pixel. The
+  overview: item 23.
+  - **Headroom** against 1.10× N1 (`gpu_total`, ms): Low 0.0138, High 0.0209, Ultra 0.0209,
+    Overdrive 0.0322, Low with FSR 3.1 0.0276, High with FSR 3.1 0.0367 (span: 0.0074 at
+    Low, 0.0146 at High).
+  - **Extended-model pixels reach the gate:** the material sheet, with 6.9 % and 14.1 % of
+    its tiles extended, is 1.102× and 1.117× N1's frame without the spheres at High (N1 cannot
+    draw them; an estimate of N1 drawing them puts the close view at about 1.10×). The
+    teamfight's split G-buffer costs 0.007–0.011 ms over N2b's single pass.
+  - **Budget for N2d–N2f** (measured as now: the teamfight, plus the sheet's close view as the
+    extended-model check): N2d (LTC area lights and the light record) at most 0.005 ms at Low
+    and 0.008 ms at High; N2e (team rims, with the stylisation layer removed) at most 0.005 ms
+    at Low and 0.008 ms at High, net of what the removal saves; N2f (the `glass` pass,
+    Medium+) nothing at Low and at most 0.005 ms at High. That leaves about 0.004 ms at Low for
+    noise, and nothing for heroes with extended models, so **N2d opens with a recovery step**
+    before its own work, in this order: the wave-uniform (scalarised) light loop amendment 2
+    item 5 deferred (`deferred_light` is 0.053 ms at Low); folding the `Paint` decals back
+    into the receivers' G-buffer stage from the decal grid, as N2b's terrain did (a departure
+    from §7a's decal pass, so an amendment), which removes the split's second pass boundary;
+    and `light_classify` (0.009 ms) folded into the deferred dispatch. A phase that cannot
+    meet its budget after that is an amendment that names the preset and the overrun.
 - **8. Compat contract:** `content-check` passes every shipped material under both evaluators,
   and `every_sample_material_loads_on_compat` builds each model's sample on Compat. Met.
 

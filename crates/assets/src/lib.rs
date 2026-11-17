@@ -123,8 +123,8 @@ pub use map_visuals::{
     MapTerrain, MapVisuals, MapVisualsError, MapWater, TerrainLayer, valid_mesh_name,
 };
 pub use material::{
-    CompatMaterial, CompatOverride, MAX_DIELECTRIC_F0, MAX_MATERIAL_BYTES, MaterialDesc,
-    MaterialError, MaterialShader, ModelParams, ShadingModel, THIN_FILM_IOR,
+    CompatMaterial, CompatOverride, DEFAULT_DIELECTRIC_F0, MAX_DIELECTRIC_F0, MAX_MATERIAL_BYTES,
+    MaterialDesc, MaterialError, MaterialShader, ModelParams, ShadingModel, THIN_FILM_IOR,
     THIN_FILM_THICKNESS_NM, TextureSlot, Transmission, has_emissive_mask, ior_to_f0, material_path,
     texture_path, thin_film_reflectance,
 };

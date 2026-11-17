@@ -793,11 +793,11 @@ the contract Compat's C1 implements). These keys are optional and need `shader =
 ```toml
 model = "clearcoat"                  # standard (default), clearcoat, sheen, anisotropic,
                                      # thin_film, foliage, unlit, transmissive
-ior = 1.5                            # 1..=2.5; dielectric F0 = ((ior - 1)/(ior + 1))^2 * specular,
-                                     # at most 0.16 (an error above)
+ior = 1.5                            # 1..=2.5, standard and transmissive only; dielectric
+                                     # F0 = ((ior - 1)/(ior + 1))^2 * specular, at most 0.16
 dust = 0.0                           # 0..=1, dust on up-facing surfaces (Tiered)
 emissive_texture = "x-emissive"      # sRGB colour, times `emissive` (Tiered)
-model_texture = "x-model"            # linear RGBA: R, G, B scale the model's data (Tiered)
+model_texture = "x-model"            # linear RGBA: R, G, B scale the model's data and AO (Tiered)
 [clearcoat]                          # the table named after `model`, with its parameters
 weight = 1.0
 roughness = 0.1
@@ -810,22 +810,29 @@ roughness = 0.3
 | `standard` | none | GGX + Lambert + multiscatter, F0 from `ior` and `specular` | the same surface, today's `shade()` |
 | `clearcoat` | `weight` 0..=1 (1), `roughness` 0..=1 (0) | the base plus one GGX coat lobe (IOR 1.5) | roughness `mix(base, coat, 0.5 × weight)` |
 | `sheen` | `weight` 0..=1 (1), `roughness` 0..=1 (0.5), `tint` 0..=1 (0: white, 1: base colour) | the base plus Charlie sheen | the base |
-| `anisotropic` | `strength` 0..=1 (0.5), `rotation` −π..=π radians (0) | anisotropic GGX | isotropic GGX at the mean roughness |
-| `thin_film` | `thickness_min`, `thickness_max` 100..=400 nm (100, 400), `ior` 1..=2 (1.3) | GGX with the thin-film Fresnel; `model_texture` R picks the thickness | base colour tinted by the film at normal incidence (`thickness_max`) |
+| `anisotropic` | `strength` 0..=1 (0.5), `rotation` −π..=π radians (0) | anisotropic GGX along the mesh's tangent turned by `rotation` about the normal | isotropic GGX at the mean roughness |
+| `thin_film` | `thickness_min`, `thickness_max` 100..=400 nm (100, 400), `ior` 1..=2 (1.3) | GGX with the thin-film Fresnel (at N·V); `model_texture` R picks the thickness, G scales the film's IOR, B is the AO | a metal's base colour tinted by the film at normal incidence (`thickness_max`); a dielectric's is kept |
 | `foliage` | `translucency` 0..=1 (0.35) | two-sided Lambert, light through the leaf | the base |
 | `unlit` | none | the emissive alone, unlit and unfogged | a black base plus the emissive |
 | `transmissive` | `[transmission]`: `transmission` 0..=1 (1), `thickness` 0..=10 m (0), `attenuation_color` 0..=1 (white), `attenuation_distance` 0.001..=1000 m (infinite) | opaque until the glass pass (N2f) | the base, opaque |
 
 `[compat]` takes `base_color_factor`, `metallic`, `roughness` (0..=1) and `emissive`
 (0..=16), and replaces the collapsed value. A model table other than the material's model, or
-`[transmission]` on another model, is an error.
+`[transmission]` on another model, is an error. `ior` and `specular` shape only a `standard`
+or `transmissive` material's F0: every other model's base layer is F0 0.04 (IOR 1.5) on both
+paths, and setting either on it is an error.
 
 **Emission.** `emissive` is the colour; on **both** paths it is masked by
 `metallic_roughness.b` when that map has a third channel (bake it with `--kind weights
 --format rgba8`, or `bc7`); a two-channel map (`bc5`, `rg8`) keeps the whole surface emissive.
 `emissive_texture` multiplies it on Tiered only, so a lit material with an emissive texture
 and a non-zero `emissive` needs the mask or a `[compat] emissive`, or it would glow all over on
-Compat. An `unlit` material is all emissive and needs a non-zero Compat emissive.
+Compat. An `unlit` material is all emissive and needs a non-zero `emissive` (Tiered) and a
+non-zero Compat emissive.
+
+**`model_texture` channels.** R, G and B scale the model's data per texel. The material AO is G
+on `standard`, `transmissive` and `foliage` and B on `clearcoat`, `anisotropic` and
+`thin_film`; `sheen` has none.
 
 **The material sheet.** `content/materials/samples/` has one material per model, on the
 `material-sample-*` textures (`texture-bake generate material-sample`).
@@ -882,8 +889,9 @@ textures   4 (4 bindings, 299 KiB)
 It also checks every descriptor under the pack's `materials/` and one level of subdirectories
 (such as `materials/samples/`), named by a unit or not. Each material is checked against both
 evaluators (ADR-0023 §10): the Compat fallback, `[compat]` overrides included, is finite and in
-range; an `unlit` material has a Compat emissive and no `model_texture`; and the emission rule
-above holds. The art bible's per-class ranges are not checked yet (the bible is not approved).
+range; an `unlit` material has a non-zero `emissive` and Compat emissive and no
+`model_texture`; `ior` and `specular` keep their defaults on every model but `standard` and
+`transmissive`; and the emission rule above holds. The art bible's per-class ranges are not checked yet (the bible is not approved).
 The JSON output adds `materials`, `textured_materials`, `material_models` (an object from model
 name to count), `textures` and `texture_bytes`.
 

@@ -963,6 +963,9 @@ mod tests {
         Block { set: u64 },
         /// Push constants.
         PushConstants,
+        /// A specialisation constant (`[vk::constant_id(id)]`), which the pipeline that uses
+        /// the module must supply (`unit_material_gbuffer`'s sampler slot and table length).
+        SpecConstant { id: u64 },
     }
 
     /// Every parameter of every Slang module, with its set and binding. ADR-0020 §4c wants
@@ -970,7 +973,9 @@ mod tests {
     /// reflected layout must match this table exactly. A new module, resource or binding
     /// change is a deliberate edit here (and in the Rust descriptor layout that mirrors it).
     /// `unit_material_gbuffer*.slang` (N2c, ADR-0023 §5): the camera at set 0, the bindless
-    /// table's samplers and sampled images at set 2 (`bindless.rs`), the material push.
+    /// table's samplers and sampled images at set 2 (`bindless.rs`), the material push, and
+    /// the material sampler's slot and the table's length as specialisation constants 0 and 1
+    /// (set by `passes/scene.rs` from `bindless::MATERIAL_SAMPLER` and `MAX_MATERIALS`).
     const MATERIAL_GBUFFER: &[(&str, Slot)] = &[
         (
             "camera",
@@ -997,6 +1002,8 @@ mod tests {
             },
         ),
         ("push", Slot::PushConstants),
+        ("MATERIAL_SAMPLER", Slot::SpecConstant { id: 0 }),
+        ("MAX_MATERIALS", Slot::SpecConstant { id: 1 }),
     ];
 
     const SLANG_BINDINGS: &[(&str, &[(&str, Slot)])] = &[
@@ -1305,10 +1312,7 @@ mod tests {
                 "a loose `uniform` global lands in an implicit globals uniform buffer; \
                  declare it inside a ConstantBuffer with [[vk::binding(binding, set)]]",
             )),
-            (Some("specializationConstant"), _) => Err(String::from(
-                "specialization constants ([vk::constant_id]) are not in the table yet; add \
-                 a Slot for them with the first module that needs one",
-            )),
+            (Some("specializationConstant"), Some(id)) => Ok(Slot::SpecConstant { id }),
             _ => Err(format!("unexpected binding {binding}")),
         }
     }

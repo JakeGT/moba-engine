@@ -102,7 +102,11 @@ fn create_slot(
             &format!("graph-transient-{index}"),
             extents.of(slot.desc.size),
             slot.desc.format,
-            vk::Format::R8G8B8A8_SRGB,
+            crate::resources::srgb_twin(slot.desc.format).ok_or_else(|| {
+                RenderError::RenderGraph(String::from(
+                    "an sRGB view of a format without an sRGB twin",
+                ))
+            })?,
             slot.usage,
         );
     }

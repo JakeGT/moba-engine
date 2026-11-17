@@ -13,8 +13,12 @@ Captured 2026-11-17 for ADR-0023 (N2c) and its
   `ceca947` itself then fails the `low` fingerprint (mean 2.21, max 97, all in the HUD).
 - **Toolchain:** rustc stable, the pinned `slangc`.
 - **Branch:** `feat/n2c-material-model` at `7106fb2`, on origin/main `ceca947` (N2b).
-- **Baselines:** detached release builds in their own temporary worktrees, deleted afterwards:
-  `ab42718` (the N1 tiered forward frame, ADR-0023 §9b's baseline) and `ceca947` (N2b).
+- **Baselines:** detached release builds in their own temporary worktrees, deleted after the
+  review's measurements: `ab42718` (the N1 tiered forward frame, ADR-0023 §9b's baseline) and
+  `ceca947` (N2b).
+- **Evidence:** the frame logs of every timing run below (the first build's and the review's),
+  with the scripts that ran them, are kept locally in
+  `~/Projects/MOBA/handoff/evidence/n2c-ab/` (not committed).
 
 Every lavapipe and RTX run below printed no `[vulkan` line.
 
@@ -23,11 +27,11 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | Gate | Result |
 |---|---|
 | 1. Encoding and interfaces | **Met.** `MaterialRecord` and `MaterialPush` against the Slang reflection; the GLSL-vertex / Slang-fragment interface test; the record's model word; the Rust twin and `gbuffer-smoke` cover all eight models |
-| 2. Deferred–forward parity | **Met** locally at 1280×720: worst pixel 3, 3, 3 and 6/255 (default, default without the sky, river, teamfight), `STANDARD` only (amendment 3 item 22); CI below |
+| 2. Deferred–forward parity | **Met** locally at 1280×720: worst pixel 3, 3, 3 and 6/255 on the review's head (default, default without the sky, river, teamfight), `STANDARD` and `UNLIT` only (amendment 3 item 22); CI below |
 | 3. White furnace | **Met** (CPU model of the shader's fetch): worst 0.9861 over roughness 0–1 and N·V 0.05–1 |
-| 4. Hidden information (decals) | **Partly:** with bloom off, every unit pixel keeps its G-buffer albedo with decals on and off; the `Paint` pass is not isolated from the glow decals; see below |
+| 4. Hidden information (decals) | **Partly:** with bloom off, every unit pixel keeps its G-buffer albedo with decals on and off (35,010 other pixels change); the `Paint` pass is not isolated from the glow decals; see below |
 | 5. Goldens | **Met.** Compat byte-identical (11 scenes); `materials` and `decals` tiered goldens two-run identical; exact hashes from CI |
-| 7. Performance (≤ 1.10× N1) | **Met** on every preset: GPU total 1.040–1.077× `ab42718` (GPU span 1.057–1.091×), 1.012–1.026× `ceca947`; Compat 0.999×; the wall-heavy overview's receivers 0.105 ms against N1's 0.122 ms prepass |
+| 7. Performance (≤ 1.10× N1) | **Met** on the teamfight, every preset: GPU total 1.036–1.073× `ab42718` (GPU span 1.053–1.086×), 1.010–1.020× `ceca947`; Compat 0.999×; least headroom Tiered Low, 0.0138 ms. **Extended-model pixels reach the gate:** the material sheet is 1.102–1.117× N1's frame without the spheres (6.9–14.1 % of tiles extended; about 1.10× an estimate of N1 drawing them). The overview 0.991× |
 | 8. Compat contract | **Met.** `content-check` passes every shipped material under both evaluators; a test builds each model's sample on Compat |
 
 ## Gate 1: encoding and interfaces
@@ -51,10 +55,14 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 
 | Scene | Within 2/255 | Worst | Past 2/255 |
 |---|---|---|---|
-| default | 100.000 % | 3 | 2 (3/255) |
-| default, `MOBA_SKY=off` | 100.000 % | 3 | 2 |
-| R3b river | 100.000 % | 3 | 2 |
+| default | 100.000 % | 3 | 1 (3/255) |
+| default, `MOBA_SKY=off` | 100.000 % | 3 | 1 |
+| R3b river | 100.000 % | 3 | 3 |
 | R3b teamfight | 99.999 % | 6 | 7 (five at 3, one at 4, one at 6) |
+
+These are the review's head (re-run after the review's changes: the read-only depth, the
+front-face culling, the end-point LUT, the hoisted model terms); the first build read 2, 2, 2
+and 7 pixels past 2/255 with the same worst values.
 
 One fix made the teamfight pass. Before it, the worst pixel was 28/255: splat droplets outside
 the forward decal grid's cell drew only in the deferred frame. The decal pass now reads the
@@ -80,7 +88,8 @@ lighting), Native mode at 1280×720 on lavapipe, with decals on and off, and
 `MOBA_DEBUG_VIEW=flags` for the `UNIT` mask. Pixels of the pure unit colour in the flags view
 number 38,813: eight units and a structure.
 
-- With `MOBA_BLOOM=off`, **all 38,813 keep every albedo byte**.
+- With `MOBA_BLOOM=off`, **all 38,813 keep every albedo byte**, while 35,010 other pixels
+  change (up to 239/255): the decals are in the view, and the units are drawn over them.
 - With bloom on, three units and the structure keep every byte; the five units inside or at
   the edge of a glow decal's ring differ on 830 pixels by at most 1/255 (775 of them on the two
   units inside the rings). That is the glow's bloom on top of the debug view, not `gb0`.
@@ -112,9 +121,13 @@ decals (§7a). The full gate, with rims, is N2e's.
   - All twelve cases are two-run byte-identical, with no validation messages: the four
     existing ones and `materials` and `decals`, each with TAAU and FSR 3.1. Both mid-stream
     resets are clean.
-  - The eight existing fingerprints still pass (mean ≤ 0.146, max ≤ 5), so they are not
-    rewritten.
-  - The four new ones were written locally at 640×360.
+  - The eight existing fingerprints still pass (re-run on the review's head: mean ≤ 0.145,
+    max ≤ 5), so they are not rewritten.
+  - The four new ones were written locally at 640×360. On the review's head the two `decals`
+    fingerprints still pass (mean ≤ 0.004, max 1) and are kept; the two `materials` ones
+    were rewritten (mean 0.133, max 39 against the first build's): the anisotropic sphere's
+    direction now follows its tangent (amendment 3 item 26), the thin film's Fresnel is taken
+    at N·V and its AO is read (items 25 and 27), and the LUT's texels moved (item 10).
   - The exact hashes come from CI only: `render-golden.yml` dispatched on `7106fb2` with
     `cpu_sample=true` (run 43992116303), eight sampling legs, its `tiered-hash-sections`
     artefact pasted with both the `cpu=amd` and `cpu=intel` sections of all twelve names,
@@ -122,64 +135,151 @@ decals (§7a). The full gate, with rims, is N2e's.
 
 ## Gate 7: performance
 
-- **Builds:** `ab42718`, `ceca947` and the branch at `7106fb2`: release builds, the first two in
-  detached worktrees.
+Re-measured on the review's head (the review's changes: the `paint` graph variant, the
+read-only depth, the culled front faces, the hoisted model terms, the end-point LUT and the
+per-record texture flags). The first build's numbers (`7106fb2`) are at the end of this section.
+
+- **Builds:** `ab42718`, `ceca947` and the branch: release builds, the first two in detached
+  worktrees.
 - **Machine:** the RTX 5070 Ti (driver 620.70.06, Linux 7.3.4).
 - **Replay:** the teamfight replay (`MOBA_WARMUP_TICKS=330`), its `Paint` decals included, at
   1920×1080. Vsync off, the 240 fps limit, validation off, the pipeline cache off, 3,000 frames
   per run.
 - **Configurations:** Tiered Low, High and Ultra with TAAU, Tiered Overdrive (Ultra, TAAU
-  Performance mode), Tiered Low and High with FSR 3.1, and Compat Ultra.
+  Performance mode), Tiered Low and High with FSR 3.1, and Compat Ultra; for the review, the
+  material sheet at two distances with a no-sheet control each, and the overview.
 - **Rounds:** three, interleaved. Each held `flock handoff/gpu.lock` and ran every
   configuration on the three builds in turn, with no other `moba-client` running.
 - **Results:** medians of the three rounds, in ms. Within each configuration and build, the
-  three GPU totals agree within 0.006 ms.
+  three GPU totals agree within 0.005 ms.
+- **The gate metric is `gpu_total`** (the sum of the pass timestamps), the column perf/0036
+  marked as the gate. `gpu_span` (first to last timestamp, so also the gaps between passes) is
+  reported beside it and treated as advisory (ADR-0023 amendment 3, gate 7).
+- **What the frames held:** the frame log's `paint_decals_avg` (live `Paint` decals per frame)
+  and, with `MOBA_TILE_COUNTS=1`, `tiles_standard_avg`, `tiles_extended_avg` and
+  `extended_frames` (amendment 3 item 30). The tile counts below come from an otherwise
+  identical round with the read-back on; the timings ran without it.
 
 | Configuration | Build | GPU total p50 | p95 | GPU span p50 | `prepass` | `gbuffer_decals` | `gbuffer_rest` | `deferred_light` | ÷ N1 total (span) | ÷ N2b total |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Tiered Low (TAAU) | `ab42718` | 0.508 | 0.520 | 0.514 | 0.020 | — | — | — | | |
-| | `ceca947` | 0.540 | 0.551 | 0.554 | 0.063 | — | — | 0.053 | 1.063 (1.078) | |
-| | branch | 0.547 | 0.559 | 0.561 | 0.045 | 0.006 | 0.021 | 0.054 | **1.077 (1.091)** | 1.013 |
-| Tiered High (TAAU) | `ab42718` | 0.560 | 0.572 | 0.566 | 0.024 | — | — | — | | |
-| | `ceca947` | 0.583 | 0.596 | 0.598 | 0.069 | — | — | 0.056 | 1.041 (1.057) | |
-| | branch | 0.596 | 0.608 | 0.609 | 0.052 | 0.006 | 0.024 | 0.058 | **1.064 (1.076)** | 1.022 |
-| Tiered Ultra (TAAU) | `ab42718` | 0.559 | 0.572 | 0.566 | 0.024 | — | — | — | | |
-| | `ceca947` | 0.584 | 0.597 | 0.599 | 0.069 | — | — | 0.056 | 1.045 (1.058) | |
-| | branch | 0.596 | 0.608 | 0.609 | 0.052 | 0.006 | 0.024 | 0.058 | **1.066 (1.076)** | 1.021 |
-| Tiered Overdrive | `ab42718` | 0.502 | 0.513 | 0.508 | 0.026 | — | — | — | | |
-| | `ceca947` | 0.509 | 0.521 | 0.524 | 0.055 | — | — | 0.035 | 1.014 (1.031) | |
-| | branch | 0.522 | 0.533 | 0.537 | 0.042 | 0.005 | 0.022 | 0.036 | **1.040 (1.057)** | 1.026 |
-| Tiered Low, FSR 3.1 | `ab42718` | 0.656 | 0.669 | 0.662 | 0.020 | — | — | — | | |
-| | `ceca947` | 0.687 | 0.700 | 0.701 | 0.063 | — | — | 0.053 | 1.047 (1.059) | |
-| | branch | 0.695 | 0.708 | 0.708 | 0.045 | 0.006 | 0.021 | 0.054 | **1.059 (1.069)** | 1.012 |
-| Tiered High, FSR 3.1 | `ab42718` | 0.706 | 0.720 | 0.713 | 0.024 | — | — | — | | |
-| | `ceca947` | 0.731 | 0.744 | 0.747 | 0.069 | — | — | 0.056 | 1.035 (1.048) | |
-| | branch | 0.744 | 0.757 | 0.758 | 0.052 | 0.006 | 0.024 | 0.058 | **1.054 (1.063)** | 1.018 |
-| Compat Ultra | `ab42718` | 0.676 | 0.686 | 0.680 | 0.058 | — | — | — | | |
-| | `ceca947` | 0.675 | 0.685 | 0.680 | 0.058 | — | — | — | 0.999 (1.000) | |
-| | branch | 0.675 | 0.686 | 0.679 | 0.058 | — | — | — | **0.999 (0.999)** | 1.000 |
+| Tiered Low (TAAU) | `ab42718` | 0.508 | 0.520 | 0.514 | 0.020 | — | — | — |  |  |
+|  | `ceca947` | 0.538 | 0.551 | 0.553 | 0.063 | — | — | 0.053 | 1.059 (1.076) |  |
+|  | branch | 0.545 | 0.558 | 0.558 | 0.046 | 0.005 | 0.021 | 0.053 | **1.073 (1.086)** | 1.013 |
+| Tiered High (TAAU) | `ab42718` | 0.559 | 0.572 | 0.566 | 0.024 | — | — | — |  |  |
+|  | `ceca947` | 0.585 | 0.597 | 0.599 | 0.069 | — | — | 0.056 | 1.047 (1.058) |  |
+|  | branch | 0.594 | 0.607 | 0.608 | 0.052 | 0.005 | 0.024 | 0.057 | **1.063 (1.074)** | 1.015 |
+| Tiered Ultra (TAAU) | `ab42718` | 0.559 | 0.571 | 0.566 | 0.024 | — | — | — |  |  |
+|  | `ceca947` | 0.584 | 0.596 | 0.598 | 0.069 | — | — | 0.056 | 1.045 (1.057) |  |
+|  | branch | 0.594 | 0.606 | 0.608 | 0.052 | 0.005 | 0.024 | 0.057 | **1.063 (1.074)** | 1.017 |
+| Tiered Overdrive | `ab42718` | 0.502 | 0.513 | 0.508 | 0.026 | — | — | — |  |  |
+|  | `ceca947` | 0.510 | 0.521 | 0.525 | 0.055 | — | — | 0.036 | 1.016 (1.033) |  |
+|  | branch | 0.520 | 0.532 | 0.535 | 0.042 | 0.005 | 0.022 | 0.036 | **1.036 (1.053)** | 1.020 |
+| Tiered Low, FSR 3.1 | `ab42718` | 0.656 | 0.668 | 0.662 | 0.020 | — | — | — |  |  |
+|  | `ceca947` | 0.687 | 0.700 | 0.701 | 0.063 | — | — | 0.053 | 1.047 (1.059) |  |
+|  | branch | 0.694 | 0.707 | 0.707 | 0.045 | 0.005 | 0.021 | 0.054 | **1.058 (1.068)** | 1.010 |
+| Tiered High, FSR 3.1 | `ab42718` | 0.707 | 0.720 | 0.713 | 0.024 | — | — | — |  |  |
+|  | `ceca947` | 0.730 | 0.744 | 0.746 | 0.069 | — | — | 0.056 | 1.033 (1.046) |  |
+|  | branch | 0.741 | 0.754 | 0.755 | 0.052 | 0.005 | 0.024 | 0.057 | **1.048 (1.059)** | 1.015 |
+| Compat Ultra | `ab42718` | 0.673 | 0.684 | 0.677 | 0.058 | — | — | — |  |  |
+|  | `ceca947` | 0.672 | 0.684 | 0.676 | 0.058 | — | — | — | 0.999 (0.999) |  |
+|  | branch | 0.672 | 0.684 | 0.677 | 0.058 | — | — | — | **0.999 (1.000)** | 1.000 |
 
-- **Every preset is within 1.10× N1**. The closest is Tiered Low's GPU span, at 1.091×.
-- **The split G-buffer** costs 0.009 ms more than N2b's single pass at Low:
-  - `prepass` (now the terrain alone), `gbuffer_decals` and `gbuffer_rest` total 0.072 ms,
-    against N2b's 0.063 ms `prepass`;
-  - the decal pass itself is 0.006 ms on the teamfight's decals;
-  - the rest is the extra pass boundary and `gb0`'s load.
-- **The wall-heavy overview** (§9b gate 7's decal-overdraw check): a low orbit across the
-  whole map, walls in front of the terrain (`MOBA_PREVIEW_CAMERA=-0.7,0.12,170`, local preview,
-  no decal in view), Tiered High with TAAU, the same settings, builds and three interleaved
-  rounds:
+**Headroom against 1.10× N1** (ms; negative is over), and what the branch's frames held:
 
-  | Build | GPU total p50 | GPU span p50 | `prepass` | `gbuffer_decals` | `gbuffer_rest` | `deferred_light` | ÷ N1 total (span) |
-  |---|---|---|---|---|---|---|---|
-  | `ab42718` | 0.698 | 0.705 | 0.122 | — | — | — | |
-  | `ceca947` | 0.696 | 0.711 | 0.240 | — | — | 0.036 | 0.997 (1.009) |
-  | branch | 0.709 | 0.723 | 0.105 | 0.001 | 0.144 | 0.037 | 1.016 (1.026) |
+| Configuration | 1.10× N1 total | branch total | headroom (ms) | 1.10× N1 span | branch span | headroom (ms) | paint decals | standard tiles | extended tiles |
+|---|---|---|---|---|---|---|---|---|---|
+| Tiered Low (TAAU) | 0.5588 | 0.545 | +0.0138 | 0.5654 | 0.558 | +0.0074 | 3.280 | 3554 | 0 |
+| Tiered High (TAAU) | 0.6149 | 0.594 | +0.0209 | 0.6226 | 0.608 | +0.0146 | 3.280 | 3554 | 0 |
+| Tiered Ultra (TAAU) | 0.6149 | 0.594 | +0.0209 | 0.6226 | 0.608 | +0.0146 | 3.280 | 3554 | 0 |
+| Tiered Overdrive | 0.5522 | 0.520 | +0.0322 | 0.5588 | 0.535 | +0.0238 | 3.280 | 2039 | 0 |
+| Tiered Low, FSR 3.1 | 0.7216 | 0.694 | +0.0276 | 0.7282 | 0.707 | +0.0212 | 3.280 | 3554 | 0 |
+| Tiered High, FSR 3.1 | 0.7777 | 0.741 | +0.0367 | 0.7843 | 0.755 | +0.0293 | 3.280 | 3554 | 0 |
+| Compat Ultra | 0.7403 | 0.672 | +0.0683 | 0.7447 | 0.677 | +0.0677 | 3.260 | 0 | 0 |
+| Sheet, far (High) | 0.6710 | 0.672 | -0.0010 | 0.6776 | 0.688 | -0.0104 | 0.590 | 3310 | 244 |
+| Sheet camera, no sheet | 0.6721 | 0.648 | +0.0241 | 0.6776 | 0.662 | +0.0156 | 0.590 | 3554 | 0 |
+| Sheet, close (High) | 0.6380 | 0.648 | -0.0100 | 0.6435 | 0.664 | -0.0205 | 0.000 | 2627 | 433 |
+| Close camera, no sheet | 0.6369 | 0.621 | +0.0159 | 0.6435 | 0.634 | +0.0095 | 0.000 | 3061 | 0 |
 
-  The receivers' pass (`prepass`, the terrain alone) is 0.105 ms against N1's 0.122 ms
-  `prepass`. The split G-buffer totals 0.250 ms against N2b's single 0.240 ms pass: the
-  terrain under the walls is shaded and then overdrawn, as §7's ordering accepts, for 0.010 ms
-  here. Walls do not need the receivers' depth-only pre-draw (the ADR's decal-ordering risk).
+- **Every teamfight preset is within 1.10× N1** on `gpu_total`, and closer to N2b than the
+  first build was (1.010–1.020× against 1.012–1.026×). The least headroom is Tiered Low:
+  0.0138 ms of total, 0.0074 ms of span. The teamfight has no extended-model pixel
+  (`extended_frames=0/2998`) and about 3.3 live `Paint` decals per frame.
+- **The split G-buffer still costs 0.007–0.011 ms on the teamfight** over N2b's single pass
+  (at Low, `prepass`, `gbuffer_decals` and `gbuffer_rest` total 0.072 ms against N2b's
+  0.063 ms). The read-only depth attachment and the culled front faces did not recover it:
+  the decal pass is 0.005 ms, and the rest is the second pass boundary (the G-buffer
+  attachments are loaded again). The `paint` variant recovers it on frames with no live
+  `Paint` decal: the close sheet camera without the sheet, which has none, is 0.621 ms against
+  N2b's 0.625 ms.
+- **The tile-count read-back costs 0.004–0.005 ms**, which is why it is opt-in. The review's
+  first re-measure had it always on and read Low 0.551 ms (1.085×) and High 0.599 ms
+  (1.070×); a build without the copy, interleaved with it over three rounds, read 0.545
+  against 0.550 at Low and 0.594 against 0.598 at High. Its barriers drain the queue at the
+  frame's start.
+
+**Extended-model pixels: the material sheet** (`MOBA_MATERIAL_SHEET=samples`, local preview,
+Tiered High with TAAU). `ab42718` and `ceca947` cannot draw these materials (they ignore the
+variable), so their rows show the same view without the spheres, and each sheet configuration
+has a control with the same camera and no sheet. "Far" is the golden's camera
+(`1.5708,0.45,11,0,-12`): 244 of 3,554 tiles extended (6.9 %). "Close" is
+`1.5708,0.3,4.5,0,-12`, with the anisotropic and thin-film spheres in the middle: 433 of 3,061
+tiles extended (14.1 %).
+
+| Sheet, far (High) | `ab42718` | 0.610 | 0.626 | 0.616 | 0.044 | — | — | — |  |  |
+|  | `ceca947` | 0.650 | 0.665 | 0.663 | 0.129 | — | — | 0.052 | 1.066 (1.076) |  |
+|  | branch | 0.672 | 0.707 | 0.688 | 0.133 | 0.002 | 0.054 | 0.060 | **1.102 (1.117)** | 1.034 |
+| Sheet camera, no sheet | `ab42718` | 0.611 | 0.626 | 0.616 | 0.045 | — | — | — |  |  |
+|  | `ceca947` | 0.650 | 0.666 | 0.663 | 0.129 | — | — | 0.052 | 1.064 (1.076) |  |
+|  | branch | 0.648 | 0.692 | 0.662 | 0.122 | 0.003 | 0.052 | 0.054 | **1.061 (1.075)** | 0.997 |
+| Sheet, close (High) | `ab42718` | 0.580 | 0.595 | 0.585 | 0.044 | — | — | — |  |  |
+|  | `ceca947` | 0.626 | 0.640 | 0.639 | 0.124 | — | — | 0.045 | 1.079 (1.092) |  |
+|  | branch | 0.648 | 0.663 | 0.664 | 0.128 | — | — | 0.053 | **1.117 (1.135)** | 1.035 |
+| Close camera, no sheet | `ab42718` | 0.579 | 0.594 | 0.585 | 0.044 | — | — | — |  |  |
+|  | `ceca947` | 0.625 | 0.641 | 0.638 | 0.124 | — | — | 0.045 | 1.079 (1.091) |  |
+|  | branch | 0.621 | 0.636 | 0.634 | 0.119 | — | — | 0.047 | **1.073 (1.084)** | 0.994 |
+
+- **A frame with extended-model pixels reaches the gate against N1's frame without them:**
+  1.102× (far) and 1.117× (close) on `gpu_total`. The spheres cost the branch 0.024–0.027 ms
+  over the same view without them: their G-buffer draws (`prepass`, about 0.010 ms), the
+  extended tiles in `deferred_light` (0.006 ms for 433 tiles), and their shadow, AO and
+  overlay prepass.
+- **No like-for-like N1 number exists.** As an estimate, the branch's forward Tiered frame
+  (`MOBA_DEFERRED=off`, three rounds of the close sheet) draws the spheres with their Compat
+  fallbacks for 0.005 ms more in its `scene` pass than N1's scene without them, so N1 drawing
+  them would be about 0.59 ms, and the deferred frame's 0.648 ms is about 1.10× that.
+- So the gate holds on the replay it is defined on, which has no extended model, and is at or
+  past 1.10× at High on a view with 7–14 % extended-model pixels. When heroes ship with
+  extended models, gate 7 must include them; amendment 3's gate 7 budgets N2d–N2f and opens
+  N2d with a recovery step for this reason.
+
+**The overview** (§9b gate 7's decal-overdraw check asks for a wall-heavy view; the shipped
+maps have four walls each, so none is): a low orbit across the whole map
+(`MOBA_PREVIEW_CAMERA=-0.7,0.12,170`, local preview: terrain, towers and structures, little
+wall), Tiered High with TAAU, the same settings, builds and three interleaved rounds, under the
+GPU lock:
+
+| Build | GPU total p50 | GPU span p50 | `prepass` | `gbuffer_decals` | `gbuffer_rest` | `deferred_light` | ÷ N1 total (span) |
+|---|---|---|---|---|---|---|---|
+| `ab42718` | 0.698 | 0.705 | 0.122 | — | — | — | |
+| `ceca947` | 0.695 | 0.710 | 0.240 | — | — | 0.036 | 0.996 (1.007) |
+| branch | 0.692 | 0.706 | 0.230 | 0.005 | 0.145 | 0.037 | 0.991 (1.001) |
+
+The local preview's bots leave a `Paint` decal live on some frames (0.59 per frame on
+average), so the branch splits the G-buffer on those frames and runs N2b's single pass on the
+rest; each lane's median is over the frames that ran it. The frame now costs what N2b's does
+(the first build, which always split, measured 0.709 ms, 1.016×, and its overview ran without
+the GPU lock). **The receivers' pass cannot be read from this view any more** (§9b's
+`gbuffer_receivers` against N1's prepass): it is separate only on frames with a live `Paint`
+decal, a minority here. On the teamfight, where it always is, the receivers' `prepass` (the
+terrain alone) is 0.046 ms at Low and 0.052 ms at High, against N1's whole-scene `prepass` of
+0.020 and 0.024 ms, which writes no G-buffer. Walls in view are not measured (amendment 3 item
+23), so the ADR's decal-ordering risk stays open.
+
+**The first build** (`7106fb2`, the same method; its logs are in the evidence directory):
+Tiered Low 0.547 ms (1.077×, span 1.091×), High 0.596 (1.064×), Ultra 0.596 (1.066×),
+Overdrive 0.522 (1.040×), Low with FSR 3.1 0.695 (1.059×), High with FSR 3.1 0.744 (1.054×),
+Compat Ultra 0.675 (0.999×); the overview 0.709 ms (1.016×).
+
 - **Before `FOLIAGE` moved to the standard tiles** (amendment 3 item 11), round 1 of the same
   replay measured Tiered Low at 1.108× total and 1.123× span: over the gate. That is why it
   moved.
@@ -189,7 +289,7 @@ decals (§7a). The full gate, with rims, is N2e's.
 - `locked_uploads=0` and `locked_pipelines=0` in every run.
 - **VRAM at High:** 247.5 MB, the same as N2b (N1 236.2). The material table is 4 KiB and
   `gb0`'s sRGB view adds no memory.
-- The raw logs are kept locally, not committed.
+- The raw logs are in `~/Projects/MOBA/handoff/evidence/n2c-ab/` (local, not committed).
 
 ## Validation on the RTX 5070 Ti
 
@@ -202,8 +302,13 @@ captured:
 - the material sheet;
 - the teamfight decal scene.
 
-Two more captures: the sheet on the forward Tiered frame (`MOBA_DEFERRED=off`), and the
-teamfight with `MOBA_DECALS=off`. All 23 ran on the RTX with **0 validation messages**.
+Four more captures: the sheet on the forward Tiered frame (`MOBA_DEFERRED=off`), the
+teamfight with `MOBA_DECALS=off`, and the teamfight (High) and the sheet (Low) with the tile
+counts read back (`MOBA_TILE_COUNTS=1`). All 25 ran on the RTX with **0 validation messages**,
+on the review's head. The default scene has no `Paint` decal and the teamfight has them, so
+both of the frame graph's `paint` variants are covered. On lavapipe the teamfight with
+`MOBA_TILE_COUNTS=1` is also clean (synchronisation validation included), as is
+`gbuffer-smoke` (`MOBA_RENDER_PATH=tiered`: 16,384 checks, 0 mismatches).
 
 `deferred-parity.sh` on the RTX (information only; the gate is lavapipe's):
 

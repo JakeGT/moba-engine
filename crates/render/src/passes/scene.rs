@@ -1052,6 +1052,7 @@ impl ScenePipelines {
                         depth_write: false,
                         depth_compare,
                         samples,
+                        cull_mode: vk::CullModeFlags::NONE,
                     },
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?,
@@ -1203,7 +1204,11 @@ impl ScenePipelines {
             "unit_material_gbuffer_hdr.slang",
             "unit_material_gbuffer_ids_hdr.slang",
         ]))?;
-        let material_layout = material_layout.unwrap_or(layout);
+        // The Slang stage declares the material layout's sets and push block; the scene layout
+        // would not match it, so a missing layout is an error, not a fallback.
+        let material_layout = material_layout.ok_or(RenderError::InvalidMaterial(
+            "the G-buffer prepass needs the material table's pipeline layout (Tiered)",
+        ))?;
         let target = |format, write_mask| ColorTarget {
             format,
             write_mask,
@@ -1293,6 +1298,7 @@ impl ScenePipelines {
                     depth_write,
                     samples,
                     depth_compare,
+                    cull_mode: vk::CullModeFlags::NONE,
                 },
             )
             .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -1334,23 +1340,45 @@ impl ScenePipelines {
             &units[..count],
             true,
         )?;
-        let unit_textured = build(
+        // The Slang material stage's specialisation constants: the material sampler's
+        // bindless slot (0) and the table's length (1), from the renderer's own values.
+        let material_constants: [u32; 2] = [
+            crate::bindless::MATERIAL_SAMPLER.index(),
+            crate::material::MAX_MATERIALS as u32,
+        ];
+        let material_data: [u8; 8] = bytemuck::cast(material_constants);
+        let material_entries: [vk::SpecializationMapEntry; 2] = core::array::from_fn(|index| {
+            vk::SpecializationMapEntry::default()
+                .constant_id(u32::try_from(index).expect("two constants"))
+                .offset(u32::try_from(4 * index).expect("two constants"))
+                .size(4)
+        });
+        let material_specialization = vk::SpecializationInfo::default()
+            .map_entries(&material_entries)
+            .data(&material_data);
+        let unit_textured = build_specialized(
             material_layout,
             Some(VertexLayout::StaticTextured),
             module("unit_textured_gbuffer.vert")?.handle(),
             unit_textured_fragment.handle(),
+            Some(&material_specialization),
             &units[..count],
             true,
         )?;
         let skinned_pipeline =
-            |vertex, vertex_layout, fragment: &crate::resources::ShaderModule, layout| {
+            |vertex,
+             vertex_layout,
+             fragment: &crate::resources::ShaderModule,
+             layout,
+             specialization: Option<&vk::SpecializationInfo<'_>>| {
                 module(vertex)
                     .and_then(|vertex| {
-                        build(
+                        build_specialized(
                             layout,
                             Some(vertex_layout),
                             vertex.handle(),
                             fragment.handle(),
+                            specialization,
                             &units[..count],
                             true,
                         )
@@ -1360,23 +1388,34 @@ impl ScenePipelines {
                     })
                     .ok()
             };
-        let (skinned, skinned_textured) = if skinned {
-            (
-                skinned_pipeline(
-                    "skinned_gbuffer.vert",
-                    VertexLayout::Skinned,
-                    &unit_fragment,
-                    layout,
-                ),
+        let skinned = if skinned {
+            skinned_pipeline(
+                "skinned_gbuffer.vert",
+                VertexLayout::Skinned,
+                &unit_fragment,
+                layout,
+                None,
+            )
+        } else {
+            None
+        };
+        // The material path draws the textured skinned meshes only with their own pipeline
+        // (`draw_material_units`), so with skinning on, that pipeline failing is an error:
+        // the textured heroes would otherwise vanish from the deferred frame.
+        let skinned_textured = match skinned {
+            Some(_) => Some(
                 skinned_pipeline(
                     "skinned_textured_gbuffer.vert",
                     VertexLayout::SkinnedTextured,
                     &unit_textured_fragment,
                     material_layout,
-                ),
-            )
-        } else {
-            (None, None)
+                    Some(&material_specialization),
+                )
+                .ok_or(RenderError::InvalidMaterial(
+                    "the textured skinned G-buffer pipeline failed to build",
+                ))?,
+            ),
+            None => None,
         };
         let vat = if vat {
             Some(build(
@@ -1484,6 +1523,7 @@ impl ScenePipelines {
                         depth_write: true,
                         depth_compare,
                         samples: vk::SampleCountFlags::TYPE_1,
+                        cull_mode: vk::CullModeFlags::NONE,
                     },
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))

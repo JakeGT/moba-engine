@@ -104,19 +104,15 @@ vec3 multiscatter_compensation(vec3 f0, vec2 brdf) {
     return vec3(1.0) + f0 * (1.0 / max(brdf.x + brdf.y, 1e-4) - 1.0);
 }
 
-// The split-sum LUT at (N·V, roughness), extrapolated linearly past its last row's centre
-// (roughness above 1 − 0.5 / size), where the clamped fetch would hold the row's value and
-// the compensation would miss the roughest lobes' loss (ADR-0023 amendment 3; the white
-// furnace test in `lighting.rs` models this fetch).
+// The split-sum LUT at (N·V, roughness). Tiered's LUT (`brdf_lut_tiered` in lighting.rs)
+// puts its texel centres on the end points, texel i at i / (size − 1) on both axes, so one
+// bilinear fetch covers 0..=1 without clamping the roughest lobes' row (ADR-0023 amendment 3;
+// the white furnace test in `lighting.rs` models this fetch). `MOBA_BRDF_LUT_SIZE` is
+// `BRDF_LUT_SIZE`.
+#define MOBA_BRDF_LUT_SIZE 32.0
 vec2 brdf_lut_sample(float n_dot_v, float roughness) {
-    float size = float(textureSize(brdf_lut, 0).y);
-    float row = roughness * size - 0.5;
-    if (row <= size - 1.0) {
-        return textureLod(brdf_lut, vec2(n_dot_v, roughness), 0.0).rg;
-    }
-    vec2 last = textureLod(brdf_lut, vec2(n_dot_v, (size - 0.5) / size), 0.0).rg;
-    vec2 before = textureLod(brdf_lut, vec2(n_dot_v, (size - 1.5) / size), 0.0).rg;
-    return mix(before, last, row - (size - 2.0));
+    vec2 uv = (vec2(n_dot_v, roughness) * (MOBA_BRDF_LUT_SIZE - 1.0) + 0.5) / MOBA_BRDF_LUT_SIZE;
+    return textureLod(brdf_lut, uv, 0.0).rg;
 }
 #endif
 
@@ -382,6 +378,9 @@ vec3 shade(Surface surface) {
     vec3 f0 = mix(vec3(surface.f0), surface.albedo, surface.metallic);
     vec2 brdf = brdf_lut_sample(n_dot_v, roughness);
     moba_energy_compensation = multiscatter_compensation(f0, brdf);
+#ifdef MOBA_SHADING_MODELS
+    model_prepare(surface, n, v, n_dot_v, alpha, f0);
+#endif
 #else
     vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
 #endif
@@ -434,7 +433,7 @@ vec3 shade(Surface surface) {
 #ifdef MOBA_SHADING_MODELS
     vec3 ambient_spec = ambient_specular(model_ambient_direction(surface, n, v, r, roughness),
                                          roughness)
-        * (model_ambient_f0(surface, f0, n_dot_v) * brdf.x + brdf.y)
+        * (model_ambient_f0(surface, f0) * brdf.x + brdf.y)
         * surface.specular.rgb * surface.specular.w;
 #else
     vec3 ambient_spec = ambient_specular(r, roughness) * (f0 * brdf.x + brdf.y)

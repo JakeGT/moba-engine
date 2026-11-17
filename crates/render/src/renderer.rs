@@ -226,6 +226,11 @@ pub struct RenderConfig {
     /// recorded. `false` (`MOBA_DEFERRED=off`) keeps N1's tiered forward frame, the
     /// reference the deferred–forward parity gate compares against. Default `true`.
     pub deferred: bool,
+    /// Read the deferred lighting's tile counts back for the frame log
+    /// ([`Renderer::exercise_stats`], ADR-0023 amendment 3): a copy of `light_classify`'s
+    /// counts and its barriers in `mask_clear`, which cost about 0.005 ms of GPU time on the
+    /// RTX 5070 Ti, so it is off unless asked for (`MOBA_TILE_COUNTS=1`). Default `false`.
+    pub tile_counts: bool,
     /// Reflex or Anti-Lag (ADR-0021 §6), when the device enables one: default
     /// [`LatencySetting::On`]. A device without either ignores it.
     pub latency: LatencySetting,
@@ -270,6 +275,7 @@ impl Default for RenderConfig {
             debug_view: TemporalDebugView::Off,
             readback: false,
             deferred: true,
+            tile_counts: false,
             latency: LatencySetting::On,
             frame_rate_limit: 240,
         }
@@ -400,6 +406,13 @@ impl RenderConfig {
     #[must_use]
     pub const fn with_deferred(mut self, deferred: bool) -> Self {
         self.deferred = deferred;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::tile_counts`] set.
+    #[must_use]
+    pub const fn with_tile_counts(mut self, tile_counts: bool) -> Self {
+        self.tile_counts = tile_counts;
         self
     }
 
@@ -549,6 +562,26 @@ impl RenderConfig {
     }
 }
 
+/// What a run's frames lit ([`Renderer::exercise_stats`], N2c): timing evidence names the
+/// work it measured, so a lane that reads zero is not mistaken for a cheap one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExerciseStats {
+    /// Frames counted.
+    pub frames: u64,
+    /// `Paint` decals uploaded, summed over the frames.
+    pub paint_decals: u64,
+    /// Deferred frames whose tile counts were read back (only with
+    /// [`RenderConfig::tile_counts`]; 0 otherwise, as are the tile fields).
+    pub lit_frames: u64,
+    /// Standard-class tiles, summed over those frames.
+    pub standard_tiles: u64,
+    /// Extended-class tiles (the models with their own lobes), summed.
+    pub extended_tiles: u64,
+    /// Frames with at least one extended tile.
+    pub extended_frames: u64,
+}
+
 /// How the renderer's pipelines were built ([`Renderer::pipeline_stats`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
@@ -639,7 +672,7 @@ pub struct Renderer {
     /// Offscreen images (R7b), indexed by [`UiImage::index`]; fixed size.
     offscreen: Vec<OffscreenTarget>,
     /// Every frame variant, compiled once at creation: index
-    /// `(2 * haze + capture) * OFFSCREEN_VARIANTS + offscreen mask` (see
+    /// `(4 * paint + 2 * haze + capture) * OFFSCREEN_VARIANTS + offscreen mask` (see
     /// [`Self::plan_index`]).
     plans: Vec<FramePlan>,
     capture_pending: bool,
@@ -678,6 +711,12 @@ pub struct Renderer {
     decal_upload: Box<DecalUpload>,
     /// Usable decals the latest frame could not bind.
     decals_dropped: u32,
+    /// What the frames lit (N2c): paint decals and the deferred tile classes.
+    exercise: ExerciseStats,
+    /// Frame slots whose tile counts `mask_clear` has copied at least once.
+    tile_counts_written: [bool; FRAMES_IN_FLIGHT],
+    /// [`RenderConfig::tile_counts`].
+    tile_counts: bool,
     /// The vendor SDK back ends chosen for this device (ADR-0020 §6c). Declared before
     /// `device`: a back end such as DLSS shuts its SDK session down on the live device.
     vendor: crate::vendor::Selection,
@@ -1040,15 +1079,24 @@ impl Renderer {
             gbuffer_decals: environment_config.decals,
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
-        // that run them; see `plan_index`.
-        let mut plans = Vec::with_capacity(4 * OFFSCREEN_VARIANTS);
-        for haze in [false, true] {
-            for capture in [false, true] {
-                for offscreen in 0..OFFSCREEN_VARIANTS {
-                    plans.push(
-                        frame_graph::build_variant(&frame_spec, capture, offscreen, haze)
+        // that run them, all first without a `Paint` decal (N2c: the G-buffer decals' passes
+        // only reserved, one G-buffer pass); see `plan_index`.
+        let mut plans = Vec::with_capacity(8 * OFFSCREEN_VARIANTS);
+        for paint in [false, true] {
+            for haze in [false, true] {
+                for capture in [false, true] {
+                    for offscreen in 0..OFFSCREEN_VARIANTS {
+                        plans.push(
+                            frame_graph::build_variant(
+                                &frame_spec,
+                                capture,
+                                offscreen,
+                                haze,
+                                paint,
+                            )
                             .map_err(graph_error)?,
-                    );
+                        );
+                    }
                 }
             }
         }
@@ -1189,6 +1237,7 @@ impl Renderer {
                     &shaders,
                     scene.camera_set_layout(),
                     &lighting.decal_buffers(),
+                    depth_format,
                 )
             })
             .transpose()?;
@@ -1429,6 +1478,9 @@ impl Renderer {
             world_config,
             decal_upload: DecalUpload::boxed(),
             decals_dropped: 0,
+            exercise: ExerciseStats::default(),
+            tile_counts_written: [false; FRAMES_IN_FLIGHT],
+            tile_counts: config.tile_counts,
             vendor,
             latency,
             latency_frame: 1,
@@ -1603,6 +1655,19 @@ impl Renderer {
     #[must_use]
     pub fn decals_dropped(&self) -> u32 {
         self.decals_dropped
+    }
+
+    /// What the frames since creation (or the last [`Self::reset_exercise_stats`]) lit: the
+    /// `Paint` decals uploaded and, on the deferred frame, the tiles of each lighting class
+    /// (read back a frame slot later), so timing evidence shows what it measured.
+    #[must_use]
+    pub fn exercise_stats(&self) -> ExerciseStats {
+        self.exercise
+    }
+
+    /// Restarts [`Self::exercise_stats`] (after a warm-up).
+    pub fn reset_exercise_stats(&mut self) {
+        self.exercise = ExerciseStats::default();
     }
 
     /// Whether a map terrain is set (else the R2a plane draws).
@@ -2462,11 +2527,13 @@ impl Renderer {
         }
     }
 
-    /// The plan variant for a capture flag, an offscreen mask and whether heat haze is in
-    /// view (ADR-0019: without it the haze's passes are only reserved, so the frame records
-    /// neither them nor their barriers).
-    const fn plan_index(capture: bool, offscreen: usize, haze: bool) -> usize {
-        (2 * (haze as usize) + capture as usize) * OFFSCREEN_VARIANTS + offscreen
+    /// The plan variant for a capture flag, an offscreen mask, whether heat haze is in view
+    /// (ADR-0019: without it the haze's passes are only reserved, so the frame records
+    /// neither them nor their barriers) and whether a `Paint` decal is in this frame's upload
+    /// (N2c, ADR-0023 §7a: without one the G-buffer decals' passes are only reserved).
+    const fn plan_index(capture: bool, offscreen: usize, haze: bool, paint: bool) -> usize {
+        (4 * (paint as usize) + 2 * (haze as usize) + capture as usize) * OFFSCREEN_VARIANTS
+            + offscreen
     }
 
     /// Points passes that sample transients at the current pool images.
@@ -2685,6 +2752,16 @@ impl Renderer {
         // infinite timeout. It is signalled or will be signalled by the frame's submit.
         unsafe { self.device.device.wait_for_fences(&[fence], true, u64::MAX) }?;
         self.profiler.collect(frame_index);
+        // N2c: the tile counts this slot's `mask_clear` copied (its previous frame's).
+        if let Some(pass) = self.deferred.as_ref()
+            && self.tile_counts_written[frame_index]
+            && let Some([standard, extended]) = pass.tile_counts(frame_index)
+        {
+            self.exercise.lit_frames += 1;
+            self.exercise.standard_tiles += u64::from(standard);
+            self.exercise.extended_tiles += u64::from(extended);
+            self.exercise.extended_frames += u64::from(extended > 0);
+        }
         if let Some(vfx) = self.vfx.as_mut() {
             vfx.collect(frame_index);
         }
@@ -2789,6 +2866,8 @@ impl Renderer {
             crate::lights::ground_footprint(scene.camera.view_proj),
         );
         self.lighting.write_decals(frame_index, &self.decal_upload);
+        self.exercise.frames += 1;
+        self.exercise.paint_decals += self.decal_upload.paint_count() as u64;
         // ADR-0023 §1c: what the GPU reconstructs from depth is in the depth convention.
         let depth = self.frame_spec.depth;
         let (near, far) = (scene.camera.near, scene.camera.far);
@@ -3071,7 +3150,9 @@ impl Renderer {
             None
         };
         let haze = self.vfx.as_ref().and_then(VfxPass::distortion_region);
-        let plan = &self.plans[Self::plan_index(capturing, offscreen_mask, haze.is_some())];
+        // N2c: the decal split only when this frame's upload has a `Paint` decal.
+        let paint = self.gbuffer_decals.is_some() && self.decal_upload.paint_count() > 0;
+        let plan = &self.plans[Self::plan_index(capturing, offscreen_mask, haze.is_some(), paint)];
         let resources = plan.resources;
         let hdr_view = self.transient(resources.hdr).view();
         let depth_view = self.transient(resources.depth).view();
@@ -3162,7 +3243,7 @@ impl Renderer {
                         lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                         // N2c (ADR-0023 §7a): split around the decals when they are a pass.
-                        phase: match (pass.tag, self.gbuffer_decals.is_some()) {
+                        phase: match (pass.tag, paint) {
                             (PassKind::GBufferRest, _) => PrepassPhase::Rest,
                             (_, true) => PrepassPhase::Receivers,
                             _ => PrepassPhase::All,
@@ -3170,14 +3251,18 @@ impl Renderer {
                     },
                 ),
                 PassKind::GBufferDecals => {
-                    if let (Some(pass), Some(temporal)) = (&self.gbuffer_decals, resources.temporal)
-                    {
+                    let gb0_srgb = resources
+                        .temporal
+                        .and_then(|temporal| self.transient(temporal.gbuffer[0]).srgb_view());
+                    debug_assert!(gb0_srgb.is_some(), "gb0 has an sRGB view with the decals");
+                    if let (Some(pass), Some(gb0_srgb)) = (&self.gbuffer_decals, gb0_srgb) {
                         pass.record(
                             &self.device,
                             command_buffer,
                             frame_index,
                             &DecalGBufferTarget {
-                                gb0_srgb: self.transient(temporal.gbuffer[0]).srgb_view(),
+                                gb0_srgb,
+                                depth: depth_view,
                                 extent: render_extent,
                                 camera: self.scene.camera_set(frame_index),
                                 decals: u32::try_from(self.decal_upload.count()).unwrap_or(0),
@@ -3514,7 +3599,9 @@ impl Renderer {
                             .level_count(1)
                             .layer_count(1)];
                         if let (true, Some(pass)) = (deferred, &self.deferred) {
-                            pass.record_reset(command_buffer);
+                            let counts = self.tile_counts;
+                            pass.record_reset(&self.device, command_buffer, frame_index, counts);
+                            self.tile_counts_written[frame_index] = counts;
                         }
                         for mask in [temporal.reactive, temporal.tc_mask] {
                             // SAFETY: the graph moved the mask to TRANSFER_DST_OPTIMAL; the
