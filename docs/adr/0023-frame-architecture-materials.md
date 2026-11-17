@@ -591,9 +591,12 @@ gbuffer_rest        walls, props, structures, units  → gb0–gb2, depth, motio
   terrain G-buffer shader then has no decal code. Since amendment 3 item 31 the decals are
   inline by default, so `scripts/terrain-decal-check.sh` guards both stages that inline them,
   each against its permutation without decal code (`MOBA_DECALS=off`) on the networked Ultra
-  overview: Compat's `terrain.frag` by the `scene` lane (pinned to `MOBA_RENDER_PATH=compat`)
-  and the tiered `terrain_gbuffer*_hdr` stage by the `prepass` lane, each within 1.15×, a
-  missing or zero p50 failing; and their fragment registers (64 and 48 on the RTX 5070 Ti).
+  overview (the median of five interleaved rounds, a 1920×1080 window, under the GPU lock):
+  Compat's `terrain.frag` by the `scene` lane (pinned to `MOBA_RENDER_PATH=compat`) and the
+  tiered `terrain_gbuffer*_hdr` stage by the `prepass` lane, each within 1.15×, a missing or
+  zero p50 failing; and their fragment registers (64 and 48 on the RTX 5070 Ti). The Tiered
+  half fails when a run does not light deferred, and is skipped, with the gate's reason, on a
+  device not admitted to Tiered.
 - *Amendment 3 item 31:* while the terrain is the only `Paint` receiver, the tiered terrain
   G-buffer stage keeps the decals inline (as N2b's did) and this pass is built only on request
   (`RenderConfig::paint_decal_pass`), for the first receiver other than the terrain.
@@ -1659,8 +1662,8 @@ amendment that names C1's consequence.
     decal code too, as it does the forward terrain (byte-identical captures on lavapipe;
     `terrain-decal-check.sh` times one against the other). A further 0.005 ms is available on
     views with no live `Paint` decal: the permutation without decal code is that much cheaper
-    there (the close sheet camera's `prepass`, 0.119 against 0.124 ms; the overview's, 0.106
-    against 0.114 ms), but choosing it per frame changes no pixel only if
+    there (the close sheet camera's `prepass`, 0.119 against 0.124 ms; the overview's, 0.134
+    against 0.145 ms in a 1920×1080 window), but choosing it per frame changes no pixel only if
     the driver compiles the rest identically, so it is left as an N2d lever (gate 7 below).
 32. **Register counts are evidence.** With `MOBA_PIPELINE_STATS=1` every pipeline, compute
     included, keeps the driver's statistics, and the log prints the G-buffer terrain's and

@@ -383,13 +383,17 @@ statistics; NVIDIA reports `Register_Count`. The logs are in the evidence direct
 frame (64 registers, 24,448 bytes against the inline stage's 42,368), and the script times the
 two: since N2b its old comparison read the Tiered `scene` lane, which is empty (0.000 against
 0.000 ms always passed), so it now pins that half to Compat and adds the `prepass` lane on
-Tiered. On the RTX 5070 Ti (the networked Ultra overview, no `Paint` decal in view, two
-rounds, the faster kept; `review4/terrain-decal-check/`):
+Tiered (failing if a Tiered run does not light deferred, skipping on a device not admitted to
+Tiered). It holds the GPU lock itself and keeps the median of five interleaved rounds in a
+1920×1080 window (the first version's two rounds at 1280×720 paired at 1.14× and 1.02×
+against the 1.15× limit). On the RTX 5070 Ti (the networked Ultra overview, no `Paint` decal
+in view, swapchain 1920×1080, render 1260×709; `review5/` in the evidence directory, with its
+command line):
 
-| Path, lane | Decals inline (rounds) | Without decal code (rounds) | Ratio (gate ≤ 1.15) |
+| Path, lane | Decals inline, median (rounds) | Without decal code, median (rounds) | Ratio (gate ≤ 1.15) |
 |---|---|---|---|
-| Compat, `scene` | 0.235 ms (0.235, 0.236) | 0.231 ms (0.231, 0.234) | 1.017 |
-| Tiered, `prepass` | 0.114 ms (0.121, 0.114) | 0.106 ms (0.106, 0.112) | 1.075 |
+| Compat, `scene` | 0.368 ms (0.367, 0.406, 0.368, 0.407, 0.368) | 0.366 ms (0.365, 0.365, 0.401, 0.366, 0.401) | 1.005 |
+| Tiered, `prepass` | 0.145 ms (0.153, 0.143, 0.145, 0.154, 0.145) | 0.134 ms (0.133, 0.143, 0.133, 0.144, 0.134) | 1.082 |
 
 The Tiered difference is the inline decal code's fixed cost on the G-buffer terrain, the lever
 amendment 3 item 31 leaves to N2d.

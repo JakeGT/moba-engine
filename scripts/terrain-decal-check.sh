@@ -10,13 +10,17 @@
 #    `terrain_nodecals.frag`, timed by the `scene` lane.
 # 2. Tiered (MOBA_RENDER_PATH=tiered, the deferred frame): the G-buffer stage
 #    `terrain_gbuffer*_hdr.frag` against `terrain_gbuffer_nodecals*_hdr.frag`, timed by the
-#    `prepass` lane (the G-buffer pass, N2b).
+#    `prepass` lane (the G-buffer pass, N2b). Every Tiered run must log
+#    `[render] lighting: deferred`, or the half fails. A device the gate does not admit to
+#    Tiered (macOS, or one missing a requirement: the probe run logs `path=compat`) skips
+#    this half, with the gate's reason.
 #
-# Timing: the networked whole-map overview on Ultra, with decals on and with MOBA_DECALS=off.
-# Each lane's GPU p50 with decals on must stay within RATIO (default 1.15) of the one
-# without: at R3b the shipped shader was within 2 % on the RTX 5070 Ti and the record copy
-# 1.6x. Two interleaved rounds, the faster of each kept (the GPU's power state moves the small
-# numbers). A missing or zero p50 fails: the lane did not run.
+# Timing: the networked whole-map overview on Ultra in a WINDOW-sized window (default
+# 1920x1080, logical: a scaled Wayland output makes the swapchain larger), with decals on and
+# with MOBA_DECALS=off, ROUNDS interleaved rounds (default 5). Each lane's median GPU p50 with
+# decals on must stay within RATIO (default 1.15) of the median without: at R3b the shipped
+# shader was within 2 % on the RTX 5070 Ti and the record copy 1.6x. A missing or zero p50
+# fails: the lane did not run.
 #
 # Registers: MOBA_PIPELINE_STATS=1 enables VK_KHR_pipeline_executable_properties and the
 # client logs the pipelines' statistics. Compat's `terrain` fragment shader must need at most
@@ -28,11 +32,31 @@
 #
 #   scripts/terrain-decal-check.sh [client binary]
 #
-# OUT=<dir> keeps the logs there (default: a temporary directory, removed at exit). Set
+# The whole run holds the GPU lock GPU_LOCK (default `handoff/gpu.lock` beside the main
+# checkout, when that file exists; GPU_LOCK= runs without one). OUT=<dir> keeps the logs and
+# the command line there (default: a temporary directory, removed at exit). Set
 # RUN="xvfb-run -a" when there is no display. Not for lavapipe: the timing needs a GPU.
 set -euo pipefail
+if [ -z "${TERRAIN_DECAL_CHECK_LOCKED:-}" ]; then
+  if [ -z "${GPU_LOCK+set}" ]; then
+    common=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir \
+      2> /dev/null || true)
+    GPU_LOCK=""
+    if [ -n "$common" ] && [ -e "$(dirname "$(dirname "$common")")/handoff/gpu.lock" ]; then
+      GPU_LOCK="$(dirname "$(dirname "$common")")/handoff/gpu.lock"
+    fi
+  fi
+  if [ -n "$GPU_LOCK" ]; then
+    echo "terrain-decal-check: waiting for the GPU lock $GPU_LOCK"
+    export TERRAIN_DECAL_CHECK_LOCKED="$GPU_LOCK"
+    exec flock "$GPU_LOCK" bash "$0" "$@"
+  fi
+  export TERRAIN_DECAL_CHECK_LOCKED="none"
+fi
 client=${1:-./target/release/moba-client}
 ratio=${RATIO:-1.15}
+rounds=${ROUNDS:-5}
+window=${WINDOW:-1920x1080}
 registers_max=${REGISTERS:-64}
 gbuffer_registers_max=${GBUFFER_REGISTERS:-48}
 if [ -n "${OUT:-}" ]; then
@@ -43,6 +67,14 @@ else
   trap 'rm -rf "$work"' EXIT
 fi
 status=0
+{
+  echo "command: $0 $*"
+  echo "client: $client"
+  echo "checkout: $(git -C "$(dirname "$0")" rev-parse --short HEAD 2> /dev/null || echo ?)"
+  echo "lock: $TERRAIN_DECAL_CHECK_LOCKED"
+  echo "settings: RATIO=$ratio ROUNDS=$rounds WINDOW=$window REGISTERS=$registers_max" \
+    "GBUFFER_REGISTERS=$gbuffer_registers_max RUN=${RUN:-}"
+} | tee "$work/command.txt"
 
 run() {
   local name=$1
@@ -55,49 +87,83 @@ run() {
   }
 }
 
-# The last p50 of a lane in a frame log, or nothing.
-lane_p50() {
-  sed -n "s/.*gpu_$2_p50_ms=\\([0-9.]*\\).*/\\1/p" "$1" | tail -1
+lane_of() {
+  case $1 in
+    compat) echo scene ;;
+    tiered) echo prepass ;;
+  esac
 }
 
-paths=(compat tiered)
-declare -A lane=([compat]=scene [tiered]=prepass)
-for round in 1 2; do
+# The registers runs double as the Tiered probe: is the device admitted, and does it light
+# deferred?
+run stats-compat MOBA_RENDER_PATH=compat MOBA_PIPELINE_STATS=1 MOBA_SMOKE_FRAMES=5
+run stats-tiered MOBA_RENDER_PATH=tiered MOBA_PIPELINE_STATS=1 MOBA_SMOKE_FRAMES=5
+paths=(compat)
+if grep -q 'path=compat' "$work/stats-tiered.log"; then
+  reason=$(grep -o 'admission=[a-z-]*' "$work/stats-tiered.log" | head -1)
+  missing=$(grep -o 'missing=[^ ]*' "$work/stats-tiered.log" | head -1)
+  echo "terrain-decal-check: SKIP tiered: the device is not admitted to Tiered" \
+    "(${reason:-admission unknown} ${missing:-})"
+elif ! grep -q '^\[render\] lighting: deferred' "$work/stats-tiered.log"; then
+  grep '^\[render\]' "$work/stats-tiered.log" || true
+  echo "terrain-decal-check: FAIL tiered: admitted to Tiered but did not light deferred"
+  status=1
+else
+  paths+=(tiered)
+fi
+
+for round in $(seq 1 "$rounds"); do
   for path in "${paths[@]}"; do
     for decals in on off; do
       extra=()
       [ "$decals" = off ] && extra=(MOBA_DECALS=off)
       run "$path-$decals-$round" MOBA_RENDER_PATH="$path" MOBA_SERVER=local \
-        MOBA_CAMERA=overview MOBA_SMOKE_FRAMES=1500 \
+        MOBA_CAMERA=overview MOBA_SMOKE_FRAMES=1500 MOBA_WINDOW_SIZE="$window" \
         MOBA_FRAME_LOG="$work/$path-$decals-$round.txt" "${extra[@]}"
+      if [ "$path" = tiered ] &&
+        ! grep -q '^\[render\] lighting: deferred' "$work/$path-$decals-$round.log"; then
+        echo "terrain-decal-check: FAIL tiered: $path-$decals-$round did not light deferred"
+        status=1
+      fi
     done
   done
 done
 
-# The faster of the two rounds; nothing if either round has no positive p50.
-best() {
-  local a b
-  a=$(lane_p50 "$work/$1-1.txt" "$2")
-  b=$(lane_p50 "$work/$1-2.txt" "$2")
-  awk -v a="$a" -v b="$b" 'BEGIN {
-    if (a == "" || b == "" || a + 0 <= 0 || b + 0 <= 0) exit
-    print (a < b ? a : b)
-  }'
+# The median of the rounds' p50s, and the rounds themselves; nothing if any round has no
+# positive p50.
+median() {
+  local name=$1 lane=$2 round values=""
+  for round in $(seq 1 "$rounds"); do
+    values+="$(sed -n "s/.*gpu_${lane}_p50_ms=\\([0-9.]*\\).*/\\1/p" \
+      "$work/$name-$round.txt" | tail -1) "
+  done
+  tr ' ' '\n' <<< "$values" | awk -v n="$rounds" '
+    NF { v[++c] = $1 + 0; all = all sep $1; sep = "," }
+    END {
+      if (c != n) exit
+      for (i = 1; i <= c; i++) if (v[i] <= 0) exit
+      for (i = 2; i <= c; i++) for (j = i; j > 1 && v[j - 1] > v[j]; j--) {
+        t = v[j]; v[j] = v[j - 1]; v[j - 1] = t
+      }
+      m = (c % 2) ? v[(c + 1) / 2] : (v[c / 2] + v[c / 2 + 1]) / 2
+      printf "%.3f ms (rounds %s)\n", m, all
+    }'
 }
 for path in "${paths[@]}"; do
-  name=${lane[$path]}
-  on=$(best "$path-on" "$name")
-  off=$(best "$path-off" "$name")
+  lane=$(lane_of "$path")
+  on=$(median "$path-on" "$lane")
+  off=$(median "$path-off" "$lane")
   if [ -z "$on" ] || [ -z "$off" ]; then
-    echo "terrain-decal-check: FAIL $path: no positive gpu_${name}_p50_ms in the frame logs" \
+    echo "terrain-decal-check: FAIL $path: a round has no positive gpu_${lane}_p50_ms" \
       "(on '${on}', off '${off}')"
     status=1
-  elif awk -v on="$on" -v off="$off" -v r="$ratio" 'BEGIN { exit !(on <= off * r) }'; then
-    echo "terrain-decal-check: ok $path $name p50 ${on} ms with decals, ${off} ms without" \
-      "(<= x${ratio})"
+  elif awk -v on="${on%% *}" -v off="${off%% *}" -v r="$ratio" \
+    'BEGIN { exit !(on <= off * r) }'; then
+    echo "terrain-decal-check: ok $path $lane median p50 ${on} with decals, ${off}" \
+      "without (<= x${ratio})"
   else
-    echo "terrain-decal-check: FAIL $path $name p50 ${on} ms with decals, ${off} ms without" \
-      "(> x${ratio})"
+    echo "terrain-decal-check: FAIL $path $lane median p50 ${on} with decals, ${off}" \
+      "without (> x${ratio})"
     status=1
   fi
 done
@@ -123,10 +189,11 @@ check_registers() {
     fi
   done <<< "$lines"
 }
-run stats-compat MOBA_RENDER_PATH=compat MOBA_PIPELINE_STATS=1 MOBA_SMOKE_FRAMES=5
-run stats-tiered MOBA_RENDER_PATH=tiered MOBA_PIPELINE_STATS=1 MOBA_SMOKE_FRAMES=5
 check_registers "$work/stats-compat.log" '\[render\] pipeline-stats terrain .*FRAGMENT' \
   "$registers_max" terrain
-check_registers "$work/stats-tiered.log" '\[render\] pipeline-stats terrain_gbuffer .*FRAGMENT' \
-  "$gbuffer_registers_max" terrain_gbuffer
+if [[ " ${paths[*]} " == *" tiered "* ]]; then
+  check_registers "$work/stats-tiered.log" \
+    '\[render\] pipeline-stats terrain_gbuffer .*FRAGMENT' "$gbuffer_registers_max" \
+    terrain_gbuffer
+fi
 exit $status

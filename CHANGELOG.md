@@ -184,8 +184,10 @@ the semver check):
     permutations without decal code (`MOBA_DECALS=off`, which now also selects
     `terrain_gbuffer_nodecals*_hdr` on the deferred frame): Compat's `scene` lane (pinned to
     Compat; on Tiered it has been empty since N2b, so the old check always passed) and the
-    Tiered `prepass` lane, failing on a missing or zero p50; it also bounds their registers
-    (`REGISTERS` 64, `GBUFFER_REGISTERS` 48). With the decal pass a captured frame logs
+    Tiered `prepass` lane (the median of five rounds in a 1920×1080 window, under the GPU lock
+    it takes itself), failing on a missing or zero p50 or a Tiered run that does not light
+    deferred, and skipping the Tiered half on a device not admitted to Tiered; it also bounds
+    their registers (`REGISTERS` 64, `GBUFFER_REGISTERS` 48). With the decal pass a captured frame logs
     `[render] capture frame: paint_decals=N plan=...`, and the CI step requires a live `Paint`
     decal drawn through the pass.
   - **Goldens:** the tiered goldens add `materials` and `decals`; deferred–forward parity holds
