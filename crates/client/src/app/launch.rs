@@ -1420,7 +1420,8 @@ impl Drop for ClientApp {
                 "{} cull={} cull_candidates={} cull_drawn={} cull_casters={} cull_dropped={} \
                  terrain_chunks={}/{} lod_instances={lods} paint_decals_avg={:.2} \
                  tiles_standard_avg={:.1} tiles_extended_avg={:.1} extended_frames={}/{} \
-                 area_lights_avg={:.2} area_frames={}/{} ",
+                 area_lights_avg={:.2} area_frames={}/{} area_mode={} \
+                 area_dispatch_frames={}/{} tiles_area_avg={:.1} ",
                 memory_summary(&renderer.memory_stats()),
                 cull.mode,
                 cull.candidates,
@@ -1437,6 +1438,10 @@ impl Drop for ClientApp {
                 per(exercise.area_lights, exercise.frames),
                 exercise.area_frames,
                 exercise.frames,
+                exercise.area_mode,
+                exercise.area_dispatch_frames,
+                exercise.frames,
+                per(exercise.area_tiles, exercise.lit_frames),
             )
         });
         // ADR-0021 §6b: the latency back end, who paced the frames, and Reflex's timings.

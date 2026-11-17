@@ -1,7 +1,7 @@
 // LTC area lights (N2d, ADR-0023 §4): the integrals of the GGX lobe (as a linearly
 // transformed cosine) and of the clamped cosine over a sphere, a capsule and a rect. Tiered
 // only: included by lighting.glsl under MOBA_TIERED_SHADING. The Rust twin is
-// crates/render/src/ltc.rs, which the gate-3 tests hold against Monte Carlo; keep the two in
+// crates/render/src/ltc/twin.rs, which the gate-3 tests hold against Monte Carlo; keep the two in
 // step.
 //
 // The table is `crates/render/assets/ltc-ggx.bin`, baked by `moba-tools ltc-bake` from a port
@@ -9,9 +9,36 @@
 // demo ltc_quad.fs (the clipless polygon) and ltc_disk.fs, adapted. That code is:
 //
 //   Copyright (c) 2017, Eric Heitz, Jonathan Dupuy, Stephen Hill and David Neubelt.
-//   Redistribution and use in source and binary forms, with or without modification, are
-//   permitted provided that the conditions in THIRD_PARTY.md ("LTC reference code") are met;
-//   the full notice and disclaimer are there.
+//   All rights reserved.
+//
+//   Redistribution and use in source and binary forms, with or without
+//   modification, are permitted provided that the following conditions are met:
+//
+//   * If you use (or adapt) the source code in your own work, please include a
+//     reference to the paper:
+//
+//     Real-Time Polygonal-Light Shading with Linearly Transformed Cosines.
+//     Eric Heitz, Jonathan Dupuy, Stephen Hill and David Neubelt.
+//     ACM Transactions on Graphics (Proceedings of ACM SIGGRAPH 2016) 35(4), 2016.
+//     Project page: https://eheitzresearch.wordpress.com/415-2/
+//
+//   * Redistributions of source code must retain the above copyright notice, this
+//     list of conditions and the following disclaimer.
+//
+//   * Redistributions in binary form must reproduce the above copyright notice,
+//     this list of conditions and the following disclaimer in the documentation
+//     and/or other materials provided with the distribution.
+//
+//   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+//   AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+//   DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+//   FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//   DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+//   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+//   CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+//   OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+//   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 // and asks that its papers be cited: Heitz, Dupuy, Hill and Neubelt, "Real-Time
 // Polygonal-Light Shading with Linearly Transformed Cosines", ACM SIGGRAPH 2016; Heitz and
@@ -97,8 +124,8 @@ void ltc_facing_quad(vec3 p1, vec3 p2, float half_width, float reach, out vec3 q
     vec3 axis = p2 - p1;
     float axis_length2 = dot(axis, axis);
     axis = axis_length2 > 1e-12 ? axis * inversesqrt(axis_length2) : vec3(0.0);
-    vec3 view1 = normalize(p1);
-    vec3 view2 = normalize(p2);
+    vec3 view1 = p1 / max(length(p1), 1e-6);
+    vec3 view2 = p2 / max(length(p2), 1e-6);
     vec3 across1 = cross(view1, axis);
     vec3 across2 = cross(view2, axis);
     vec3 fallback1 = abs(view1.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
@@ -127,18 +154,18 @@ vec3 ltc_solve_cubic(vec4 c) {
     {
         float c_a = delta.x;
         float d_a = -2.0 * b * delta.x + delta.y;
-        float theta = atan(sqrt(discriminant), -d_a) / 3.0;
-        float x_1a = 2.0 * sqrt(-c_a) * cos(theta);
-        float x_3a = 2.0 * sqrt(-c_a) * cos(theta + (2.0 / 3.0) * MOBA_PI);
+        float theta = atan(sqrt(max(discriminant, 0.0)), -d_a) / 3.0;
+        float x_1a = 2.0 * sqrt(max(-c_a, 0.0)) * cos(theta);
+        float x_3a = 2.0 * sqrt(max(-c_a, 0.0)) * cos(theta + (2.0 / 3.0) * MOBA_PI);
         float xl = (x_1a + x_3a) > 2.0 * b ? x_1a : x_3a;
         xlc = vec2(xl - b, c.w);
     }
     {
         float c_d = delta.z;
         float d_d = -d * delta.y + 2.0 * cc * delta.z;
-        float theta = atan(d * sqrt(discriminant), -d_d) / 3.0;
-        float x_1d = 2.0 * sqrt(-c_d) * cos(theta);
-        float x_3d = 2.0 * sqrt(-c_d) * cos(theta + (2.0 / 3.0) * MOBA_PI);
+        float theta = atan(d * sqrt(max(discriminant, 0.0)), -d_d) / 3.0;
+        float x_1d = 2.0 * sqrt(max(-c_d, 0.0)) * cos(theta);
+        float x_3d = 2.0 * sqrt(max(-c_d, 0.0)) * cos(theta + (2.0 / 3.0) * MOBA_PI);
         float xs = x_1d + x_3d < 2.0 * cc ? x_1d : x_3d;
         xsc = vec2(-d, xs + cc);
     }
@@ -185,34 +212,20 @@ float ltc_sphere(vec4 m, vec3 centre, float radius) {
     float d11 = dot(v1, v1);
     float d22 = dot(v2, v2);
     float d12 = dot(v1, v2);
-    float a;
-    float b;
-    if (abs(d12) * inversesqrt(d11 * d22) > 0.0001) {
-        float tr = d11 + d22;
-        float det = sqrt(-d12 * d12 + d11 * d22);
-        float u = 0.5 * sqrt(max(tr - 2.0 * det, 0.0));
-        float v = 0.5 * sqrt(tr + 2.0 * det);
-        float e_max = (u + v) * (u + v);
-        float e_min = (u - v) * (u - v);
-        vec3 w1;
-        vec3 w2;
-        if (d11 > d22) {
-            w1 = d12 * v1 + (e_max - d11) * v2;
-            w2 = d12 * v1 + (e_min - d11) * v2;
-        } else {
-            w1 = d12 * v2 + (e_max - d22) * v1;
-            w2 = d12 * v2 + (e_min - d22) * v1;
-        }
-        a = 1.0 / e_max;
-        b = 1.0 / e_min;
-        v1 = normalize(w1);
-        v2 = normalize(w2);
-    } else {
-        a = 1.0 / d11;
-        b = 1.0 / d22;
-        v1 *= sqrt(a);
-        v2 *= sqrt(b);
-    }
+    // The ellipse's axes: the eigenvectors of the symmetric [d11 d12; d12 d22], by one
+    // rotation, stable where the disk is close to a circle (atan(0, 0) guarded; ADR-0023
+    // amendment 4 item 3).
+    float off = 2.0 * d12;
+    float diff = d11 - d22;
+    float theta = abs(off) + abs(diff) > 1e-7 * (d11 + d22) ? 0.5 * atan(off, diff) : 0.0;
+    float cos_theta = cos(theta);
+    float sin_theta = sin(theta);
+    vec3 w1 = v1 * cos_theta + v2 * sin_theta;
+    vec3 w2 = v2 * cos_theta - v1 * sin_theta;
+    float a = 1.0 / dot(w1, w1);
+    float b = 1.0 / dot(w2, w2);
+    v1 = w1 * sqrt(a);
+    v2 = w2 * sqrt(b);
     vec3 v3 = cross(v1, v2);
     if (dot(c, v3) < 0.0) {
         v3 = -v3;
@@ -228,8 +241,8 @@ float ltc_sphere(vec4 m, vec3 centre, float radius) {
     vec3 roots = ltc_solve_cubic(vec4(c0, c1, c2, 1.0));
     vec3 average = vec3(a * x0 / (a - roots.y), b * y0 / (b - roots.y), 1.0);
     average = normalize(mat3(v1, v2, v3) * average);
-    float l1 = sqrt(-roots.y / roots.z);
-    float l2 = sqrt(-roots.y / roots.x);
+    float l1 = sqrt(max(-roots.y / roots.z, 0.0));
+    float l2 = sqrt(max(-roots.y / roots.x, 0.0));
     float form_factor = l1 * l2 * inversesqrt((1.0 + l1 * l1) * (1.0 + l2 * l2));
     // A degenerate ellipse (the roots coincide) adds nothing rather than a NaN.
     return form_factor > 0.0 ? ltc_sphere_clip(average * form_factor) : 0.0;

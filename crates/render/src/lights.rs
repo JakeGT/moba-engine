@@ -47,7 +47,7 @@ pub(crate) const MAX_LIGHT_COLOR: f32 = 256.0;
 /// total power as the point light of the same colour, so a shaped light is never brighter or
 /// dimmer overall, only spread out. Lengths are metres; a shape is sanitised with its light
 /// (a non-finite size or one under 1 mm makes it a point, and sizes are clamped to 16 m),
-/// and the light's radius is raised to cover it.
+/// and the light's radius is raised to twice its extent.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub enum LightShape {
@@ -175,7 +175,7 @@ impl LightShape {
 /// `color` is linear RGB with the intensity premultiplied, in the same units as the sun:
 /// a white Lambert surface facing a point light at 1 m (and well inside `radius`) shows about
 /// `albedo × color`. The light reaches zero at `radius` from `position` (a windowed
-/// falloff), whatever its [`shape`](Self::shape); the radius is raised to hold the shape.
+/// falloff), whatever its [`shape`](Self::shape); the radius is raised to twice the shape's extent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Light {
@@ -218,8 +218,15 @@ impl Light {
         self
     }
 
+    /// `sanitized`, for the LTC tests.
+    #[cfg(test)]
+    pub(crate) fn sanitized_for_tests(self) -> Option<Self> {
+        self.sanitized()
+    }
+
     /// The light if every value is usable: finite, a positive radius (clamped to 64 m, then
-    /// raised to hold the shape) and a non-negative colour (clamped), with some light in it.
+    /// raised to twice the shape's extent) and a non-negative colour (clamped), with some
+    /// light in it.
     fn sanitized(self) -> Option<Self> {
         if !self.position.is_finite()
             || !self.radius.is_finite()
@@ -232,7 +239,9 @@ impl Light {
         let shape = self.shape.sanitized();
         (color.max_element() > 0.0).then_some(Self {
             position: self.position,
-            radius: self.radius.min(MAX_LIGHT_RADIUS).max(shape.extent()),
+            // Twice the shape's extent, so the window at the far end of a long shape is at
+            // least (1 − 1/16)² of the centre's curve (ADR-0023 amendment 4 item 1).
+            radius: self.radius.min(MAX_LIGHT_RADIUS).max(2.0 * shape.extent()),
             color,
             shape,
         })
@@ -376,6 +385,112 @@ fn include(bounds: [f32; 4], point: Vec3) -> [f32; 4] {
     ]
 }
 
+/// Screen rectangles `light_classify` receives per frame (`AREA_RECTS` in
+/// `light_classify.slang`; its push block holds them in its 128 bytes).
+pub(crate) const AREA_RECTS: usize = 12;
+
+/// The shaped lights' screen bounds (N2d, ADR-0023 amendment 4 item 10): each shaped light's
+/// bounding sphere (its position and radius, which hold the shape) projected to NDC
+/// `[min x, min y, max x, max y]`, so `light_classify` lights only the tiles they touch with
+/// the area-mode pipelines. Past [`AREA_RECTS`] the last rectangle is the union of the rest;
+/// a sphere reaching behind the near plane is the whole screen. Conservative: every pixel a
+/// shaped light reaches is inside its rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct AreaRects {
+    ndc: [[f32; 4]; AREA_RECTS],
+    count: usize,
+}
+
+impl AreaRects {
+    /// The bounds of `lights`' shaped lights under `view_proj` (any depth convention).
+    pub(crate) fn build(lights: &[Light], view_proj: Mat4) -> Self {
+        let mut rects = Self::default();
+        for light in lights {
+            let Some(light) = light
+                .sanitized()
+                .filter(|light| light.shape != LightShape::Point)
+            else {
+                continue;
+            };
+            let Some(rect) = sphere_ndc(view_proj, light.position, light.radius) else {
+                continue;
+            };
+            if rects.count < AREA_RECTS {
+                rects.ndc[rects.count] = rect;
+                rects.count += 1;
+            } else {
+                let last = &mut rects.ndc[AREA_RECTS - 1];
+                *last = [
+                    last[0].min(rect[0]),
+                    last[1].min(rect[1]),
+                    last[2].max(rect[2]),
+                    last[3].max(rect[3]),
+                ];
+            }
+        }
+        rects
+    }
+
+    /// The rectangles in `tile`-pixel tiles of a `size` render (the scene's flipped
+    /// viewport: NDC +y is the top row), inclusive, one tile wider on every side for the
+    /// jitter, packed `x0 | y0 << 16`, `x1 | y1 << 16`; and how many.
+    pub(crate) fn tiles(&self, size: [u32; 2], tile: u32) -> ([[u32; 2]; AREA_RECTS], u32) {
+        let mut out = [[0; 2]; AREA_RECTS];
+        let last = [
+            size[0].max(1).div_ceil(tile) - 1,
+            size[1].max(1).div_ceil(tile) - 1,
+        ];
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Clamped.
+        let to_tile =
+            |pixels: f32, last: u32| ((pixels / tile as f32).floor().max(0.0) as u32).min(last);
+        for (slot, ndc) in out.iter_mut().zip(&self.ndc[..self.count]) {
+            let (width, height) = (size[0] as f32, size[1] as f32);
+            let x0 = to_tile((ndc[0] * 0.5 + 0.5) * width, last[0]).saturating_sub(1);
+            let x1 = (to_tile((ndc[2] * 0.5 + 0.5) * width, last[0]) + 1).min(last[0]);
+            let y0 = to_tile((0.5 - ndc[3] * 0.5) * height, last[1]).saturating_sub(1);
+            let y1 = (to_tile((0.5 - ndc[1] * 0.5) * height, last[1]) + 1).min(last[1]);
+            *slot = [x0 | (y0 << 16), x1 | (y1 << 16)];
+        }
+        (out, self.count as u32)
+    }
+}
+
+/// The NDC rectangle bounding the sphere at `centre` of `radius`, clipped to the screen:
+/// its bounding box's eight corners projected (the whole screen when one is at or behind
+/// the eye), or `None` off screen.
+fn sphere_ndc(view_proj: Mat4, centre: Vec3, radius: f32) -> Option<[f32; 4]> {
+    let mut rect = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for corner in 0..8u8 {
+        let sign = |bit: u8| if corner & bit == 0 { -1.0 } else { 1.0 };
+        let p = centre + Vec3::new(sign(1), sign(2), sign(4)) * radius;
+        let clip = view_proj * p.extend(1.0);
+        if !clip.is_finite() || clip.w <= 1e-4 {
+            return Some([-1.0, -1.0, 1.0, 1.0]);
+        }
+        let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+        rect = [
+            rect[0].min(x),
+            rect[1].min(y),
+            rect[2].max(x),
+            rect[3].max(y),
+        ];
+    }
+    if rect[2] < -1.0 || rect[0] > 1.0 || rect[3] < -1.0 || rect[1] > 1.0 {
+        return None;
+    }
+    Some([
+        rect[0].max(-1.0),
+        rect[1].max(-1.0),
+        rect[2].min(1.0),
+        rect[3].min(1.0),
+    ])
+}
+
 /// Per-column light counts of one binning, kept in CPU memory (see [`bin`]).
 pub(crate) type CellCounts = [u8; GRID * GRID];
 
@@ -446,8 +561,11 @@ pub(crate) fn bin(
             light.color.z,
             light.shape.tag(),
         ];
-        light_words[SHAPE_BASE + count] = light.shape.words();
-        stats.area += u32::from(light.shape != LightShape::Point);
+        // A point's shape is never read (its tag is 0), so it is not written.
+        if light.shape != LightShape::Point {
+            light_words[SHAPE_BASE + count] = light.shape.words();
+            stats.area += 1;
+        }
         count += 1;
         let (x0, x1) = (
             column_of(p.x - r, min_x, inverse_x),
@@ -703,13 +821,77 @@ mod tests {
         assert_eq!(shape(3), [0.0, 0.0, 0.6, 0.8]);
         assert_eq!(shape(5), [0.0, 0.0, 0.0, 0.4]);
         assert_eq!(shape(7), [0.0, 0.0, 0.0, MAX_LIGHT_SHAPE]);
-        // The capsule's radius (1 m) is raised to hold it (2 + 0.25 m); the others keep theirs
-        // or are raised past 3 m by the clamped sphere.
-        assert_eq!(lights_buf[2 * LIGHT_VEC4S][3], 2.25);
+        // The capsule's radius (1 m) is raised to twice its extent (2 × (2 + 0.25) m); the
+        // rect keeps its 3 m (extent 1 m), and the clamped sphere raises its light to 32 m.
+        assert_eq!(lights_buf[2 * LIGHT_VEC4S][3], 4.5);
         assert_eq!(lights_buf[3 * LIGHT_VEC4S][3], 3.0);
-        assert_eq!(lights_buf[7 * LIGHT_VEC4S][3], MAX_LIGHT_SHAPE);
+        assert_eq!(lights_buf[7 * LIGHT_VEC4S][3], 2.0 * MAX_LIGHT_SHAPE);
         // The 32-byte first part is where Compat reads it.
         assert_eq!(lights_buf[LIGHT_VEC4S], [1.0, 1.0, 0.0, 3.0]);
+    }
+
+    /// N2d's area classes: every pixel a shaped light reaches (inside its radius) lies in a
+    /// tile of its rectangle, point lights get none, past `AREA_RECTS` the last rectangle
+    /// holds the rest, and a light around the eye covers the screen.
+    #[test]
+    fn area_rects_bound_every_pixel_a_shaped_light_reaches() {
+        let view_proj = player_camera();
+        let size = [1280u32, 720u32];
+        let tile = 16u32;
+        let sphere = LightShape::Sphere { radius: 0.3 };
+        let lights = [
+            Light::new(Vec3::new(2.0, 1.5, -3.0), 5.0, Vec3::ONE).with_shape(sphere),
+            Light::new(Vec3::new(-6.0, 1.0, 4.0), 3.0, Vec3::ONE),
+        ];
+        let rects = AreaRects::build(&lights, view_proj);
+        let (packed, count) = rects.tiles(size, tile);
+        assert_eq!(count, 1, "the point light has no rectangle");
+        let unpack = |word: u32| (word & 0xFFFF, word >> 16);
+        let ((x0, y0), (x1, y1)) = (unpack(packed[0][0]), unpack(packed[0][1]));
+        let mut checked = 0;
+        for i in -20i8..=20 {
+            for j in -20i8..=20 {
+                let p = Vec3::new(2.0 + f32::from(i) * 0.25, 0.0, -3.0 + f32::from(j) * 0.25);
+                if (p - lights[0].position).length() >= 5.0 {
+                    continue;
+                }
+                let clip = view_proj * p.extend(1.0);
+                let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                if x.abs() > 1.0 || y.abs() > 1.0 {
+                    continue;
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let (tx, ty) = (
+                    ((x * 0.5 + 0.5) * size[0] as f32) as u32 / tile,
+                    ((0.5 - y * 0.5) * size[1] as f32) as u32 / tile,
+                );
+                assert!((x0..=x1).contains(&tx) && (y0..=y1).contains(&ty), "{p:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 100);
+        // More shaped lights than rectangles: the last holds the rest.
+        let many: Vec<Light> = (0..20u8)
+            .map(|k| {
+                Light::new(Vec3::new(f32::from(k) - 10.0, 1.0, 0.0), 1.0, Vec3::ONE)
+                    .with_shape(sphere)
+            })
+            .collect();
+        let (packed, count) = AreaRects::build(&many, view_proj).tiles(size, tile);
+        assert_eq!(count as usize, AREA_RECTS);
+        let (lo, hi) = (
+            unpack(packed[AREA_RECTS - 1][0]),
+            unpack(packed[AREA_RECTS - 1][1]),
+        );
+        assert!(
+            hi.0 - lo.0 > 8,
+            "the union spans the remaining lights: {lo:?} {hi:?}"
+        );
+        // A light around the eye: the whole screen.
+        let eye = Light::new(Vec3::new(0.0, 40.0, 23.0), 2.0, Vec3::ONE).with_shape(sphere);
+        let (packed, count) = AreaRects::build(&[eye], view_proj).tiles(size, tile);
+        assert_eq!(count, 1);
+        assert_eq!(packed[0], [0, (1280 / 16 - 1) | ((720 / 16 - 1) << 16)]);
     }
 
     #[test]

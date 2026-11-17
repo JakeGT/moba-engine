@@ -90,7 +90,9 @@ const PI_LITERAL: f32 = 3.14159;
 struct BrdfGgx;
 
 impl BrdfGgx {
-    // Upstream's arithmetic, kept so that the table is upstream's bit for bit.
+    // Upstream's arithmetic, kept as upstream's (the table matches upstream's to a median
+    // difference of 0; it differs at the grazing row and at roughness 0, ADR-0023
+    // amendment 4 item 6).
     #[allow(clippy::manual_midpoint)]
     fn lambda(alpha: f32, cos_theta: f32) -> f32 {
         let a = 1.0 / alpha / cos_theta.acos().tan();
@@ -568,9 +570,12 @@ fn pack(table: &[Texel], sphere: &[f32]) -> [Vec<[f32; 4]>; 2] {
 
 fn main() -> ExitCode {
     let Some(out) = std::env::args().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: ltc-bake <out.bin>");
+        eprintln!("usage: ltc-bake <out.bin> [<full-precision.bin>]");
         return ExitCode::from(2);
     };
+    // Optional: the same two layers in `f32` (little-endian), the gate-3 evidence for the
+    // half-precision decision (`ltc::tests::the_half_table_integrates_as_the_full_one`).
+    let full = std::env::args().nth(2).map(PathBuf::from);
     let started = std::time::Instant::now();
     let table = fit_table();
     let sphere = sphere_table();
@@ -611,6 +616,18 @@ fn main() -> ExitCode {
     if let Err(error) = std::fs::write(&out, &bytes) {
         eprintln!("ltc-bake: {}: {error}", out.display());
         return ExitCode::FAILURE;
+    }
+    if let Some(full) = &full {
+        let words: Vec<u8> = layers
+            .iter()
+            .flatten()
+            .flatten()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        if let Err(error) = std::fs::write(full, &words) {
+            eprintln!("ltc-bake: {}: {error}", full.display());
+            return ExitCode::FAILURE;
+        }
     }
     println!(
         "ltc-bake: {} ({} bytes, 2 x {N} x {N} RGBA16F) in {:.1} s",

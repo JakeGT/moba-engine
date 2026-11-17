@@ -1,5 +1,41 @@
 //! The Rust twin of `ltc.glsl` (see the module above): the table fetch and each shape's
 //! evaluation, step for step.
+//!
+//! Adapted from the LTC reference code (`THIRD_PARTY.md`), whose notice is:
+//!
+//! ```text
+//! Copyright (c) 2017, Eric Heitz, Jonathan Dupuy, Stephen Hill and David Neubelt.
+//! All rights reserved.
+//!
+//! Redistribution and use in source and binary forms, with or without
+//! modification, are permitted provided that the following conditions are met:
+//!
+//! * If you use (or adapt) the source code in your own work, please include a
+//!   reference to the paper:
+//!
+//!   Real-Time Polygonal-Light Shading with Linearly Transformed Cosines.
+//!   Eric Heitz, Jonathan Dupuy, Stephen Hill and David Neubelt.
+//!   ACM Transactions on Graphics (Proceedings of ACM SIGGRAPH 2016) 35(4), 2016.
+//!   Project page: https://eheitzresearch.wordpress.com/415-2/
+//!
+//! * Redistributions of source code must retain the above copyright notice, this
+//!   list of conditions and the following disclaimer.
+//!
+//! * Redistributions in binary form must reproduce the above copyright notice,
+//!   this list of conditions and the following disclaimer in the documentation
+//!   and/or other materials provided with the distribution.
+//!
+//! THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+//! AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//! IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+//! DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+//! FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//! DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+//! SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+//! CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+//! OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+//! OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//! ```
 
 // The reference's (and the maths') single-letter names, kept for side-by-side reading.
 #![allow(clippy::many_single_char_names)]
@@ -8,8 +44,22 @@ use moba_core::math::Vec3;
 
 use super::{LTC_LAYER_BYTES, LTC_SIZE, LTC_TABLE};
 
+std::thread_local! {
+    /// A full-precision table standing in for the committed one on this thread
+    /// (`the_half_table_integrates_as_the_full_one`): two layers of `LTC_SIZE`² texels.
+    pub(crate) static FULL_TABLE: std::cell::RefCell<Option<Vec<[f32; 4]>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// One texel of `layer` as `f32`.
 pub(crate) fn texel(layer: usize, x: usize, y: usize) -> [f32; 4] {
+    if let Some(texel) = FULL_TABLE.with_borrow(|table| {
+        table
+            .as_ref()
+            .map(|table| table[layer * LTC_SIZE * LTC_SIZE + y * LTC_SIZE + x])
+    }) {
+        return texel;
+    }
     let at = layer * LTC_LAYER_BYTES + (y * LTC_SIZE + x) * 8;
     core::array::from_fn(|channel| {
         let bytes = [LTC_TABLE[at + 2 * channel], LTC_TABLE[at + 2 * channel + 1]];
@@ -179,7 +229,7 @@ fn polygon(frame: &Frame, minv: Minv, corners: [Vec3; 4]) -> f32 {
 fn facing_quad(p1: Vec3, p2: Vec3, half_width: f32, reach: f32) -> [Vec3; 4] {
     let axis = (p2 - p1).normalize_or_zero();
     let end = |p: Vec3, sign: f32| {
-        let view = p.normalize();
+        let view = p / p.length().max(1e-6);
         let across = view.cross(axis);
         let across = if across.length_squared() > 1e-8 {
             across
@@ -213,9 +263,9 @@ fn solve_cubic(coefficient: [f32; 4]) -> [f32; 3] {
     let xlc = {
         let c_a = delta[0];
         let d_a = -2.0 * b * delta[0] + delta[1];
-        let theta = discriminant.sqrt().atan2(-d_a) / 3.0;
-        let x_1a = 2.0 * (-c_a).sqrt() * theta.cos();
-        let x_3a = 2.0 * (-c_a).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
+        let theta = discriminant.max(0.0).sqrt().atan2(-d_a) / 3.0;
+        let x_1a = 2.0 * (-c_a).max(0.0).sqrt() * theta.cos();
+        let x_3a = 2.0 * (-c_a).max(0.0).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
         let xl = if x_1a + x_3a > 2.0 * b { x_1a } else { x_3a };
         [xl - b, a]
     };
@@ -223,9 +273,9 @@ fn solve_cubic(coefficient: [f32; 4]) -> [f32; 3] {
     let xsc = {
         let c_d = delta[2];
         let d_d = -d * delta[1] + 2.0 * c * delta[2];
-        let theta = (d * discriminant.sqrt()).atan2(-d_d) / 3.0;
-        let x_1d = 2.0 * (-c_d).sqrt() * theta.cos();
-        let x_3d = 2.0 * (-c_d).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
+        let theta = (d * discriminant.max(0.0).sqrt()).atan2(-d_d) / 3.0;
+        let x_1d = 2.0 * (-c_d).max(0.0).sqrt() * theta.cos();
+        let x_3d = 2.0 * (-c_d).max(0.0).sqrt() * (theta + (2.0 / 3.0) * pi).cos();
         let xs = if x_1d + x_3d < 2.0 * c { x_1d } else { x_3d };
         [-d, xs + c]
     };
@@ -277,29 +327,21 @@ fn disk(minv: Minv, centre: Vec3, radius: f32) -> f32 {
     let d11 = v1.dot(v1);
     let d22 = v2.dot(v2);
     let d12 = v1.dot(v2);
-    let (a, b);
-    if d12.abs() / (d11 * d22).sqrt() > 0.0001 {
-        let tr = d11 + d22;
-        let det = (-d12 * d12 + d11 * d22).sqrt();
-        let u = 0.5 * (tr - 2.0 * det).max(0.0).sqrt();
-        let v = 0.5 * (tr + 2.0 * det).sqrt();
-        let e_max = (u + v) * (u + v);
-        let e_min = (u - v) * (u - v);
-        let (v1_, v2_) = if d11 > d22 {
-            (d12 * v1 + (e_max - d11) * v2, d12 * v1 + (e_min - d11) * v2)
-        } else {
-            (d12 * v2 + (e_max - d22) * v1, d12 * v2 + (e_min - d22) * v1)
-        };
-        a = 1.0 / e_max;
-        b = 1.0 / e_min;
-        v1 = v1_.normalize();
-        v2 = v2_.normalize();
+    // The ellipse's axes: the eigenvectors of the symmetric `[d11 d12; d12 d22]`, by one
+    // rotation, stable where the disk is close to a circle (`atan2(0, 0)` guarded).
+    let (off, diff) = (2.0 * d12, d11 - d22);
+    let theta = if off.abs() + diff.abs() > 1e-7 * (d11 + d22) {
+        0.5 * off.atan2(diff)
     } else {
-        a = 1.0 / d11;
-        b = 1.0 / d22;
-        v1 *= a.sqrt();
-        v2 *= b.sqrt();
-    }
+        0.0
+    };
+    let (sin, cos) = theta.sin_cos();
+    let w1 = v1 * cos + v2 * sin;
+    let w2 = v2 * cos - v1 * sin;
+    let a = 1.0 / w1.dot(w1);
+    let b = 1.0 / w2.dot(w2);
+    v1 = w1 * a.sqrt();
+    v2 = w2 * b.sqrt();
     let mut v3 = v1.cross(v2);
     if c.dot(v3) < 0.0 {
         v3 = -v3;
@@ -314,8 +356,8 @@ fn disk(minv: Minv, centre: Vec3, radius: f32) -> f32 {
     let [e1r, e2r, e3r] = solve_cubic([c0, c1, c2, 1.0]);
     let average = Vec3::new(a * x0 / (a - e2r), b * y0 / (b - e2r), 1.0);
     let average = (v1 * average.x + v2 * average.y + v3 * average.z).normalize();
-    let l1 = (-e2r / e3r).sqrt();
-    let l2 = (-e2r / e1r).sqrt();
+    let l1 = (-e2r / e3r).max(0.0).sqrt();
+    let l2 = (-e2r / e1r).max(0.0).sqrt();
     let form_factor = l1 * l2 / ((1.0 + l1 * l1) * (1.0 + l2 * l2)).sqrt();
     // A degenerate ellipse (the roots coincide) adds nothing rather than a NaN.
     if form_factor > 0.0 {

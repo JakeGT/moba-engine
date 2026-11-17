@@ -229,8 +229,12 @@ SHA-256 of the files used, at that commit: `LICENSE`
 `7a11a84db2ec9fd9f4c8d619b8e69530787e525be7fa1926de62e1aca98af6a9`,
 `webgl/shaders/ltc/ltc_line.fs`
 `c43e0eb8d3c2671e76e3bc8c90bd7cca3fe00e02061fe25dd7bb3ddd2a217678`. The baked table was checked
-against the upstream's `fit/results/ltc_1.dds` and `ltc_2.dds` (median difference 0 per
-channel; not committed).
+against the upstream's `fit/results/ltc_1.dds`
+(`6aa389c6c0403a408cf6bb23dcdc543ad3e97f0fdc49e60f034b6a85682ee18d`) and `ltc_2.dds`
+(`2ff4f03b10d73e25985216d73a58aa57375f0c775dee0e1bde075d44e2b07200`), at the same commit:
+median difference 0 per channel, differing at the grazing row and at roughness 0 (largest
+relative difference 1.59); neither is committed. `fit/export.h` and `README.md` were read as
+references only (nothing ported).
 
 Papers (cited as the licence asks): Eric Heitz, Jonathan Dupuy, Stephen Hill and David
 Neubelt, "Real-Time Polygonal-Light Shading with Linearly Transformed Cosines", ACM
