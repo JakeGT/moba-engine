@@ -820,7 +820,7 @@ roughness = 0.3
 (0..=16), and replaces the collapsed value. A model table other than the material's model, or
 `[transmission]` on another model, is an error. `ior` and `specular` shape only a `standard`
 or `transmissive` material's F0: every other model's base layer is F0 0.04 (IOR 1.5) on both
-paths, and setting either on it is an error.
+paths, which ignore either key there, and `content-check` rejects setting either on it.
 
 **Emission.** `emissive` is the colour; on **both** paths it is masked by
 `metallic_roughness.b` when that map has a third channel (bake it with `--kind weights

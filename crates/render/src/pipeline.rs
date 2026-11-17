@@ -234,14 +234,9 @@ pub(crate) fn create_blended(
         .dynamic_state(&dynamic)
         .layout(spec.layout)
         .push(&mut rendering);
-    // Statistics for the perf check of the terrain shader's registers (ADR-0017 §1).
-    let create_info = if device.pipeline_stats {
-        create_info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR)
-    } else {
-        create_info
-    };
 
-    // Every referenced struct outlives the call; the layout matches the shaders.
+    // Every referenced struct outlives the call; the layout matches the shaders (with
+    // `RenderConfig::pipeline_stats`, the device adds the statistics flag).
     device.create_graphics_pipeline(&create_info)
 }
 

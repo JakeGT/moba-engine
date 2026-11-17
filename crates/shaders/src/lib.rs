@@ -320,6 +320,17 @@ pub const TERRAIN_GBUFFER_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/terrain_gbuffer_ids_hdr.frag.spv"
 ));
+/// As [`TERRAIN_GBUFFER_HDR_FRAG`] without the `Paint` decals, which the `gbuffer_decals` pass
+/// draws instead (N2c, ADR-0023 §7a, amendment 3 item 31).
+pub const TERRAIN_GBUFFER_NODECALS_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/terrain_gbuffer_nodecals_hdr.frag.spv"
+));
+/// As [`TERRAIN_GBUFFER_NODECALS_HDR_FRAG`], with the ID 0.
+pub const TERRAIN_GBUFFER_NODECALS_IDS_HDR_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/terrain_gbuffer_nodecals_ids_hdr.frag.spv"
+));
 /// Foliage into the G-buffer, motion and `hdr` (N2b).
 pub const FOLIAGE_GBUFFER_HDR_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/foliage_gbuffer_hdr.frag.spv"));
@@ -806,6 +817,14 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "terrain_gbuffer_ids_hdr.frag",
         spirv: TERRAIN_GBUFFER_IDS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_nodecals_hdr.frag",
+        spirv: TERRAIN_GBUFFER_NODECALS_HDR_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_gbuffer_nodecals_ids_hdr.frag",
+        spirv: TERRAIN_GBUFFER_NODECALS_IDS_HDR_FRAG,
     },
     ShaderModule {
         name: "foliage_gbuffer_hdr.frag",

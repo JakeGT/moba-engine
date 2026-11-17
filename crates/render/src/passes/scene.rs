@@ -634,6 +634,10 @@ pub(crate) struct SceneSetSpec {
     pub(crate) depth: DepthConvention,
     /// The deferred lighting (ADR-0023 §2, N2b): the G-buffer pass also writes `hdr`.
     pub(crate) deferred: bool,
+    /// The deferred frame's `Paint` decals are the `gbuffer_decals` pass, so the G-buffer
+    /// terrain has no decal code (`RenderConfig::paint_decal_pass`; ADR-0023 amendment 3
+    /// item 31). Otherwise the terrain takes them inline, as N2b's did.
+    pub(crate) paint_pass: bool,
     /// The world draws the sky (`WorldConfig::sky`): the deferred frame's G-buffer pass
     /// writes its radiance into `hdr`; without it the sky's draw writes `clear_color` there.
     pub(crate) sky: bool,
@@ -665,6 +669,7 @@ impl ScenePipelines {
             overlay,
             depth,
             deferred,
+            paint_pass,
             sky: world_sky,
             clear_color,
         } = set;
@@ -954,6 +959,7 @@ impl ScenePipelines {
                 skinned.is_some(),
                 vat.is_some(),
                 deferred.then_some(color_format),
+                paint_pass,
                 (!world_sky).then(|| clear_color.map(f32::from_bits)),
                 environment.material_gbuffer,
             )?)
@@ -1182,6 +1188,7 @@ impl ScenePipelines {
         skinned: bool,
         vat: bool,
         hdr: Option<vk::Format>,
+        paint_pass: bool,
         sky_clear: Option<[f32; 4]>,
         material_layout: Option<vk::PipelineLayout>,
     ) -> RenderResult<PrepassPipelines> {
@@ -1269,6 +1276,10 @@ impl ScenePipelines {
         let suffixed = |base: &'static str| -> &'static str {
             match (base, hdr.is_some()) {
                 (_, false) => base,
+                ("terrain_gbuffer.frag", true) if paint_pass => "terrain_gbuffer_nodecals_hdr.frag",
+                ("terrain_gbuffer_ids.frag", true) if paint_pass => {
+                    "terrain_gbuffer_nodecals_ids_hdr.frag"
+                }
                 ("terrain_gbuffer.frag", true) => "terrain_gbuffer_hdr.frag",
                 ("terrain_gbuffer_ids.frag", true) => "terrain_gbuffer_ids_hdr.frag",
                 ("foliage_gbuffer.frag", true) => "foliage_gbuffer_hdr.frag",
@@ -1332,6 +1343,11 @@ impl ScenePipelines {
             &written[..count],
             true,
         )?;
+        // `RenderConfig::pipeline_stats`: the G-buffer terrain stage carries the `Paint`
+        // decals' code again (ADR-0023 amendment 3 item 31), as the forward one does.
+        for line in device.pipeline_statistics(terrain.handle()) {
+            eprintln!("[render] pipeline-stats terrain_gbuffer {line}");
+        }
         let unit = build(
             layout,
             Some(VertexLayout::Static),
@@ -1662,6 +1678,8 @@ pub(crate) struct MainViewSpec {
     pub(crate) depth: DepthConvention,
     /// The deferred lighting (N2b): the G-buffer pass also writes `hdr`. With `temporal`.
     pub(crate) deferred: bool,
+    /// [`SceneSetSpec::paint_pass`]. With `deferred`.
+    pub(crate) paint_pass: bool,
     /// The world draws the sky ([`SceneSetSpec::sky`]).
     pub(crate) sky: bool,
     /// [`SceneSetSpec::clear_color`].
@@ -1681,6 +1699,7 @@ impl MainViewSpec {
             overlay: self.overlay && !msaa,
             depth: self.depth,
             deferred: self.deferred && self.temporal && !msaa,
+            paint_pass: self.paint_pass && self.deferred && self.temporal && !msaa,
             sky: self.sky,
             clear_color: self.clear_color,
         };
@@ -1694,6 +1713,7 @@ impl MainViewSpec {
             overlay: false,
             depth: self.depth,
             deferred: false,
+            paint_pass: false,
             sky: self.sky,
             clear_color: self.clear_color,
         });

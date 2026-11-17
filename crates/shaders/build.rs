@@ -264,10 +264,27 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "unit_gbuffer_ids_hdr.frag",
         defines: &["GBUFFER", "PREPASS_IDS", "GBUFFER_HDR"],
     },
+    // The terrain takes its `Paint` decals inline, as N2b's did (ADR-0023 amendment 3 item 31).
     Permutation {
         source: "terrain.frag",
         output: "terrain_gbuffer_hdr.frag",
-        // N2c (ADR-0023 §7): the deferred frame's `Paint` decals are their own pass.
+        defines: &["GBUFFER", "MOBA_NO_GLOW_DECALS", "GBUFFER_HDR"],
+    },
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_gbuffer_ids_hdr.frag",
+        defines: &[
+            "GBUFFER",
+            "MOBA_NO_GLOW_DECALS",
+            "PREPASS_IDS",
+            "GBUFFER_HDR",
+        ],
+    },
+    // N2c (ADR-0023 §7a): without decal code, for the frame whose `Paint` decals are the
+    // `gbuffer_decals` pass (`RenderConfig::paint_decal_pass`, amendment 3 item 31).
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_gbuffer_nodecals_hdr.frag",
         defines: &[
             "GBUFFER",
             "MOBA_NO_GLOW_DECALS",
@@ -277,7 +294,7 @@ const PERMUTATIONS: &[Permutation] = &[
     },
     Permutation {
         source: "terrain.frag",
-        output: "terrain_gbuffer_ids_hdr.frag",
+        output: "terrain_gbuffer_nodecals_ids_hdr.frag",
         defines: &[
             "GBUFFER",
             "MOBA_NO_GLOW_DECALS",

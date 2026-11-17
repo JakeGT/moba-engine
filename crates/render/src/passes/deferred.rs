@@ -385,11 +385,25 @@ impl DeferredPass {
             )?;
             Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
         };
-        Ok([
+        let pipelines = [
             pipeline("light_classify.slang", classify_layout)?,
             pipeline("deferred_light.comp", light_layout)?,
             pipeline("deferred_light_extended.comp", light_layout)?,
-        ])
+        ];
+        // `RenderConfig::pipeline_stats`: the permutations' registers (amendment 3 item 32).
+        for (name, pipeline) in [
+            "light_classify",
+            "deferred_light",
+            "deferred_light_extended",
+        ]
+        .iter()
+        .zip(&pipelines)
+        {
+            for line in device.pipeline_statistics(pipeline.handle()) {
+                eprintln!("[render] pipeline-stats {name} {line}");
+            }
+        }
+        Ok(pipelines)
     }
 
     /// Debug builds' shader hot reload: new pipelines from `shaders` (installed with

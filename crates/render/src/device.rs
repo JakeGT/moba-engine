@@ -681,12 +681,20 @@ impl DeviceContext {
         create_info: &vk::GraphicsPipelineCreateInfo<'_>,
     ) -> RenderResult<vk::Pipeline> {
         let started = Instant::now();
+        // `RenderConfig::pipeline_stats`: every pipeline keeps its statistics, so
+        // [`Self::pipeline_statistics`] may query any of them (the terrain's registers,
+        // ADR-0017 §1; the G-buffer terrain's, ADR-0023 amendment 3 item 31).
+        let create_info = if self.pipeline_stats {
+            create_info.flags(create_info.flags | vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR)
+        } else {
+            *create_info
+        };
         // SAFETY: the caller's create info and everything it points to outlive the call; the
         // cache (possibly null) belongs to this device.
         let pipelines = unsafe {
             self.device.create_graphics_pipelines(
                 self.pipeline_cache,
-                core::slice::from_ref(create_info),
+                core::slice::from_ref(&create_info),
                 None,
             )
         };
@@ -784,12 +792,19 @@ impl DeviceContext {
         create_info: &vk::ComputePipelineCreateInfo<'_>,
     ) -> RenderResult<vk::Pipeline> {
         let started = Instant::now();
+        // `RenderConfig::pipeline_stats`: the driver's statistics, as for the graphics
+        // pipelines (the deferred lighting's register counts, ADR-0023 amendment 3 item 32).
+        let create_info = if self.pipeline_stats {
+            create_info.flags(create_info.flags | vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR)
+        } else {
+            *create_info
+        };
         // SAFETY: the caller's create info and everything it points to outlive the call; the
         // cache (possibly null) belongs to this device.
         let pipelines = unsafe {
             self.device.create_compute_pipelines(
                 self.pipeline_cache,
-                core::slice::from_ref(create_info),
+                core::slice::from_ref(&create_info),
                 None,
             )
         };

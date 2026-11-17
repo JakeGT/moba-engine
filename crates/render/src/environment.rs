@@ -430,6 +430,16 @@ pub(crate) struct DecalUpload {
 /// Bytes of the decal storage buffer.
 pub(crate) const DECAL_BUFFER_SIZE: u64 = core::mem::size_of::<DecalUpload>() as u64;
 
+/// What [`DecalUpload::build`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DecalsBuilt {
+    /// Usable, visible decals that did not fit.
+    pub(crate) dropped: u32,
+    /// `Paint` decals uploaded: the ones the G-buffer decal pass draws (N2c, ADR-0023 §7a).
+    /// Without any, the deferred frame runs one G-buffer pass.
+    pub(crate) paint: usize,
+}
+
 impl DecalUpload {
     /// An empty upload (no decals).
     pub(crate) fn boxed() -> Box<Self> {
@@ -448,14 +458,15 @@ impl DecalUpload {
     /// bounds `[min x, min z, max x, max z]` of the ground the main camera shows, decals whose
     /// footprint lies outside it are skipped: they cannot be seen, and an off-screen one (a
     /// distant or global telegraph) would otherwise stretch the grid and coarsen every cell.
-    /// Returns how many usable, visible decals did not fit.
+    /// Returns how many usable, visible decals did not fit and how many of the uploaded ones
+    /// are `Paint` (counted here, once per frame).
     pub(crate) fn build(
         &mut self,
         decals: &[Decal],
         cap: usize,
         floor: f32,
         view: Option<[f32; 4]>,
-    ) -> u32 {
+    ) -> DecalsBuilt {
         let floor = if floor.is_finite() {
             floor.clamp(0.0, 1.0)
         } else {
@@ -465,6 +476,7 @@ impl DecalUpload {
         let mut count = 0usize;
         let mut enemies = 0u32;
         let mut dropped = 0u32;
+        let mut paint = 0usize;
         let mut min = [f32::INFINITY; 2];
         let mut max = [f32::NEG_INFINITY; 2];
         for pass in [true, false] {
@@ -494,12 +506,13 @@ impl DecalUpload {
                 self.decals[count] = gpu_decal(decal, floor);
                 count += 1;
                 enemies += u32::from(enemy);
+                paint += usize::from(decal.style != DecalStyle::Glow);
             }
         }
         self.cells = [[0; 4]; DECAL_GRID * DECAL_GRID];
         if count == 0 {
             self.header = DecalHeader::default();
-            return dropped;
+            return DecalsBuilt { dropped, paint };
         }
         // At least 1 m per cell edge, so a tiny cluster still gets a sensible grid.
         let span = [
@@ -533,7 +546,7 @@ impl DecalUpload {
                 }
             }
         }
-        dropped
+        DecalsBuilt { dropped, paint }
     }
 
     /// Decals in the upload (paint and glow).
@@ -541,9 +554,9 @@ impl DecalUpload {
         self.header.counts[0] as usize
     }
 
-    /// `Paint` decals in the upload: the ones the G-buffer decal pass draws (N2c, ADR-0023
-    /// §7a). Without any, the deferred frame runs one G-buffer pass.
-    pub(crate) fn paint_count(&self) -> usize {
+    /// `Paint` decals in the upload, from the records (the test of [`DecalsBuilt::paint`]).
+    #[cfg(test)]
+    fn paint_records(&self) -> usize {
         self.decals[..self.count().min(MAX_DECALS)]
             .iter()
             .filter(|decal| (decal.params[1] as u32) & FLAG_GLOW == 0)
@@ -1314,7 +1327,7 @@ mod tests {
         let mut decals = vec![disc(0.0, DecalRole::Cosmetic); 10];
         decals.push(disc(5.0, DecalRole::EnemyTelegraph));
         decals.push(disc(6.0, DecalRole::Ally));
-        let dropped = upload.build(&decals, 4, 0.35, None);
+        let dropped = upload.build(&decals, 4, 0.35, None).dropped;
         assert_eq!(upload.count(), 4);
         assert_eq!(dropped, 8);
         // The enemy telegraph is record 0 and its opacity is floored.
@@ -1341,7 +1354,8 @@ mod tests {
         assert!((upload.decals[0].color[3] - 0.05).abs() < 1e-6);
     }
 
-    /// `paint_count` counts the records the G-buffer decal pass draws: not the glow ones.
+    /// `build` counts the records the G-buffer decal pass draws (not the glow ones), as the
+    /// records say, including after a cap drops some.
     #[test]
     fn paint_count_skips_glow_decals() {
         let mut upload = DecalUpload::boxed();
@@ -1350,12 +1364,23 @@ mod tests {
             disc(1.0, DecalRole::EnemyTelegraph),
             disc(2.0, DecalRole::Ally).with_style(DecalStyle::Paint),
         ];
-        let _ = upload.build(&decals, 8, 0.35, None);
-        assert_eq!((upload.count(), upload.paint_count()), (3, 2));
-        let _ = upload.build(&decals[1..2], 8, 0.35, None);
-        assert_eq!((upload.count(), upload.paint_count()), (1, 0));
-        let _ = upload.build(&[], 8, 0.35, None);
-        assert_eq!(upload.paint_count(), 0);
+        let built = upload.build(&decals, 8, 0.35, None);
+        assert_eq!(
+            (upload.count(), built.paint, upload.paint_records()),
+            (3, 2, 2)
+        );
+        let built = upload.build(&decals, 2, 0.35, None);
+        assert_eq!(
+            (upload.count(), built.paint, upload.paint_records()),
+            (2, 1, 1)
+        );
+        let built = upload.build(&decals[1..2], 8, 0.35, None);
+        assert_eq!(
+            (upload.count(), built.paint, upload.paint_records()),
+            (1, 0, 0)
+        );
+        let built = upload.build(&[], 8, 0.35, None);
+        assert_eq!((built.paint, upload.paint_records()), (0, 0));
     }
 
     #[test]
@@ -1364,7 +1389,7 @@ mod tests {
         let decals: Vec<Decal> = (0..200)
             .map(|index| disc(index as f32, DecalRole::EnemyTelegraph))
             .collect();
-        let dropped = upload.build(&decals, 16, 0.35, None);
+        let dropped = upload.build(&decals, 16, 0.35, None).dropped;
         assert_eq!(upload.count(), MAX_DECALS);
         assert_eq!(dropped, 200 - MAX_DECALS as u32);
     }
@@ -1380,7 +1405,7 @@ mod tests {
             disc(10.0, DecalRole::Ally),
         ];
         let view = Some([-40.0, -40.0, 40.0, 40.0]);
-        let dropped = upload.build(&decals, 8, 0.35, view);
+        let dropped = upload.build(&decals, 8, 0.35, view).dropped;
         assert_eq!(dropped, 0, "an unseen decal is not a dropped one");
         assert_eq!(upload.count(), 2);
         let rect = upload.header.rect;
@@ -1429,7 +1454,7 @@ mod tests {
             disc(0.0, DecalRole::Cosmetic).with_fade(0.0),
             disc(0.0, DecalRole::Cosmetic).with_progress(Some(f32::NAN)),
         ];
-        assert_eq!(upload.build(&bad, 8, 0.35, None), 0);
+        assert_eq!(upload.build(&bad, 8, 0.35, None).dropped, 0);
         assert_eq!(upload.count(), 0);
     }
 

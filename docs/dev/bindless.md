@@ -10,8 +10,11 @@ is the working summary. Evidence: [perf/0028](../perf/0028-bindless.md).
   (ADR-0009) and never creates it. In N0 only the smoke tests bound it; since N2c
   ([ADR-0023](../adr/0023-frame-architecture-materials.md) amendment 3) the unit G-buffer stages
   read their material textures and the material sampler from it.
-- **One set, bound at index 0** of every tiered pipeline layout, `UPDATE_AFTER_BIND_POOL`,
-  every binding `PARTIALLY_BOUND | UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING`:
+- **One set**, `UPDATE_AFTER_BIND_POOL`, every binding
+  `PARTIALLY_BOUND | UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING`. A pipeline layout that
+  reads it places it where its shaders declare it: the smoke tests at set 0, the units'
+  material G-buffer layout (N2c) at set 2, after the camera (0) and the instances (1). Other
+  tiered layouts do not include it:
 
 | Binding | Type | Slots | Fallbacks |
 |---|---|---|---|

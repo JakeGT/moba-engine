@@ -231,6 +231,13 @@ pub struct RenderConfig {
     /// counts and its barriers in `mask_clear`, which cost about 0.005 ms of GPU time on the
     /// RTX 5070 Ti, so it is off unless asked for (`MOBA_TILE_COUNTS=1`). Default `false`.
     pub tile_counts: bool,
+    /// The deferred frame draws its `Paint` decals as the `gbuffer_decals` pass between the
+    /// terrain and the rest of the G-buffer (ADR-0023 §7a), not inline in the terrain's
+    /// G-buffer stage. The pass is for `Paint` receivers other than the terrain, and the
+    /// terrain is the only one, where the inline decals cost less (amendment 3 item 31), so
+    /// it is off unless asked for (`MOBA_PAINT_DECAL_PASS=1`, which keeps it tested).
+    /// Default `false`.
+    pub paint_decal_pass: bool,
     /// Reflex or Anti-Lag (ADR-0021 §6), when the device enables one: default
     /// [`LatencySetting::On`]. A device without either ignores it.
     pub latency: LatencySetting,
@@ -276,6 +283,7 @@ impl Default for RenderConfig {
             readback: false,
             deferred: true,
             tile_counts: false,
+            paint_decal_pass: false,
             latency: LatencySetting::On,
             frame_rate_limit: 240,
         }
@@ -413,6 +421,13 @@ impl RenderConfig {
     #[must_use]
     pub const fn with_tile_counts(mut self, tile_counts: bool) -> Self {
         self.tile_counts = tile_counts;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::paint_decal_pass`] set.
+    #[must_use]
+    pub const fn with_paint_decal_pass(mut self, paint_decal_pass: bool) -> Self {
+        self.paint_decal_pass = paint_decal_pass;
         self
     }
 
@@ -709,14 +724,24 @@ pub struct Renderer {
     world_config: WorldConfig,
     /// This frame's decal buffer contents, built on the CPU (R3b; boxed once).
     decal_upload: Box<DecalUpload>,
+    /// `Paint` decals in this frame's upload ([`DecalsBuilt::paint`](crate::environment::DecalsBuilt)).
+    paint_decals: usize,
     /// Usable decals the latest frame could not bind.
     decals_dropped: u32,
     /// What the frames lit (N2c): paint decals and the deferred tile classes.
     exercise: ExerciseStats,
-    /// Frame slots whose tile counts `mask_clear` has copied at least once.
+    /// Frame slots whose last submitted frame copied the tile counts in `mask_clear`: set
+    /// only after a successful submit, cleared once read.
     tile_counts_written: [bool; FRAMES_IN_FLIGHT],
     /// [`RenderConfig::tile_counts`].
     tile_counts: bool,
+    /// A submitted frame has run `light_classify` on the current tile buffer, so its header
+    /// holds counts. False at creation and after a resize, so the first copy, which would read
+    /// an unwritten header, is skipped.
+    tile_header_written: bool,
+    /// This frame's recording: (copied the counts, reset the tiles for `light_classify`),
+    /// applied to the two fields above once it is submitted.
+    tile_counts_recorded: (bool, bool),
     /// The vendor SDK back ends chosen for this device (ADR-0020 §6c). Declared before
     /// `device`: a back end such as DLSS shuts its SDK session down on the live device.
     vendor: crate::vendor::Selection,
@@ -1076,7 +1101,9 @@ impl Renderer {
             depth: DepthConvention::of(path),
             gbuffer_debug: temporal && config.debug_view.gbuffer_view().is_some(),
             deferred,
-            gbuffer_decals: environment_config.decals,
+            // Amendment 3 item 31: only with the pass asked for; otherwise the terrain takes
+            // the `Paint` decals inline and the graph is N2b's.
+            gbuffer_decals: environment_config.decals && config.paint_decal_pass,
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
         // that run them, all first without a `Paint` decal (N2c: the G-buffer decals' passes
@@ -1208,6 +1235,7 @@ impl Renderer {
                 overlay: tiered,
                 depth: frame_spec.depth,
                 deferred: frame_spec.has_deferred(),
+                paint_pass: frame_spec.has_gbuffer_decals(),
                 sky: world_config.sky,
                 clear_color: config.clear_color.map(f32::to_bits),
             },
@@ -1477,10 +1505,13 @@ impl Renderer {
             exposure_pending: 0.0,
             world_config,
             decal_upload: DecalUpload::boxed(),
+            paint_decals: 0,
             decals_dropped: 0,
             exercise: ExerciseStats::default(),
             tile_counts_written: [false; FRAMES_IN_FLIGHT],
             tile_counts: config.tile_counts,
+            tile_header_written: false,
+            tile_counts_recorded: (false, false),
             vendor,
             latency,
             latency_frame: 1,
@@ -2762,6 +2793,9 @@ impl Renderer {
             self.exercise.extended_tiles += u64::from(extended);
             self.exercise.extended_frames += u64::from(extended > 0);
         }
+        // Read once; set again only if this slot's next frame copies and is submitted.
+        self.tile_counts_written[frame_index] = false;
+        self.tile_counts_recorded = (false, false);
         if let Some(vfx) = self.vfx.as_mut() {
             vfx.collect(frame_index);
         }
@@ -2859,15 +2893,17 @@ impl Renderer {
         } else {
             &[]
         };
-        self.decals_dropped = self.decal_upload.build(
+        let built = self.decal_upload.build(
             decals,
             environment.max_decals as usize,
             self.config.quality_tier.vfx_budget().telegraph_floor,
             crate::lights::ground_footprint(scene.camera.view_proj),
         );
+        self.decals_dropped = built.dropped;
+        self.paint_decals = built.paint;
         self.lighting.write_decals(frame_index, &self.decal_upload);
         self.exercise.frames += 1;
-        self.exercise.paint_decals += self.decal_upload.paint_count() as u64;
+        self.exercise.paint_decals += built.paint as u64;
         // ADR-0023 §1c: what the GPU reconstructs from depth is in the depth convention.
         let depth = self.frame_spec.depth;
         let (near, far) = (scene.camera.near, scene.camera.far);
@@ -3077,6 +3113,9 @@ impl Renderer {
             return Err(error.into());
         }
         self.set_latency_marker(vk::LatencyMarkerNV::RENDERSUBMIT_END);
+        let (copied, classified) = self.tile_counts_recorded;
+        self.tile_counts_written[frame_index] = copied;
+        self.tile_header_written |= classified;
         self.profiler.submitted(frame_index);
         self.last_submitted = true;
         if let Some(vfx) = self.vfx.as_mut() {
@@ -3151,7 +3190,7 @@ impl Renderer {
         };
         let haze = self.vfx.as_ref().and_then(VfxPass::distortion_region);
         // N2c: the decal split only when this frame's upload has a `Paint` decal.
-        let paint = self.gbuffer_decals.is_some() && self.decal_upload.paint_count() > 0;
+        let paint = self.gbuffer_decals.is_some() && self.paint_decals > 0;
         let plan = &self.plans[Self::plan_index(capturing, offscreen_mask, haze.is_some(), paint)];
         let resources = plan.resources;
         let hdr_view = self.transient(resources.hdr).view();
@@ -3599,9 +3638,9 @@ impl Renderer {
                             .level_count(1)
                             .layer_count(1)];
                         if let (true, Some(pass)) = (deferred, &self.deferred) {
-                            let counts = self.tile_counts;
+                            let counts = self.tile_counts && self.tile_header_written;
                             pass.record_reset(&self.device, command_buffer, frame_index, counts);
-                            self.tile_counts_written[frame_index] = counts;
+                            self.tile_counts_recorded = (counts, true);
                         }
                         for mask in [temporal.reactive, temporal.tc_mask] {
                             // SAFETY: the graph moved the mask to TRANSFER_DST_OPTIMAL; the
@@ -3968,6 +4007,8 @@ impl Renderer {
         }
         if let Some(deferred) = self.deferred.as_mut() {
             deferred.resize(&self.device, swapchain.extent)?;
+            // The tile buffer may be new: its header is unwritten until a frame classifies.
+            self.tile_header_written = false;
         }
         self.transients
             .resize(&self.device, self.plans[0].graph.slots(), extents)?;

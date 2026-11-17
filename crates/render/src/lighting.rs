@@ -692,29 +692,57 @@ pub(crate) fn brdf_lut_tiered() -> &'static [u8] {
 /// are integrated in parallel (each texel is independent, so the bytes do not depend on the
 /// thread count).
 fn brdf_lut_with(samples: u32, coordinate: impl Fn(u32) -> f32 + Sync) -> Vec<u8> {
-    let row_bytes = (BRDF_LUT_SIZE * 4) as usize;
-    let mut bytes = vec![0_u8; row_bytes * BRDF_LUT_SIZE as usize];
     let threads = std::thread::available_parallelism()
         .map_or(1, core::num::NonZeroUsize::get)
         .clamp(1, BRDF_LUT_SIZE as usize);
-    let rows_per_thread = (BRDF_LUT_SIZE as usize).div_ceil(threads);
-    let coordinate = &coordinate;
-    std::thread::scope(|scope| {
-        for (chunk, rows) in bytes.chunks_mut(row_bytes * rows_per_thread).enumerate() {
-            scope.spawn(move || {
-                for (offset, row) in rows.chunks_mut(row_bytes).enumerate() {
-                    let row_index = (chunk * rows_per_thread + offset) as u32;
-                    let roughness = coordinate(row_index);
-                    for (column, texel) in row.chunks_mut(4).enumerate() {
-                        let n_dot_v = coordinate(column as u32);
-                        let (scale, bias) = integrate_brdf(n_dot_v, roughness, samples);
-                        texel[..2].copy_from_slice(&moba_assets::f16_from_f32(scale).to_le_bytes());
-                        texel[2..].copy_from_slice(&moba_assets::f16_from_f32(bias).to_le_bytes());
-                    }
+    brdf_lut_rows(samples, &coordinate, threads - 1)
+}
+
+/// [`brdf_lut_with`] on the calling thread and up to `helpers` scoped threads, which take rows
+/// from one queue until it is empty. A helper the system refuses to start leaves its rows to
+/// the others (the caller drains the queue too), so a refused spawn costs time, not the
+/// renderer's creation.
+fn brdf_lut_rows(
+    samples: u32,
+    coordinate: &(impl Fn(u32) -> f32 + Sync),
+    helpers: usize,
+) -> Vec<u8> {
+    let row_bytes = (BRDF_LUT_SIZE * 4) as usize;
+    let mut bytes = vec![0_u8; row_bytes * BRDF_LUT_SIZE as usize];
+    {
+        let rows = std::sync::Mutex::new(bytes.chunks_mut(row_bytes).enumerate());
+        let work = || {
+            loop {
+                // A helper that panicked poisons the lock; the scope re-raises its panic.
+                let next = rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .next();
+                let Some((row_index, row)) = next else {
+                    break;
+                };
+                let roughness = coordinate(row_index as u32);
+                for (column, texel) in row.chunks_mut(4).enumerate() {
+                    let n_dot_v = coordinate(column as u32);
+                    let (scale, bias) = integrate_brdf(n_dot_v, roughness, samples);
+                    texel[..2].copy_from_slice(&moba_assets::f16_from_f32(scale).to_le_bytes());
+                    texel[2..].copy_from_slice(&moba_assets::f16_from_f32(bias).to_le_bytes());
                 }
-            });
-        }
-    });
+            }
+        };
+        std::thread::scope(|scope| {
+            for _ in 0..helpers {
+                if std::thread::Builder::new()
+                    .name(String::from("brdf-lut"))
+                    .spawn_scoped(scope, work)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            work();
+        });
+    }
     bytes
 }
 
@@ -1793,6 +1821,33 @@ mod tests {
         assert!(scale + bias < 0.9 && scale + bias > 0.3, "{scale} {bias}");
         let lut = brdf_lut();
         assert_eq!(lut.len(), (BRDF_LUT_SIZE * BRDF_LUT_SIZE * 4) as usize);
+    }
+
+    /// The LUT's bytes do not depend on how many threads integrate it: the caller alone (as
+    /// when no helper thread can start) gives the same bytes as several.
+    #[test]
+    fn brdf_lut_bytes_do_not_depend_on_the_threads() {
+        let coordinate = |index: u32| index as f32 / (BRDF_LUT_SIZE - 1) as f32;
+        let alone = brdf_lut_rows(16, &coordinate, 0);
+        assert_eq!(alone, brdf_lut_rows(16, &coordinate, 3));
+        assert_eq!(alone, brdf_lut_rows(16, &coordinate, 64));
+    }
+
+    /// `lighting.glsl`'s `MOBA_BRDF_LUT_SIZE`, which `brdf_lut_sample` scales the fetch by, is
+    /// the size of the LUT Rust uploads.
+    #[test]
+    fn shader_brdf_lut_size_is_the_uploaded_size() {
+        let glsl = include_str!("../../shaders/shaders/include/lighting.glsl");
+        let defines: Vec<&str> = glsl
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("#define MOBA_BRDF_LUT_SIZE "))
+            .collect();
+        assert_eq!(defines.len(), 1, "one MOBA_BRDF_LUT_SIZE define");
+        let size: f32 = defines[0].trim().parse().expect("a number");
+        assert!(
+            (size - BRDF_LUT_SIZE as f32).abs() < f32::EPSILON,
+            "{size} vs {BRDF_LUT_SIZE}"
+        );
     }
 
     /// ADR-0023 gate 3, white furnace: a metal with F0 = 1 under a uniform white

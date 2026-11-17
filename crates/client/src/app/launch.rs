@@ -562,6 +562,14 @@ pub(crate) fn tile_counts() -> bool {
     std::env::var("MOBA_TILE_COUNTS").is_ok_and(|value| value.trim() == "1")
 }
 
+/// `MOBA_PAINT_DECAL_PASS=1` draws the deferred frame's `Paint` decals as the G-buffer decal
+/// pass (ADR-0023 §7a) rather than inline in the terrain's G-buffer stage (amendment 3 item
+/// 31): for testing the pass until a receiver other than the terrain needs it. Read once at
+/// startup.
+pub(crate) fn paint_decal_pass() -> bool {
+    std::env::var("MOBA_PAINT_DECAL_PASS").is_ok_and(|value| value.trim() == "1")
+}
+
 /// `MOBA_STYLISATION=off`: the map's stylisation (wrap, rim, ramp and painted specular) set
 /// to its neutral values, so a frame shows the plain BRDF (the deferred–forward parity gate,
 /// ADR-0023 gate 2, compares with stylisation off on both paths). Read once.

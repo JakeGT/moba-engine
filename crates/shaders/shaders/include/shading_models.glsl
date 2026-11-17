@@ -151,52 +151,47 @@ vec3 model_thin_film_fresnel(float cos_theta, float film_ior, float thickness, v
 
 // The model's light-invariant terms, computed once per pixel by `model_prepare` (called by
 // `shade()` before the sun and the light loop) and read by `model_direct` for each light.
+// A pixel has one model, so the models share three vec4s, which keeps the extended lighting
+// permutation's registers down (ADR-0023 amendment 3 item 32: 105 on the RTX 5070 Ti, where
+// one field per term took 113):
+//   ANISOTROPIC  p0.xyz the tangent, p0.w its GGX alpha, p1.xyz the bitangent, p1.w its
+//                alpha, p2.xy V in that frame (T.V, B.V);
+//   SHEEN        p0.xyz the sheen colour, p0.w its alpha, p1.x the base's scale under it;
+//   CLEARCOAT    p0.w the coat's alpha;
+//   THIN_FILM    p0.xyz the film's reflectance over Schlick's, both at N.V (the film is
+//                evaluated once per pixel, not per light), p1.xyz the film's reflectance.
 struct ModelContext {
-    // ANISOTROPIC: the tangent frame and the two GGX alphas, and V in that frame.
-    vec3 t;
-    vec3 b;
-    float at;
-    float ab;
-    float t_dot_v;
-    float b_dot_v;
-    // SHEEN: the sheen colour, alpha and the base's scale under it. CLEARCOAT: the coat's
-    // alpha (`sheen_alpha` reused).
-    vec3 sheen_color;
-    float sheen_alpha;
-    float base_scale;
-    // THIN_FILM: the film's reflectance over Schlick's, both at N.V (amendment 3: the film is
-    // evaluated once per pixel, not per light), and the film's reflectance itself.
-    vec3 film_ratio;
-    vec3 film;
+    vec4 p0;
+    vec4 p1;
+    vec4 p2;
 };
 ModelContext moba_model;
 
 void model_prepare(Surface surface, vec3 n, vec3 v, float n_dot_v, float alpha, vec3 f0) {
     uint model = surface.model;
-    moba_model.film = f0;
-    moba_model.film_ratio = vec3(1.0);
+    moba_model = ModelContext(vec4(0.0), vec4(0.0), vec4(0.0));
     if (model == MOBA_MODEL_CLEARCOAT) {
         float coat_roughness = clamp(surface.model_data.y, MOBA_MIN_ROUGHNESS, 1.0);
-        moba_model.sheen_alpha = coat_roughness * coat_roughness;
+        moba_model.p0.w = coat_roughness * coat_roughness;
     } else if (model == MOBA_MODEL_SHEEN) {
         float sheen_roughness = clamp(surface.model_data.y, 0.07, 1.0);
         vec3 color = model_sheen_color(surface);
         float peak = max(max(color.r, color.g), color.b);
-        moba_model.sheen_color = color;
-        moba_model.sheen_alpha = sheen_roughness * sheen_roughness;
-        moba_model.base_scale = 1.0 - peak * model_sheen_albedo(n_dot_v, sheen_roughness);
+        moba_model.p0.xyz = color;
+        moba_model.p0.w = sheen_roughness * sheen_roughness;
+        moba_model.p1.x = 1.0 - peak * model_sheen_albedo(n_dot_v, sheen_roughness);
     } else if (model == MOBA_MODEL_ANISOTROPIC) {
-        model_anisotropy_frame(surface, n, moba_model.t, moba_model.b);
+        model_anisotropy_frame(surface, n, moba_model.p0.xyz, moba_model.p1.xyz);
         float strength = surface.model_data.x;
-        moba_model.at = mix(alpha, 1.0, strength * strength);
-        moba_model.ab = alpha;
-        moba_model.t_dot_v = dot(moba_model.t, v);
-        moba_model.b_dot_v = dot(moba_model.b, v);
+        moba_model.p0.w = mix(alpha, 1.0, strength * strength);
+        moba_model.p1.w = alpha;
+        moba_model.p2.x = dot(moba_model.p0.xyz, v);
+        moba_model.p2.y = dot(moba_model.p1.xyz, v);
     } else if (model == MOBA_MODEL_THIN_FILM) {
         vec3 film = model_thin_film_fresnel(n_dot_v, surface.model_data.y, surface.model_data.x,
                                             f0);
-        moba_model.film = film;
-        moba_model.film_ratio = film / max(fresnel_schlick(f0, n_dot_v), vec3(1e-4));
+        moba_model.p1.xyz = film;
+        moba_model.p0.xyz = film / max(fresnel_schlick(f0, n_dot_v), vec3(1e-4));
     }
 }
 
@@ -211,7 +206,7 @@ vec3 model_direct(Surface surface, vec3 n, vec3 v, vec3 l, vec3 h, float n_dot_v
         float v_dot_h = max(dot(v, h), 0.0);
         float fc = (MOBA_COAT_F0 + (1.0 - MOBA_COAT_F0) * pow(1.0 - v_dot_h, 5.0))
             * surface.model_data.x;
-        float coat_alpha = moba_model.sheen_alpha;
+        float coat_alpha = moba_model.p0.w;
         float coat = MOBA_PI * distribution_ggx(n_dot_h, coat_alpha)
             * visibility_smith_ggx(n_dot_v, n_dot_l, coat_alpha) * fc * n_dot_l
             * surface.specular.w;
@@ -219,26 +214,28 @@ vec3 model_direct(Surface surface, vec3 n, vec3 v, vec3 l, vec3 h, float n_dot_v
     }
     if (model == MOBA_MODEL_SHEEN) {
         float n_dot_h = max(dot(n, h), 0.0);
-        vec3 sheen = MOBA_PI * moba_model.sheen_color
-            * model_charlie_d(moba_model.sheen_alpha, n_dot_h)
+        vec3 sheen = MOBA_PI * moba_model.p0.xyz
+            * model_charlie_d(moba_model.p0.w, n_dot_h)
             * model_neubelt_v(n_dot_v, n_dot_l) * n_dot_l;
-        return (diffuse + specular) * moba_model.base_scale + sheen;
+        return (diffuse + specular) * moba_model.p1.x + sheen;
     }
     if (model == MOBA_MODEL_ANISOTROPIC) {
         float n_dot_h = max(dot(n, h), 0.0);
         float v_dot_h = max(dot(v, h), 0.0);
-        float at = moba_model.at;
-        float ab = moba_model.ab;
-        float d = model_aniso_d(at, ab, dot(moba_model.t, h), dot(moba_model.b, h), n_dot_h);
-        float vis = model_aniso_v(at, ab, moba_model.t_dot_v, moba_model.b_dot_v,
-                                  dot(moba_model.t, l), dot(moba_model.b, l), n_dot_v, n_dot_l);
+        float at = moba_model.p0.w;
+        float ab = moba_model.p1.w;
+        vec3 t = moba_model.p0.xyz;
+        vec3 b = moba_model.p1.xyz;
+        float d = model_aniso_d(at, ab, dot(t, h), dot(b, h), n_dot_h);
+        float vis = model_aniso_v(at, ab, moba_model.p2.x, moba_model.p2.y, dot(t, l), dot(b, l),
+                                  n_dot_v, n_dot_l);
         vec3 fresnel = fresnel_schlick(f0, v_dot_h);
         return diffuse + MOBA_PI * d * vis * fresnel * n_dot_l * surface.specular.rgb
             * surface.specular.w * moba_energy_compensation;
     }
     if (model == MOBA_MODEL_THIN_FILM) {
         // The film's colour at N.V over Schlick's there, on each light's Schlick term.
-        return diffuse + specular * moba_model.film_ratio;
+        return diffuse + specular * moba_model.p0.xyz;
     }
     return diffuse + specular;
 }
@@ -246,7 +243,7 @@ vec3 model_direct(Surface surface, vec3 n, vec3 v, vec3 l, vec3 h, float n_dot_v
 // The ambient Fresnel term for the split sum: F0 for every model but the thin film, whose
 // film reflectance at N.V (`model_prepare`'s) replaces it.
 vec3 model_ambient_f0(Surface surface, vec3 f0) {
-    return surface.model == MOBA_MODEL_THIN_FILM ? moba_model.film : f0;
+    return surface.model == MOBA_MODEL_THIN_FILM ? moba_model.p1.xyz : f0;
 }
 
 // The specular ambient's lookup direction: Filament's bent reflection for anisotropy.
@@ -254,7 +251,7 @@ vec3 model_ambient_direction(Surface surface, vec3 n, vec3 v, vec3 r, float roug
     if (surface.model != MOBA_MODEL_ANISOTROPIC) {
         return r;
     }
-    vec3 b = moba_model.b;
+    vec3 b = moba_model.p1.xyz;
     float strength = surface.model_data.x;
     vec3 anisotropic_tangent = cross(b, v);
     vec3 anisotropic_normal = cross(anisotropic_tangent, b);
@@ -278,8 +275,8 @@ vec3 model_ambient(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 ambient_
     if (surface.model == MOBA_MODEL_SHEEN) {
         float sheen_roughness = clamp(surface.model_data.y, 0.07, 1.0);
         float albedo = model_sheen_albedo(n_dot_v, sheen_roughness);
-        vec3 sheen = moba_model.sheen_color * albedo * ambient_irradiance(n) * ao;
-        return ambient_base * moba_model.base_scale + sheen;
+        vec3 sheen = moba_model.p0.xyz * albedo * ambient_irradiance(n) * ao;
+        return ambient_base * moba_model.p1.x + sheen;
     }
     return ambient_base;
 }
