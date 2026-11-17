@@ -183,7 +183,13 @@ the **material table** (64-byte `MaterialRecord`s by device address, the draw's 
 push constants) and bindless textures, and encodes one of ADR-0023 §6c's eight shading models;
 `deferred_light`'s extended permutation lights the models with their own lobes
 (`include/shading_models.glsl`), and every Tiered lighting module adds multiscatter and the
-material's F0. Compat draws each material's fallback (`MaterialDesc::compat_fallback`). Depth on Tiered is **reversed-Z**: cleared to 0, tested `GREATER_OR_EQUAL`, with a
+material's F0. Compat draws each material's fallback (`MaterialDesc::compat_fallback`). Since
+N2d (amendment 4) a `Light` has a shape (`LightShape`: point, sphere, capsule or one-sided
+rect, in a second part of the light buffer that Compat does not read): Tiered integrates the
+GGX lobe over it with linearly transformed cosines from Medium up (`include/ltc.glsl`, the
+fitted table `crates/render/assets/ltc-ggx.bin` in an atlas with the split-sum LUT at
+binding 3) and at its representative point on Low and for the extended models' lobes; a
+frame without a shaped light runs `deferred_light`'s pipelines without the LTC code. Depth on Tiered is **reversed-Z**: cleared to 0, tested `GREATER_OR_EQUAL`, with a
 finite far plane. The reversal is applied only where matrices reach the GPU
 (`crates/render/src/depth.rs`), and shadow maps stay forward. `temporal` then upscales to
 output resolution, the post chain runs there, and the gameplay overlay draws after it.

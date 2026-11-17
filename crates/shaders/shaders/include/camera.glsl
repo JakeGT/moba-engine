@@ -65,7 +65,8 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 light_grid;       // xy grid minimum (world x, z), zw 1 / cell size (x, z)
     uvec4 light_info;      // xy grid columns (x, z), z words per column, w lights (0 = none)
     vec4 occlusion;        // x baked AO strength (0 = off), y 1 = contact shadows bound,
-                           // zw reserved (R6's AO strength is post_params.x)
+                           // z the area mode on Tiered (N2d: 0 points, 1 representative
+                           // point, 2 LTC), w reserved (R6's AO strength: post_params.x)
     vec4 baked_ao;         // xy AO map origin (world x, z), z 1 / map size, w height falloff
     vec4 contact;          // x ray steps, y ray length, z thickness, w fade-out distance
     vec4 outline_palette[MOBA_OUTLINE_SLOTS]; // rgb linear display colour, w width (pixels)

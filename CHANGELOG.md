@@ -140,6 +140,44 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **LTC area lights on Tiered (ADR-0023 N2d and amendment 4;
+  [perf/0038](docs/perf/0038-n2d-area-lights.md)):**
+  - **The light record:** `Light` (`position`, `radius`, `color`, `shape`) replaces
+    `PointLight`, which stays as a deprecated alias until the release after 0.5.0;
+    `LightShape` is `Point`, `Sphere`, `Capsule` or a one-sided `Rect`, sanitised to
+    1 mm..=16 m, with the light's radius raised to twice its extent. The shapes are a second part of
+    the light buffer (4 KiB per frame in flight), so Compat's shaders do not change and Compat
+    lights every shape as the point at its centre.
+  - **LTC:** `moba-tools ltc-bake`, a port of the LTC reference code's `fitLTC.cpp` (BSD,
+    pinned and hashed in `THIRD_PARTY.md`), bakes the 64 × 64 GGX table
+    (`crates/render/assets/ltc-ggx.bin`, `RGBA16F`), which Tiered reads from an atlas with
+    the split-sum LUT at the lighting set's binding 3. `include/ltc.glsl` integrates the lobe
+    and the clamped cosine over the shape from Medium up: a sphere as the disk spanning its
+    cone (its diffuse its own form factor), a capsule as the quad facing the point with its
+    projected area, a rect as itself; Low, the extended models' lobes and the water use the
+    representative point, energy-normalised. Under LTC a shape spanning less than 0.08 of its
+    distance is the engine's point light (a rect its representative point), with a blend up
+    to 0.12, and the LTC radiance keeps the 1 m near-field floor. `MOBA_AREA_LIGHTS=off|point|ltc`
+    overrides the preset. Rust twins of the integrals and of the per-light term are held
+    against a Monte Carlo reference per shape with recorded tolerances, and a shrinking sphere
+    becomes the engine's point light. Only the tiles a shaped light's screen bounds touch run
+    the area-mode lighting pipelines (`light_classify`'s five tile classes); the rest, and
+    frames without a shaped light, run the mode-0 pipelines, whose light loop is scalarised
+    across the subgroup, and the water draws without its shaped-light code on frames without
+    one.
+  - **Effects:** the `[light]` table takes `shape`, `source_radius`, `length` and `width`;
+    the bolt is a capsule light and the arc bolt a sphere. The frame log adds
+    `area_lights_avg`, `area_frames`, `area_mode`, `area_dispatch_frames`, `tiles_area_avg`
+    and, over the frames that binned a shaped light, `gpu_area_frames`,
+    `gpu_total_area_p50_ms`, `gpu_total_area_p95_ms` and `gpu_deferred_light_area_p50_ms`; `MOBA_AREA_LIGHT_SHEET=1` draws a sphere, a capsule
+    and a rect light at the material sheet's spot, the scene of the new deferred–forward
+    parity case and the tiered `ltc` golden (Medium).
+  - **Gates:** deferred–forward parity worst pixel 2/255 on the area-light sheet (6/255 on the teamfight); Compat byte-identical. **N2d's budget is not met, and the default at Medium and
+    up is pending the maintainer's decision:** on the frames that carry shaped lights, after
+    the levers, the area-light sheet costs +0.055 ms with LTC and +0.018 ms with the
+    representative point over the same lights as points at High (+0.017 ms for the point at
+    Low; budgets 0.008 and 0.005), the teamfight's frames with a shaped light +0.012 ms at
+    High (ADR-0023 amendment 4 item 14).
 - **The material model on Tiered (ADR-0023 N2c and amendment 3;
   [perf/0037](docs/perf/0037-n2c-materials.md)); the material spec is frozen for C1:**
   - **Shading models:** `CLEARCOAT`, `SHEEN`, `ANISOTROPIC` and `THIN_FILM` lit with their own

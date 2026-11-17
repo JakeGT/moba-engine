@@ -31,7 +31,7 @@
 //!   and their alpha-blended particles are capped at [`ALLY_MAX_ALPHA`] so they never fully
 //!   hide an enemy behind them;
 //! - **effect lights** (an effect's optional `[light]` block, ADR-0016) become
-//!   [`PointLight`]s for [`moba_render::Scene::with_lights`]: enemy and neutral lights first,
+//!   [`Light`]s for [`moba_render::Scene::with_lights`]: enemy and neutral lights first,
 //!   then the viewer's own and allies' (allies scaled by the allied-VFX opacity, own effects
 //!   never, as for particles), so the renderer's per-tier cap drops allied lights before
 //!   enemy ones. A light belongs to an effect
@@ -53,8 +53,8 @@ mod library;
 use moba_core::math::{Mat4, Quat, TAU, Vec3, Vec4};
 use moba_core::rng::Rng;
 use moba_render::{
-    Decal, DecalRole, DecalShape, DecalStyle, ParticleBlend, ParticleRole, ParticleShape,
-    ParticleSpawn, PointLight, UnitInstance, VfxBudget, VfxFrame,
+    Decal, DecalRole, DecalShape, DecalStyle, Light, LightShape, ParticleBlend, ParticleRole,
+    ParticleShape, ParticleSpawn, UnitInstance, VfxBudget, VfxFrame,
 };
 
 pub(crate) use events::{Trigger, VfxEvent, from_net, from_sim, world};
@@ -62,7 +62,7 @@ pub(crate) use library::{EffectId, VfxLibrary};
 
 use moba_assets::{
     VfxAnchor, VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle, VfxDirection, VfxEmitter,
-    VfxImportance, VfxLight, VfxPrimitive, VfxShape,
+    VfxImportance, VfxLight, VfxLightShape, VfxPrimitive, VfxShape,
 };
 
 /// Most live effect instances.
@@ -433,9 +433,12 @@ pub(crate) struct VfxSystem {
     placeholders: Vec<(Vec3, f32, u8)>,
     /// This frame's effect lights: enemy and neutral first, then (appended at the end of
     /// `update`) `ally_lights`.
-    lights: Vec<PointLight>,
+    lights: Vec<Light>,
     /// This frame's own and allied effect lights.
-    ally_lights: Vec<PointLight>,
+    ally_lights: Vec<Light>,
+    /// `MOBA_AREA_LIGHT_SHEET=1`'s fixed lights, listed first every frame
+    /// ([`area_light_sheet`]).
+    sheet_lights: Vec<Light>,
     /// This frame's decals and the stamp ring (R3b).
     decal_lists: DecalLists,
     rng: Rng,
@@ -702,16 +705,18 @@ fn cone(rng: &mut Rng, axis: Vec3, spread: f32) -> Vec3 {
     (u * (r * angle.cos()) + v * (r * angle.sin()) + axis * z).normalize_or(axis)
 }
 
-/// The point light `light` casts at `age` seconds into `instance` (`None` while it is dark).
-/// Flicker is a fixed function of time and the instance's slot: presentation only, so it
-/// never touches the effect RNG stream.
+/// The light `light` casts at `age` seconds into `instance` (`None` while it is dark), its
+/// shape's axis along `forward` (the effect's travel direction, unit and horizontal for a
+/// non-projectile). Flicker is a fixed function of time and the instance's slot:
+/// presentation only, so it never touches the effect RNG stream.
 fn effect_light(
     light: &VfxLight,
     instance: &Instance,
+    forward: Vec3,
     age: f32,
     time: f32,
     slot: usize,
-) -> Option<PointLight> {
+) -> Option<Light> {
     let envelope = light.envelope(age, instance.emit);
     if envelope <= 0.0 {
         return None;
@@ -730,11 +735,66 @@ fn effect_light(
     } else {
         light.radius
     };
-    Some(PointLight::new(
-        anchor + Vec3::from_array(light.offset),
-        radius.min(moba_assets::MAX_VFX_LIGHT_RADIUS),
-        color,
-    ))
+    let shape = match light.shape {
+        VfxLightShape::Sphere { source_radius } => LightShape::Sphere {
+            radius: source_radius,
+        },
+        VfxLightShape::Capsule {
+            length,
+            source_radius,
+        } => LightShape::Capsule {
+            axis: forward * (0.5 * length),
+            radius: source_radius,
+        },
+        VfxLightShape::Rect { width, length } => LightShape::Rect {
+            normal: forward,
+            half_width: 0.5 * width,
+            half_height: 0.5 * length,
+        },
+        _ => LightShape::Point,
+    };
+    Some(
+        Light::new(
+            anchor + Vec3::from_array(light.offset),
+            radius.min(moba_assets::MAX_VFX_LIGHT_RADIUS),
+            color,
+        )
+        .with_shape(shape),
+    )
+}
+
+/// Environment variable: `1` adds the area-light sheet ([`area_light_sheet`]).
+pub(crate) const AREA_LIGHT_SHEET_ENV: &str = "MOBA_AREA_LIGHT_SHEET";
+
+/// The area-light sheet (N2d, ADR-0023 gates 2, 5 and 7): one light of each shape, fixed over
+/// the material sheet's row ([`super::material_sheet::SHEET_CENTRE`]), so a capture, the
+/// parity scene and the timing runs light every shape (with `MOBA_MATERIAL_SHEET=samples`,
+/// over the shading models' spheres). Client-only, like the material sheet: nothing here
+/// touches the simulation, the wire or the content hash. Empty unless `on`.
+fn area_light_sheet(on: bool) -> Vec<Light> {
+    if !on {
+        return Vec::new();
+    }
+    let [x, z] = super::material_sheet::SHEET_CENTRE;
+    let at = |dx: f32, y: f32, dz: f32| Vec3::new(x + dx, y, z + dz);
+    vec![
+        // An ember orb in front of the row.
+        Light::new(at(-4.0, 1.4, 1.8), 7.0, Vec3::new(16.0, 7.0, 2.5))
+            .with_shape(LightShape::Sphere { radius: 0.35 }),
+        // A beam lying along the row, low over it.
+        Light::new(at(1.25, 2.4, 1.2), 8.0, Vec3::new(3.0, 7.0, 16.0)).with_shape(
+            LightShape::Capsule {
+                axis: Vec3::new(1.6, 0.0, 0.2),
+                radius: 0.1,
+            },
+        ),
+        // A panel facing the row and the ground from behind the camera's side.
+        Light::new(at(5.0, 2.6, 2.6), 8.0, Vec3::new(5.0, 5.0, 4.5)).with_shape(LightShape::Rect {
+            normal: Vec3::new(0.0, -0.6, -1.0),
+            half_width: 0.9,
+            half_height: 0.5,
+        }),
+    ]
 }
 
 fn team_color(team: u8) -> Vec3 {
@@ -791,6 +851,9 @@ impl VfxSystem {
             placeholders: Vec::with_capacity(MAX_PLACEHOLDERS),
             lights: Vec::with_capacity(moba_render::MAX_LIGHTS),
             ally_lights: Vec::with_capacity(moba_render::MAX_LIGHTS),
+            sheet_lights: area_light_sheet(
+                std::env::var(AREA_LIGHT_SHEET_ENV).is_ok_and(|value| value.trim() == "1"),
+            ),
             decal_lists: DecalLists::new(),
             rng: Rng::from_seed(0x7f4a_7c15_9e37_79b9),
             time: 0.0,
@@ -1034,7 +1097,7 @@ impl VfxSystem {
 
     /// This frame's effect lights, most important first, for
     /// [`moba_render::Scene::with_lights`].
-    pub(crate) fn lights(&self) -> &[PointLight] {
+    pub(crate) fn lights(&self) -> &[Light] {
         &self.lights
     }
 
@@ -1064,6 +1127,7 @@ impl VfxSystem {
         self.placeholders.clear();
         self.lights.clear();
         self.ally_lights.clear();
+        self.lights.extend_from_slice(&self.sheet_lights);
         self.decal_lists.begin_frame();
         self.counters.spawned = 0;
         let dt = if dt.is_finite() {
@@ -1449,7 +1513,8 @@ impl VfxSystem {
         let emit_end = instance.emit;
         if let Some(light) = loaded.effect.light
             && distance <= limit
-            && let Some(point) = effect_light(&light, &instance, age, self.time, slot)
+            && let Some(point) =
+                effect_light(&light, &instance, context.forward, age, self.time, slot)
         {
             let (list, scale) = match instance.relation {
                 Relation::Enemy | Relation::Neutral => (&mut self.lights, 1.0),
@@ -1459,11 +1524,10 @@ impl VfxSystem {
                 Relation::Ally => (&mut self.ally_lights, self.ally_opacity),
             };
             if list.len() < list.capacity() && scale > 0.0 {
-                list.push(PointLight::new(
-                    point.position,
-                    point.radius,
-                    point.color * scale,
-                ));
+                list.push(
+                    Light::new(point.position, point.radius, point.color * scale)
+                        .with_shape(point.shape),
+                );
             }
         }
         let moved = instance

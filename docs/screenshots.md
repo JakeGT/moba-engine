@@ -569,8 +569,9 @@ palette with the health bar.
 MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 \
 MOBA_SMOKE_FRAMES=100000 MOBA_CAPTURE=/tmp/r2b.ppm MOBA_VULKAN_VALIDATION=required \
 cargo run --release -p moba-client
-# MOBA_LIGHTS=off|<cap>, MOBA_OUTLINES=off|hull|screen, MOBA_BAKED_AO=off and
-# MOBA_CONTACT_SHADOWS=off|<steps> turn individual features off or override the tier.
+# MOBA_LIGHTS=off|<cap>, MOBA_OUTLINES=off|hull|screen, MOBA_BAKED_AO=off,
+# MOBA_CONTACT_SHADOWS=off|<steps> and (Tiered) MOBA_AREA_LIGHTS=off|point|ltc turn
+# individual features off or override the tier.
 ```
 
 ### Culling and mesh LODs (R8): the golden rebaseline

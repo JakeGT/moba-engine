@@ -2,8 +2,10 @@
 # Tiered goldens (ADR-0021 §7, verification gate 4): Low (Quality), High, native, the
 # overlay over moving units (a two-tick capture: the history warms up at tick n - 1 and tick n
 # is captured with the camera panned), the material-model sheet (ADR-0023 gate 5, N2c: one
-# sphere per shading model, MOBA_MATERIAL_SHEET=samples) and the G-buffer decals (the R3b
-# teamfight replay's paint), on lavapipe at 640x360 with the HUD at half scale.
+# sphere per shading model, MOBA_MATERIAL_SHEET=samples), the G-buffer decals (the R3b
+# teamfight replay's paint) and the material sheet under LTC area lights (N2d, ADR-0023
+# gate 3: MOBA_AREA_LIGHT_SHEET=1 at Medium), on lavapipe at 640x360 with the HUD at half
+# scale.
 #
 #   scripts/tiered-goldens.sh [client binary] [image-check binary] [output dir]
 #
@@ -75,6 +77,10 @@ cases=(
   "overlay MOBA_QUALITY=high MOBA_CAPTURE_TWO_TICK=1 ${network_scene[*]}"
   "materials MOBA_QUALITY=high ${sheet_scene[*]} ${local_scene[*]}"
   "decals MOBA_QUALITY=high ${teamfight_scene[*]}"
+  # N2d: the material sheet under the area-light sheet (a sphere, a capsule and a rect
+  # light) at Medium, the lowest preset with LTC; the extended models at the representative
+  # point.
+  "ltc MOBA_QUALITY=medium MOBA_AREA_LIGHT_SHEET=1 ${sheet_scene[*]} ${local_scene[*]}"
 )
 upscalers=${UPSCALERS:-taau fsr3}
 hashes=${TIERED_HASHES:-tests/golden/render-tiered-hashes.txt}

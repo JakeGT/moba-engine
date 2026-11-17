@@ -1,5 +1,5 @@
-//! Dynamic point lights (R2b, ADR-0016): the public light type and the CPU binning into a
-//! ground-aligned cluster grid.
+//! Dynamic lights (R2b, ADR-0016; shapes N2d, ADR-0023 §4): the public light type and the
+//! CPU binning into a ground-aligned cluster grid.
 //!
 //! A MOBA camera looks down at one board, so the "clusters" are columns of a 32 × 32 grid
 //! laid over the camera's ground footprint: the four frustum corner rays cut by the
@@ -21,8 +21,15 @@ pub const MAX_LIGHTS_PER_CELL: usize = 16;
 pub(crate) const GRID: usize = 32;
 /// Words per column in the grid buffer: a count, then the light indices.
 pub(crate) const CELL_WORDS: usize = 1 + MAX_LIGHTS_PER_CELL;
-/// `vec4` words per light in the light buffer: position + radius, colour.
+/// `vec4` words per light in the light buffer's first part: position + radius, colour (and,
+/// in `w`, the shape: [`LightShape::tag`]).
 pub(crate) const LIGHT_VEC4S: usize = 2;
+/// Where the shapes start in the light buffer, in `vec4`s: after [`MAX_LIGHTS`] lights'
+/// first parts, one `vec4` per light (ADR-0023 §4c). The first part keeps the 32-byte
+/// layout Compat reads, so its shaders do not change.
+pub(crate) const SHAPE_BASE: usize = MAX_LIGHTS * LIGHT_VEC4S;
+/// `vec4` words in the light buffer: both parts.
+pub(crate) const LIGHT_LIST_VEC4S: usize = MAX_LIGHTS * (LIGHT_VEC4S + 1);
 /// Farthest ground point from the eye the grid covers; the terrain fog is mostly opaque
 /// past it, and a larger footprint would make the columns coarse.
 pub(crate) const MAX_LIGHT_DISTANCE: f32 = 300.0;
@@ -33,35 +40,193 @@ pub(crate) const MAX_LIGHT_RADIUS: f32 = 64.0;
 /// Largest accepted light colour channel (intensity premultiplied).
 pub(crate) const MAX_LIGHT_COLOR: f32 = 256.0;
 
-/// One dynamic point light ([`Scene::lights`](crate::Scene::lights)).
+/// The shape of a [`Light`] (ADR-0023 §4a): what Tiered integrates with LTC from Medium up.
+///
+/// Low lights every shape at its representative point (the point of the shape closest to the
+/// reflection ray) and Compat as a point at the light's position; every shape has the same
+/// total power as the point light of the same colour, so a shaped light is never brighter or
+/// dimmer overall, only spread out. Lengths are metres; a shape is sanitised with its light
+/// (a non-finite size or one under 1 mm makes it a point, and sizes are clamped to 16 m),
+/// and the light's radius is raised to twice its extent.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub enum LightShape {
+    /// A point: today's punctual light.
+    #[default]
+    Point,
+    /// A sphere of `radius` (orbs, cores, glow).
+    Sphere {
+        /// Source radius, metres.
+        radius: f32,
+    },
+    /// A capsule: the segment from `position - axis` to `position + axis`, of `radius` (beams,
+    /// bowstrings, projectile trails).
+    Capsule {
+        /// Half the segment, from the centre to one end.
+        axis: Vec3,
+        /// Source radius, metres.
+        radius: f32,
+    },
+    /// A one-sided rectangle facing `normal`: `half_width` along the horizontal
+    /// `normalize(Y × normal)` (+X when `normal` is vertical), `half_height` along
+    /// `normal × that` (panels).
+    Rect {
+        /// The emitting side's normal (normalised on upload).
+        normal: Vec3,
+        /// Half the width, metres.
+        half_width: f32,
+        /// Half the height, metres.
+        half_height: f32,
+    },
+}
+
+/// Largest accepted shape size (a source radius, half-length or half-extent), metres.
+pub(crate) const MAX_LIGHT_SHAPE: f32 = 16.0;
+/// Smallest source size a shape keeps: below it the shape is a point (the LTC integral of a
+/// vanishing shape divides by its area).
+pub(crate) const MIN_LIGHT_SHAPE: f32 = 1e-3;
+
+impl LightShape {
+    /// The tag in the light buffer (colour's `w`), read by `lighting.glsl`.
+    pub(crate) const fn tag(self) -> f32 {
+        match self {
+            Self::Point => 0.0,
+            Self::Sphere { .. } => 1.0,
+            Self::Capsule { .. } => 2.0,
+            Self::Rect { .. } => 3.0,
+        }
+    }
+
+    /// The radius of the sphere around the light's position that holds the shape.
+    pub(crate) fn extent(self) -> f32 {
+        match self {
+            Self::Point => 0.0,
+            Self::Sphere { radius } => radius,
+            Self::Capsule { axis, radius } => axis.length() + radius,
+            Self::Rect {
+                half_width,
+                half_height,
+                ..
+            } => half_width.hypot(half_height),
+        }
+    }
+
+    /// The shape's `vec4` in the light buffer: sphere `(0, 0, 0, radius)`, capsule
+    /// `(axis, radius)`, rect `(normal × half_width, half_height)`.
+    pub(crate) fn words(self) -> [f32; 4] {
+        match self {
+            Self::Point => [0.0; 4],
+            Self::Sphere { radius } => [0.0, 0.0, 0.0, radius],
+            Self::Capsule { axis, radius } => [axis.x, axis.y, axis.z, radius],
+            Self::Rect {
+                normal,
+                half_width,
+                half_height,
+            } => {
+                let n = normal * half_width;
+                [n.x, n.y, n.z, half_height]
+            }
+        }
+    }
+
+    /// The shape if usable: finite sizes clamped to `MIN_LIGHT_SHAPE..=MAX_LIGHT_SHAPE`;
+    /// anything degenerate (non-finite, a zero normal, a size under the minimum) is a point.
+    fn sanitized(self) -> Self {
+        let size = |value: f32| {
+            (value.is_finite() && value >= MIN_LIGHT_SHAPE).then(|| value.min(MAX_LIGHT_SHAPE))
+        };
+        match self {
+            Self::Point => Self::Point,
+            Self::Sphere { radius } => {
+                size(radius).map_or(Self::Point, |radius| Self::Sphere { radius })
+            }
+            Self::Capsule { axis, radius } => {
+                let Some(radius) = size(radius) else {
+                    return Self::Point;
+                };
+                let length = axis.length();
+                if !length.is_finite() || length < MIN_LIGHT_SHAPE {
+                    // No length: the sphere of the same radius.
+                    return Self::Sphere { radius };
+                }
+                Self::Capsule {
+                    axis: axis * (length.min(MAX_LIGHT_SHAPE) / length),
+                    radius,
+                }
+            }
+            Self::Rect {
+                normal,
+                half_width,
+                half_height,
+            } => match (normal.try_normalize(), size(half_width), size(half_height)) {
+                (Some(normal), Some(half_width), Some(half_height)) => Self::Rect {
+                    normal,
+                    half_width,
+                    half_height,
+                },
+                _ => Self::Point,
+            },
+        }
+    }
+}
+
+/// One dynamic light ([`Scene::lights`](crate::Scene::lights)).
 ///
 /// `color` is linear RGB with the intensity premultiplied, in the same units as the sun:
-/// a white Lambert surface facing the light at 1 m (and well inside `radius`) shows about
-/// `albedo × color`. The light reaches zero at `radius` (a windowed inverse-square falloff).
+/// a white Lambert surface facing a point light at 1 m (and well inside `radius`) shows about
+/// `albedo × color`. The light reaches zero at `radius` from `position` (a windowed
+/// falloff), whatever its [`shape`](Self::shape); the radius is raised to twice the shape's extent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
-pub struct PointLight {
-    /// World position.
+pub struct Light {
+    /// World position (the shape's centre).
     pub position: Vec3,
-    /// Range in metres; the light is exactly zero at and past it.
+    /// Range in metres from `position`; the light is exactly zero at and past it.
     pub radius: f32,
     /// Linear RGB times intensity.
     pub color: Vec3,
+    /// The emitting shape ([`LightShape::Point`] by default).
+    pub shape: LightShape,
 }
 
-impl PointLight {
-    /// A light at `position` reaching `radius` metres with `color` (intensity included).
+/// The pre-N2d name of [`Light`] (ADR-0023 §4c). It was never in a release (it came after
+/// 0.4.1), so it goes in the release after 0.5.0; until then code written against `main`
+/// keeps building.
+#[deprecated(
+    since = "0.5.0",
+    note = "use `Light` (ADR-0023 §4c); `PointLight` goes in the release after 0.5.0"
+)]
+pub type PointLight = Light;
+
+impl Light {
+    /// A point light at `position` reaching `radius` metres with `color` (intensity
+    /// included).
     #[must_use]
     pub const fn new(position: Vec3, radius: f32, color: Vec3) -> Self {
         Self {
             position,
             radius,
             color,
+            shape: LightShape::Point,
         }
     }
 
-    /// The light if every value is usable: finite, a positive radius (clamped to 64 m) and
-    /// a non-negative colour (clamped), with some light in it.
+    /// This light with `shape`.
+    #[must_use]
+    pub const fn with_shape(mut self, shape: LightShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    /// `sanitized`, for the LTC tests.
+    #[cfg(test)]
+    pub(crate) fn sanitized_for_tests(self) -> Option<Self> {
+        self.sanitized()
+    }
+
+    /// The light if every value is usable: finite, a positive radius (clamped to 64 m, then
+    /// raised to twice the shape's extent) and a non-negative colour (clamped), with some
+    /// light in it.
     fn sanitized(self) -> Option<Self> {
         if !self.position.is_finite()
             || !self.radius.is_finite()
@@ -71,10 +236,14 @@ impl PointLight {
             return None;
         }
         let color = self.color.clamp(Vec3::ZERO, Vec3::splat(MAX_LIGHT_COLOR));
+        let shape = self.shape.sanitized();
         (color.max_element() > 0.0).then_some(Self {
             position: self.position,
-            radius: self.radius.min(MAX_LIGHT_RADIUS),
+            // Twice the shape's extent, so the window at the far end of a long shape is at
+            // least (1 − 1/16)² of the centre's curve (ADR-0023 amendment 4 item 1).
+            radius: self.radius.min(MAX_LIGHT_RADIUS).max(2.0 * shape.extent()),
             color,
+            shape,
         })
     }
 }
@@ -95,6 +264,9 @@ pub struct LightStats {
     pub cell_overflows: u32,
     /// Lights skipped as invalid or outside the grid.
     pub culled: u32,
+    /// Binned lights with a shape other than [`LightShape::Point`] (N2d records what it
+    /// lights, ADR-0023 amendment 3).
+    pub area: u32,
 }
 
 /// The grid's placement, copied into the camera uniform.
@@ -213,10 +385,117 @@ fn include(bounds: [f32; 4], point: Vec3) -> [f32; 4] {
     ]
 }
 
+/// Screen rectangles `light_classify` receives per frame (`AREA_RECTS` in
+/// `light_classify.slang`; its push block holds them in its 128 bytes).
+pub(crate) const AREA_RECTS: usize = 12;
+
+/// The shaped lights' screen bounds (N2d, ADR-0023 amendment 4 item 10): each shaped light's
+/// bounding sphere (its position and radius, which hold the shape) projected to NDC
+/// `[min x, min y, max x, max y]`, so `light_classify` lights only the tiles they touch with
+/// the area-mode pipelines. Past [`AREA_RECTS`] the last rectangle is the union of the rest;
+/// a sphere reaching behind the near plane is the whole screen. Conservative: every pixel a
+/// shaped light reaches is inside its rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct AreaRects {
+    ndc: [[f32; 4]; AREA_RECTS],
+    count: usize,
+}
+
+impl AreaRects {
+    /// The bounds of `lights`' shaped lights under `view_proj` (any depth convention).
+    pub(crate) fn build(lights: &[Light], view_proj: Mat4) -> Self {
+        let mut rects = Self::default();
+        for light in lights {
+            let Some(light) = light
+                .sanitized()
+                .filter(|light| light.shape != LightShape::Point)
+            else {
+                continue;
+            };
+            let Some(rect) = sphere_ndc(view_proj, light.position, light.radius) else {
+                continue;
+            };
+            if rects.count < AREA_RECTS {
+                rects.ndc[rects.count] = rect;
+                rects.count += 1;
+            } else {
+                let last = &mut rects.ndc[AREA_RECTS - 1];
+                *last = [
+                    last[0].min(rect[0]),
+                    last[1].min(rect[1]),
+                    last[2].max(rect[2]),
+                    last[3].max(rect[3]),
+                ];
+            }
+        }
+        rects
+    }
+
+    /// The rectangles in `tile`-pixel tiles of a `size` render (the scene's flipped
+    /// viewport: NDC +y is the top row), inclusive, one tile wider on every side for the
+    /// jitter, packed `x0 | y0 << 16`, `x1 | y1 << 16`; and how many.
+    pub(crate) fn tiles(&self, size: [u32; 2], tile: u32) -> ([[u32; 2]; AREA_RECTS], u32) {
+        let mut out = [[0; 2]; AREA_RECTS];
+        let last = [
+            size[0].max(1).div_ceil(tile) - 1,
+            size[1].max(1).div_ceil(tile) - 1,
+        ];
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Clamped.
+        let to_tile =
+            |pixels: f32, last: u32| ((pixels / tile as f32).floor().max(0.0) as u32).min(last);
+        for (slot, ndc) in out.iter_mut().zip(&self.ndc[..self.count]) {
+            let (width, height) = (size[0] as f32, size[1] as f32);
+            let x0 = to_tile((ndc[0] * 0.5 + 0.5) * width, last[0]).saturating_sub(1);
+            let x1 = (to_tile((ndc[2] * 0.5 + 0.5) * width, last[0]) + 1).min(last[0]);
+            let y0 = to_tile((0.5 - ndc[3] * 0.5) * height, last[1]).saturating_sub(1);
+            let y1 = (to_tile((0.5 - ndc[1] * 0.5) * height, last[1]) + 1).min(last[1]);
+            *slot = [x0 | (y0 << 16), x1 | (y1 << 16)];
+        }
+        (out, self.count as u32)
+    }
+}
+
+/// The NDC rectangle bounding the sphere at `centre` of `radius`, clipped to the screen:
+/// its bounding box's eight corners projected (the whole screen when one is at or behind
+/// the eye), or `None` off screen.
+fn sphere_ndc(view_proj: Mat4, centre: Vec3, radius: f32) -> Option<[f32; 4]> {
+    let mut rect = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for corner in 0..8u8 {
+        let sign = |bit: u8| if corner & bit == 0 { -1.0 } else { 1.0 };
+        let p = centre + Vec3::new(sign(1), sign(2), sign(4)) * radius;
+        let clip = view_proj * p.extend(1.0);
+        if !clip.is_finite() || clip.w <= 1e-4 {
+            return Some([-1.0, -1.0, 1.0, 1.0]);
+        }
+        let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+        rect = [
+            rect[0].min(x),
+            rect[1].min(y),
+            rect[2].max(x),
+            rect[3].max(y),
+        ];
+    }
+    if rect[2] < -1.0 || rect[0] > 1.0 || rect[3] < -1.0 || rect[1] > 1.0 {
+        return None;
+    }
+    Some([
+        rect[0].max(-1.0),
+        rect[1].max(-1.0),
+        rect[2].min(1.0),
+        rect[3].min(1.0),
+    ])
+}
+
 /// Per-column light counts of one binning, kept in CPU memory (see [`bin`]).
 pub(crate) type CellCounts = [u8; GRID * GRID];
 
-/// Bins `lights` over `footprint` into `light_words` (two `vec4` per light) and
+/// Bins `lights` over `footprint` into `light_words` (two `vec4` per light, then each
+/// light's shape at [`SHAPE_BASE`]) and
 /// `cell_words` ([`GRID`]² columns of [`CELL_WORDS`]), keeping at most `max_lights` lights
 /// and `per_cell` per column, in list order. `light_words` and `cell_words` are the frame's
 /// mapped buffers; only the column counts and the entries below them are written, which is
@@ -227,7 +506,7 @@ pub(crate) type CellCounts = [u8; GRID * GRID];
 /// The running per-column counts live in `counts` (CPU scratch, reset here) and are written
 /// to the count words once at the end.
 pub(crate) fn bin(
-    lights: &[PointLight],
+    lights: &[Light],
     footprint: Option<[f32; 4]>,
     max_lights: usize,
     per_cell: usize,
@@ -239,7 +518,7 @@ pub(crate) fn bin(
         submitted: u32::try_from(lights.len()).unwrap_or(u32::MAX),
         ..LightStats::default()
     };
-    let capacity = (light_words.len() / LIGHT_VEC4S).min(MAX_LIGHTS);
+    let capacity = light_words.len().saturating_sub(SHAPE_BASE).min(MAX_LIGHTS);
     let max_lights = max_lights.min(capacity);
     let per_cell = per_cell.min(MAX_LIGHTS_PER_CELL);
     let columns = (cell_words.len() / CELL_WORDS).min(GRID * GRID);
@@ -276,7 +555,17 @@ pub(crate) fn bin(
         }
         let index = u32::try_from(count).unwrap_or(u32::MAX);
         light_words[count * LIGHT_VEC4S] = [p.x, p.y, p.z, r];
-        light_words[count * LIGHT_VEC4S + 1] = [light.color.x, light.color.y, light.color.z, 0.0];
+        light_words[count * LIGHT_VEC4S + 1] = [
+            light.color.x,
+            light.color.y,
+            light.color.z,
+            light.shape.tag(),
+        ];
+        // A point's shape is never read (its tag is 0), so it is not written.
+        if light.shape != LightShape::Point {
+            light_words[SHAPE_BASE + count] = light.shape.words();
+            stats.area += 1;
+        }
         count += 1;
         let (x0, x1) = (
             column_of(p.x - r, min_x, inverse_x),
@@ -323,7 +612,7 @@ mod tests {
 
     fn buffers() -> (Vec<[f32; 4]>, Vec<u32>) {
         (
-            vec![[0.0; 4]; MAX_LIGHTS * LIGHT_VEC4S],
+            vec![[0.0; 4]; LIGHT_LIST_VEC4S],
             vec![u32::MAX; GRID * GRID * CELL_WORDS],
         )
     }
@@ -385,8 +674,8 @@ mod tests {
         let (mut lights_buf, mut cells) = buffers();
         let footprint = ground_footprint(player_camera());
         let lights = [
-            PointLight::new(Vec3::new(0.0, 1.0, 0.0), 3.0, Vec3::new(4.0, 2.0, 1.0)),
-            PointLight::new(Vec3::new(12.0, 1.0, -6.0), 1.0, Vec3::ONE),
+            Light::new(Vec3::new(0.0, 1.0, 0.0), 3.0, Vec3::new(4.0, 2.0, 1.0)),
+            Light::new(Vec3::new(12.0, 1.0, -6.0), 1.0, Vec3::ONE),
         ];
         let (params, stats) = bin(
             &lights,
@@ -416,10 +705,10 @@ mod tests {
     fn caps_drop_in_list_order_and_invalid_lights_are_skipped() {
         let (mut lights_buf, mut cells) = buffers();
         let footprint = ground_footprint(player_camera());
-        let mut lights = vec![PointLight::new(Vec3::ZERO, 2.0, Vec3::ONE); 6];
-        lights.push(PointLight::new(Vec3::splat(f32::NAN), 2.0, Vec3::ONE));
-        lights.push(PointLight::new(Vec3::new(5000.0, 0.0, 0.0), 2.0, Vec3::ONE));
-        lights.push(PointLight::new(Vec3::ZERO, 2.0, Vec3::ZERO));
+        let mut lights = vec![Light::new(Vec3::ZERO, 2.0, Vec3::ONE); 6];
+        lights.push(Light::new(Vec3::splat(f32::NAN), 2.0, Vec3::ONE));
+        lights.push(Light::new(Vec3::new(5000.0, 0.0, 0.0), 2.0, Vec3::ONE));
+        lights.push(Light::new(Vec3::ZERO, 2.0, Vec3::ZERO));
         let (params, stats) = bin(
             &lights,
             footprint,
@@ -445,7 +734,7 @@ mod tests {
     #[test]
     fn no_footprint_or_a_zero_cap_uploads_nothing() {
         let (mut lights_buf, mut cells) = buffers();
-        let lights = [PointLight::new(Vec3::ZERO, 2.0, Vec3::ONE)];
+        let lights = [Light::new(Vec3::ZERO, 2.0, Vec3::ONE)];
         let (params, stats) = bin(
             &lights,
             None,
@@ -468,7 +757,7 @@ mod tests {
         );
         assert_eq!(params, GridParams::NONE);
         // Huge radii are clamped.
-        let big = [PointLight::new(Vec3::ZERO, 1.0e9, Vec3::splat(1.0e9))];
+        let big = [Light::new(Vec3::ZERO, 1.0e9, Vec3::splat(1.0e9))];
         let (_, stats) = bin(
             &big,
             footprint,
@@ -481,5 +770,134 @@ mod tests {
         assert_eq!(stats.binned, 1);
         assert_eq!(lights_buf[0][3], MAX_LIGHT_RADIUS);
         assert_eq!(lights_buf[1][0], MAX_LIGHT_COLOR);
+    }
+
+    #[test]
+    fn shapes_go_in_the_tail_and_raise_the_radius() {
+        let (mut lights_buf, mut cells) = buffers();
+        let footprint = ground_footprint(player_camera());
+        let at = Vec3::new(1.0, 1.0, 0.0);
+        let lights = [
+            Light::new(at, 3.0, Vec3::ONE),
+            Light::new(at, 3.0, Vec3::ONE).with_shape(LightShape::Sphere { radius: 0.5 }),
+            Light::new(at, 1.0, Vec3::ONE).with_shape(LightShape::Capsule {
+                axis: Vec3::new(2.0, 0.0, 0.0),
+                radius: 0.25,
+            }),
+            Light::new(at, 3.0, Vec3::ONE).with_shape(LightShape::Rect {
+                normal: Vec3::new(0.0, 0.0, 2.0),
+                half_width: 0.6,
+                half_height: 0.8,
+            }),
+            // Degenerate shapes become points (or the capsule's sphere).
+            Light::new(at, 3.0, Vec3::ONE).with_shape(LightShape::Sphere { radius: f32::NAN }),
+            Light::new(at, 3.0, Vec3::ONE).with_shape(LightShape::Capsule {
+                axis: Vec3::ZERO,
+                radius: 0.4,
+            }),
+            Light::new(at, 3.0, Vec3::ONE).with_shape(LightShape::Rect {
+                normal: Vec3::ZERO,
+                half_width: 1.0,
+                half_height: 1.0,
+            }),
+            Light::new(at, 3.0, Vec3::ONE).with_shape(LightShape::Sphere { radius: 1.0e6 }),
+        ];
+        let (_, stats) = bin(
+            &lights,
+            footprint,
+            64,
+            16,
+            &mut lights_buf,
+            &mut cells,
+            &mut [0; GRID * GRID],
+        );
+        assert_eq!((stats.binned, stats.area), (8, 5));
+        let tags: Vec<f32> = (0..8).map(|i| lights_buf[i * LIGHT_VEC4S + 1][3]).collect();
+        assert_eq!(tags, [0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0]);
+        let shape = |i: usize| lights_buf[SHAPE_BASE + i];
+        assert_eq!(shape(1), [0.0, 0.0, 0.0, 0.5]);
+        assert_eq!(shape(2), [2.0, 0.0, 0.0, 0.25]);
+        // The rect's normal is normalised, then scaled by the half-width.
+        assert_eq!(shape(3), [0.0, 0.0, 0.6, 0.8]);
+        assert_eq!(shape(5), [0.0, 0.0, 0.0, 0.4]);
+        assert_eq!(shape(7), [0.0, 0.0, 0.0, MAX_LIGHT_SHAPE]);
+        // The capsule's radius (1 m) is raised to twice its extent (2 × (2 + 0.25) m); the
+        // rect keeps its 3 m (extent 1 m), and the clamped sphere raises its light to 32 m.
+        assert_eq!(lights_buf[2 * LIGHT_VEC4S][3], 4.5);
+        assert_eq!(lights_buf[3 * LIGHT_VEC4S][3], 3.0);
+        assert_eq!(lights_buf[7 * LIGHT_VEC4S][3], 2.0 * MAX_LIGHT_SHAPE);
+        // The 32-byte first part is where Compat reads it.
+        assert_eq!(lights_buf[LIGHT_VEC4S], [1.0, 1.0, 0.0, 3.0]);
+    }
+
+    /// N2d's area classes: every pixel a shaped light reaches (inside its radius) lies in a
+    /// tile of its rectangle, point lights get none, past `AREA_RECTS` the last rectangle
+    /// holds the rest, and a light around the eye covers the screen.
+    #[test]
+    fn area_rects_bound_every_pixel_a_shaped_light_reaches() {
+        let view_proj = player_camera();
+        let size = [1280u32, 720u32];
+        let tile = 16u32;
+        let sphere = LightShape::Sphere { radius: 0.3 };
+        let lights = [
+            Light::new(Vec3::new(2.0, 1.5, -3.0), 5.0, Vec3::ONE).with_shape(sphere),
+            Light::new(Vec3::new(-6.0, 1.0, 4.0), 3.0, Vec3::ONE),
+        ];
+        let rects = AreaRects::build(&lights, view_proj);
+        let (packed, count) = rects.tiles(size, tile);
+        assert_eq!(count, 1, "the point light has no rectangle");
+        let unpack = |word: u32| (word & 0xFFFF, word >> 16);
+        let ((x0, y0), (x1, y1)) = (unpack(packed[0][0]), unpack(packed[0][1]));
+        let mut checked = 0;
+        for i in -20i8..=20 {
+            for j in -20i8..=20 {
+                let p = Vec3::new(2.0 + f32::from(i) * 0.25, 0.0, -3.0 + f32::from(j) * 0.25);
+                if (p - lights[0].position).length() >= 5.0 {
+                    continue;
+                }
+                let clip = view_proj * p.extend(1.0);
+                let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                if x.abs() > 1.0 || y.abs() > 1.0 {
+                    continue;
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let (tx, ty) = (
+                    ((x * 0.5 + 0.5) * size[0] as f32) as u32 / tile,
+                    ((0.5 - y * 0.5) * size[1] as f32) as u32 / tile,
+                );
+                assert!((x0..=x1).contains(&tx) && (y0..=y1).contains(&ty), "{p:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 100);
+        // More shaped lights than rectangles: the last holds the rest.
+        let many: Vec<Light> = (0..20u8)
+            .map(|k| {
+                Light::new(Vec3::new(f32::from(k) - 10.0, 1.0, 0.0), 1.0, Vec3::ONE)
+                    .with_shape(sphere)
+            })
+            .collect();
+        let (packed, count) = AreaRects::build(&many, view_proj).tiles(size, tile);
+        assert_eq!(count as usize, AREA_RECTS);
+        let (lo, hi) = (
+            unpack(packed[AREA_RECTS - 1][0]),
+            unpack(packed[AREA_RECTS - 1][1]),
+        );
+        assert!(
+            hi.0 - lo.0 > 8,
+            "the union spans the remaining lights: {lo:?} {hi:?}"
+        );
+        // A light around the eye: the whole screen.
+        let eye = Light::new(Vec3::new(0.0, 40.0, 23.0), 2.0, Vec3::ONE).with_shape(sphere);
+        let (packed, count) = AreaRects::build(&[eye], view_proj).tiles(size, tile);
+        assert_eq!(count, 1);
+        assert_eq!(packed[0], [0, (1280 / 16 - 1) | ((720 / 16 - 1) << 16)]);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn the_old_name_still_builds_a_point_light() {
+        let light: Light = PointLight::new(Vec3::ZERO, 2.0, Vec3::ONE);
+        assert_eq!(light.shape, LightShape::Point);
     }
 }

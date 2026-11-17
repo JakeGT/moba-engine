@@ -1,6 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 // Deferred lighting on Tiered (ADR-0023 §2, N2b): one 16 x 16 tile per workgroup, dispatched
 // indirectly per tile class from `light_classify`'s lists. Each pixel decodes the thin
@@ -39,9 +40,19 @@ vec2 moba_pixel_center;
 // N2c (ADR-0023 §6b): the Tiered BRDF core (multiscatter, the stored F0), and in the
 // extended permutation the other shading models (§6c).
 #define MOBA_TIERED_SHADING
+// N2d (ADR-0023 §4): how shaped lights are lit (`LightingConfig::area_lights`: 0 points, 1
+// the representative point, 2 LTC), the value the forward stages read from the camera's
+// `occlusion.z`. A constant, so Low's pipelines carry no LTC code.
+layout(constant_id = 1) const uint AREA_MODE = 0u;
+#define MOBA_AREA_MODE AREA_MODE
 #ifdef DEFERRED_EXTENDED
 #define MOBA_SHADING_MODELS
 #endif
+// N2d: the light loop scalarised across the subgroup (include/lighting.glsl) in the mode-0
+// pipelines, where it was measured faster (in the area modes slower; ADR-0023 amendment 4
+// item 14). The renderer requires subgroup arithmetic in compute for Tiered's deferred
+// lighting (`light_classify`).
+#define MOBA_SCALAR_LIGHT_LOOP (AREA_MODE == 0u)
 #include "camera.glsl"
 #include "lighting.glsl"
 #include "atmosphere.glsl"
@@ -55,7 +66,7 @@ layout(set = 1, binding = 2) uniform texture2D gbuffer2;
 layout(set = 1, binding = 3) uniform texture2D scene_depth;
 layout(set = 1, binding = 4, rgba16f) uniform image2D hdr;
 // `light_classify`'s output (`TileLayout` in crates/render/src/passes/deferred.rs): the
-// indirect arguments (rows of `row_width` groups), the classes' tile counts (words 9-11),
+// indirect arguments (rows of `row_width` groups), the classes' tile counts (words 15-19),
 // then the tile lists of packed `x | y << 16` tile coordinates.
 layout(std430, set = 1, binding = 5) readonly buffer Tiles {
     uint words[];
@@ -64,12 +75,13 @@ layout(std430, set = 1, binding = 5) readonly buffer Tiles {
 layout(push_constant) uniform DeferredPush {
     uvec2 render_size;  // this frame's rendered sub-rectangle
     uint list_offset;   // word offset of this dispatch's tile list in `tiles`
-    uint tile_class;    // 1 standard, 2 extended (its count's word, the tiles view's colour)
+    uint tile_class;    // 1 standard, 2 extended, 3 and 4 the same with a shaped light near
+                        // (its count's word, the tiles view's colour)
     uint row_width;     // groups per row of the indirect dispatch (the layout's `tiles_x`)
     uint capacity;      // tiles each list holds
 } push;
 
-const uint TILE_COUNT_WORD = 9u;
+const uint TILE_COUNT_WORD = 15u;
 
 // 0 off, 1 lit-only, 2 light-count, 3 tiles (`TemporalDebugView::deferred_view`).
 layout(constant_id = 0) const uint DEBUG_VIEW = 0u;
@@ -185,8 +197,10 @@ void main() {
     if (DEBUG_VIEW == DEBUG_LIGHT_COUNT) {
         lit = heat(column_lights(world_pos));
     } else if (DEBUG_VIEW == DEBUG_TILES) {
-        // Standard tiles green, extended orange, over the lit frame; tile edges darker.
-        vec3 tint = push.tile_class == 2u ? vec3(1.0, 0.55, 0.1) : vec3(0.2, 1.0, 0.3);
+        // Standard tiles green, extended orange, over the lit frame, both bluer in the area
+        // classes; tile edges darker.
+        vec3 tint = (push.tile_class & 1u) == 0u ? vec3(1.0, 0.55, 0.1) : vec3(0.2, 1.0, 0.3);
+        tint = push.tile_class > 2u ? mix(tint, vec3(0.2, 0.4, 1.0), 0.6) : tint;
         bool edge = any(equal(gl_LocalInvocationID.xy, uvec2(0u)));
         lit = mix(lit, tint, edge ? 0.8 : 0.35);
     }

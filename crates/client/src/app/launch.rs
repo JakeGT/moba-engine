@@ -341,7 +341,7 @@ pub(crate) fn compressed_textures() -> bool {
 /// `MOBA_SHADOW_SIZE`, `MOBA_IBL` and `MOBA_SPECULAR_IBL` (`0` turns either off) overrides,
 /// and the R2b switches (ADR-0016): `MOBA_LIGHTS=off|<global cap>`,
 /// `MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and
-/// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
+/// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`, and N2d's `MOBA_AREA_LIGHTS=off|point|ltc`.
 /// The render path the client builds its configuration for (ADR-0020 §2b, §5e), probed once
 /// at start with the renderer's own device ranking.
 #[derive(Clone, Debug)]
@@ -445,15 +445,24 @@ fn cap_tier(tier: moba_render::QualityTier, target: &RenderTarget) -> moba_rende
     }
 }
 
-pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {
-    lighting_config_from(tier, |name| std::env::var(name).ok())
+/// The lighting for the configuration tier `tier` (on Tiered, the preset's configuration),
+/// with the area-light mode of the `preset` the player chose (N2d, ADR-0023 §4a: the
+/// representative point on Low, LTC from Medium; Tiered runs every preset on the High
+/// configuration, so the mode comes from the preset), then the environment overrides.
+pub(crate) fn lighting_config(
+    tier: moba_render::QualityTier,
+    preset: moba_render::QualityTier,
+) -> moba_render::LightingConfig {
+    lighting_config_from(tier, preset, |name| std::env::var(name).ok())
 }
 
 fn lighting_config_from(
     tier: moba_render::QualityTier,
+    preset: moba_render::QualityTier,
     var: impl Fn(&str) -> Option<String>,
 ) -> moba_render::LightingConfig {
-    let mut config = moba_render::LightingConfig::for_tier(tier);
+    let mut config = moba_render::LightingConfig::for_tier(tier)
+        .with_area_lights(moba_render::LightingConfig::for_tier(preset).area_lights);
     if let Some(value) = var("MOBA_SHADOWS") {
         match moba_render::ShadowFilter::from_name(&value) {
             Some(filter) => config = config.with_shadows(filter),
@@ -497,6 +506,13 @@ fn lighting_config_from(
             Err(_) => eprintln!(
                 "MOBA_CONTACT_SHADOWS={value:?} is not off or a step count; using the tier's"
             ),
+        }
+    }
+    // N2d (ADR-0023 §4a): shaped lights as points, at the representative point, or LTC.
+    if let Some(value) = var("MOBA_AREA_LIGHTS") {
+        match moba_render::AreaLights::from_name(&value) {
+            Some(mode) => config = config.with_area_lights(mode),
+            None => eprintln!("MOBA_AREA_LIGHTS={value:?} is not off/point/ltc; using the tier's"),
         }
     }
     config
@@ -1373,8 +1389,13 @@ impl Drop for ClientApp {
         let scale = scale_report(&scales);
         // GPU pass times from timestamp queries, same warm-up skipped.
         let gpu_samples = self.gpu_log.take().unwrap_or_default();
+        let gpu_area = self.gpu_area_log.take().unwrap_or_default();
         let gpu_columns = if gpu_samples.len() > warmup {
             gpu_report(&gpu_samples[warmup..])
+                + &area_report(
+                    &gpu_samples[warmup..],
+                    gpu_area.get(warmup..).unwrap_or_default(),
+                )
         } else {
             String::from("gpu_timing=unavailable ")
         };
@@ -1403,7 +1424,9 @@ impl Drop for ClientApp {
             format!(
                 "{} cull={} cull_candidates={} cull_drawn={} cull_casters={} cull_dropped={} \
                  terrain_chunks={}/{} lod_instances={lods} paint_decals_avg={:.2} \
-                 tiles_standard_avg={:.1} tiles_extended_avg={:.1} extended_frames={}/{} ",
+                 tiles_standard_avg={:.1} tiles_extended_avg={:.1} extended_frames={}/{} \
+                 area_lights_avg={:.2} area_frames={}/{} area_mode={} \
+                 area_dispatch_frames={}/{} tiles_area_avg={:.1} ",
                 memory_summary(&renderer.memory_stats()),
                 cull.mode,
                 cull.candidates,
@@ -1417,6 +1440,13 @@ impl Drop for ClientApp {
                 per(exercise.extended_tiles, exercise.lit_frames),
                 exercise.extended_frames,
                 exercise.lit_frames,
+                per(exercise.area_lights, exercise.frames),
+                exercise.area_frames,
+                exercise.frames,
+                exercise.area_mode,
+                exercise.area_dispatch_frames,
+                exercise.frames,
+                per(exercise.area_tiles, exercise.lit_frames),
             )
         });
         // ADR-0021 §6b: the latency back end, who paced the frames, and Reflex's timings.
@@ -1674,6 +1704,44 @@ fn scale_report(scales: &[f32]) -> String {
     )
 }
 
+/// N2d's area-frame columns (ADR-0023 amendment 4, perf/0038): `gpu_area_frames`, the logged
+/// frames that binned a shaped light, and over those frames only `gpu_total_area_p50_ms`,
+/// `_p95_ms` and `gpu_deferred_light_area_p50_ms`, so a scene whose shaped lights come and go
+/// (the teamfight) is judged on the frames that carry them. `area[i]` flags `samples[i]`;
+/// the columns are left out without a flagged frame.
+fn area_report(samples: &[[f32; GPU_LANES.len()]], area: &[bool]) -> String {
+    let lane = |name| GPU_LANES.iter().position(|&lane| lane == name);
+    let (Some(total), Some(deferred)) = (lane("total"), lane("deferred_light")) else {
+        return String::new();
+    };
+    let pick = |index: usize| {
+        let mut values: Vec<f32> = samples
+            .iter()
+            .zip(area)
+            .filter(|(_, flagged)| **flagged)
+            .map(|(sample, _)| sample[index])
+            .collect();
+        values.sort_by(f32::total_cmp);
+        values
+    };
+    let totals = pick(total);
+    if totals.is_empty() {
+        return String::from("gpu_area_frames=0 ");
+    }
+    let at = |values: &[f32], fraction: f32| {
+        values[((values.len() - 1) as f32 * fraction).round() as usize]
+    };
+    let deferred = pick(deferred);
+    format!(
+        "gpu_area_frames={} gpu_total_area_p50_ms={:.3} gpu_total_area_p95_ms={:.3} \
+         gpu_deferred_light_area_p50_ms={:.3} ",
+        totals.len(),
+        at(&totals, 0.50),
+        at(&totals, 0.95),
+        at(&deferred, 0.50),
+    )
+}
+
 fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
@@ -1918,8 +1986,12 @@ mod tests {
             }
         };
         let high = LightingConfig::for_tier(QualityTier::High);
-        assert_eq!(lighting_config_from(QualityTier::High, env(&[])), high);
+        assert_eq!(
+            lighting_config_from(QualityTier::High, QualityTier::High, env(&[])),
+            high
+        );
         let off = lighting_config_from(
+            QualityTier::High,
             QualityTier::High,
             env(&[
                 ("MOBA_SHADOWS", "OFF"),
@@ -1932,10 +2004,12 @@ mod tests {
         assert_eq!(off.shadow_resolution, 512);
         let bad = lighting_config_from(
             QualityTier::Low,
+            QualityTier::Low,
             env(&[("MOBA_SHADOWS", "vsm"), ("MOBA_SHADOW_SIZE", "big")]),
         );
         assert_eq!(bad, LightingConfig::for_tier(QualityTier::Low));
         let r2b = lighting_config_from(
+            QualityTier::High,
             QualityTier::High,
             env(&[
                 ("MOBA_LIGHTS", "off"),
@@ -1948,7 +2022,40 @@ mod tests {
         assert_eq!(r2b.outlines, moba_render::OutlineMode::Hull);
         assert!(!r2b.baked_ao);
         assert_eq!(r2b.contact_shadow_steps, 0);
+        // N2d: the area-light mode; Low's default is the representative point.
+        assert_eq!(
+            LightingConfig::for_tier(QualityTier::Low).area_lights,
+            moba_render::AreaLights::RepresentativePoint
+        );
+        let modes: [(&'static [(&'static str, &'static str)], _); 3] = [
+            (&[("MOBA_AREA_LIGHTS", "off")], moba_render::AreaLights::Off),
+            (
+                &[("MOBA_AREA_LIGHTS", "Point")],
+                moba_render::AreaLights::RepresentativePoint,
+            ),
+            (
+                &[("MOBA_AREA_LIGHTS", " ltc ")],
+                moba_render::AreaLights::Ltc,
+            ),
+        ];
+        for (pairs, mode) in modes {
+            assert_eq!(
+                lighting_config_from(QualityTier::High, QualityTier::Low, env(pairs)).area_lights,
+                mode
+            );
+        }
+        // Tiered's Low preset on the High configuration keeps Low's representative point.
+        let tiered_low = lighting_config_from(QualityTier::High, QualityTier::Low, env(&[]));
+        assert_eq!(
+            tiered_low.area_lights,
+            moba_render::AreaLights::RepresentativePoint
+        );
+        assert_eq!(
+            tiered_low.with_area_lights(moba_render::AreaLights::Ltc),
+            LightingConfig::for_tier(QualityTier::High)
+        );
         let capped = lighting_config_from(
+            QualityTier::Low,
             QualityTier::Low,
             env(&[("MOBA_LIGHTS", "8"), ("MOBA_CONTACT_SHADOWS", "12")]),
         );
@@ -1956,11 +2063,13 @@ mod tests {
         assert_eq!(capped.contact_shadow_steps, 12);
         let ignored = lighting_config_from(
             QualityTier::Ultra,
+            QualityTier::Ultra,
             env(&[
                 ("MOBA_LIGHTS", "lots"),
                 ("MOBA_OUTLINES", "glow"),
                 ("MOBA_BAKED_AO", "1"),
                 ("MOBA_CONTACT_SHADOWS", "many"),
+                ("MOBA_AREA_LIGHTS", "disk"),
             ]),
         );
         assert_eq!(ignored, LightingConfig::for_tier(QualityTier::Ultra));
@@ -2336,6 +2445,37 @@ mod tests {
         // Oscillating in the second half.
         let scales = [1.0, 0.9, 1.0, 0.9, 1.0, 0.9];
         assert!(super::scale_report(&scales).ends_with("scale_changes_late=2 "));
+    }
+
+    /// N2d: the area-frame columns cover only the flagged frames, and say so when none is.
+    #[test]
+    fn area_report_covers_the_frames_with_shaped_lights() {
+        let lane = |name| {
+            super::GPU_LANES
+                .iter()
+                .position(|&lane| lane == name)
+                .expect("lane")
+        };
+        let samples: Vec<[f32; super::GPU_LANES.len()]> = (0..10)
+            .map(|index| {
+                let mut sample = [0.0; super::GPU_LANES.len()];
+                sample[lane("total")] = if index < 5 { 1.0 } else { 2.0 };
+                sample[lane("deferred_light")] = if index < 5 { 0.1 } else { 0.3 };
+                sample
+            })
+            .collect();
+        let area: Vec<bool> = (0..10).map(|index| index >= 5).collect();
+        assert_eq!(
+            super::area_report(&samples, &area),
+            "gpu_area_frames=5 gpu_total_area_p50_ms=2.000 gpu_total_area_p95_ms=2.000 \
+             gpu_deferred_light_area_p50_ms=0.300 "
+        );
+        assert_eq!(
+            super::area_report(&samples, &[false; 10]),
+            "gpu_area_frames=0 "
+        );
+        // A shorter flag list (a renderer that never answered) flags nothing past its end.
+        assert_eq!(super::area_report(&samples, &[]), "gpu_area_frames=0 ");
     }
 
     #[test]

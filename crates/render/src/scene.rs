@@ -9,7 +9,7 @@ use crate::ui::UiImage;
 
 use crate::environment::{Decal, EnvironmentFrame};
 use crate::lighting::{FrameLighting, SceneLighting};
-use crate::lights::PointLight;
+use crate::lights::Light;
 use crate::post::ScreenEffects;
 use crate::vfx::VfxFrame;
 use crate::world::{FogOfWar, SceneAtmosphere, WorldFrame};
@@ -356,7 +356,7 @@ pub struct Scene<'a> {
     pub vfx: VfxFrame<'a>,
     /// Dynamic point lights (ADR-0016), most important first: past the tier's caps they are
     /// dropped in list order. Empty by default.
-    pub lights: &'a [PointLight],
+    pub lights: &'a [Light],
     /// Outline colours and widths by slot ([`UnitInstance::outline`]); none by default.
     pub outlines: OutlinePalette,
     /// Gameplay screen effects (R6, ADR-0015): death desaturation and the damage /
@@ -581,7 +581,7 @@ impl<'a> Scene<'a> {
 
     /// Sets this frame's dynamic point lights, most important first (ADR-0016).
     #[must_use]
-    pub const fn with_lights(mut self, lights: &'a [PointLight]) -> Self {
+    pub const fn with_lights(mut self, lights: &'a [Light]) -> Self {
         self.lights = lights;
         self
     }

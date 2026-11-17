@@ -595,6 +595,20 @@ pub struct ExerciseStats {
     pub extended_tiles: u64,
     /// Frames with at least one extended tile.
     pub extended_frames: u64,
+    /// Shaped lights ([`LightShape`](crate::LightShape) other than a point) binned, summed
+    /// over the frames (N2d records what it lights, ADR-0023 amendment 3).
+    pub area_lights: u64,
+    /// Frames that binned at least one shaped light.
+    pub area_frames: u64,
+    /// Deferred frames that dispatched the area-mode lighting (a shaped light's bound on
+    /// screen and an area mode other than 0).
+    pub area_dispatch_frames: u64,
+    /// Area-class tiles (lit at the area mode), summed over the frames whose tile counts
+    /// were read back (with [`RenderConfig::tile_counts`]).
+    pub area_tiles: u64,
+    /// How shaped lights were lit: 0 as points, 1 at the representative point, 2 with LTC
+    /// above the span cut-off (`LightingConfig::area_lights`).
+    pub area_mode: u32,
 }
 
 /// How the renderer's pipelines were built ([`Renderer::pipeline_stats`]).
@@ -733,6 +747,11 @@ pub struct Renderer {
     /// Frame slots whose last submitted frame copied the tile counts in `mask_clear`: set
     /// only after a successful submit, cleared once read.
     tile_counts_written: [bool; FRAMES_IN_FLIGHT],
+    /// This frame's shaped lights' screen bounds (N2d): the deferred lighting's area classes.
+    area_rects: crate::lights::AreaRects,
+    /// The shaped lights binned by recently submitted frames, by their timings' sequence
+    /// number ([`Self::shaped_lights_at`]); a ring longer than the frames in flight.
+    shaped_by_sequence: [(u64, u32); 8],
     /// [`RenderConfig::tile_counts`].
     tile_counts: bool,
     /// A submitted frame has run `light_classify` on the current tile buffer, so its header
@@ -1291,6 +1310,7 @@ impl Renderer {
                     lighting.set_layout(),
                     swapchain.extent,
                     config.debug_view.deferred_view(),
+                    lighting_config.area_lights.shader_mode(),
                 )
             })
             .transpose()?;
@@ -1532,6 +1552,8 @@ impl Renderer {
             decals_dropped: 0,
             exercise: ExerciseStats::default(),
             tile_counts_written: [false; FRAMES_IN_FLIGHT],
+            area_rects: crate::lights::AreaRects::default(),
+            shaped_by_sequence: [(u64::MAX, 0); 8],
             tile_counts: config.tile_counts,
             tile_header_written: false,
             tile_counts_recorded: (false, false),
@@ -1716,7 +1738,10 @@ impl Renderer {
     /// (read back a frame slot later), so timing evidence shows what it measured.
     #[must_use]
     pub fn exercise_stats(&self) -> ExerciseStats {
-        self.exercise
+        ExerciseStats {
+            area_mode: self.lighting_config.area_lights.shader_mode(),
+            ..self.exercise
+        }
     }
 
     /// Restarts [`Self::exercise_stats`] (after a warm-up).
@@ -1984,6 +2009,16 @@ impl Renderer {
     #[must_use]
     pub fn light_stats(&self) -> LightStats {
         self.lighting.light_stats()
+    }
+
+    /// The shaped lights (N2d) the frame whose [`GpuTimings::frame`] is `sequence` binned, so
+    /// a frame log can split its timings by them; `None` once the frame is too old (more
+    /// than eight frames back).
+    #[must_use]
+    pub fn shaped_lights_at(&self, sequence: u64) -> Option<u32> {
+        #[allow(clippy::cast_possible_truncation)] // Modulo 8.
+        let (at, area) = self.shaped_by_sequence[(sequence % 8) as usize];
+        (at == sequence).then_some(area)
     }
 
     /// Binds a registered 2D colour texture as the stylisation ramp (`None` removes it), used
@@ -2811,12 +2846,14 @@ impl Renderer {
         // N2c: the tile counts this slot's `mask_clear` copied (its previous frame's).
         if let Some(pass) = self.deferred.as_ref()
             && self.tile_counts_written[frame_index]
-            && let Some([standard, extended]) = pass.tile_counts(frame_index)
+            && let Some([standard, extended, standard_area, extended_area]) =
+                pass.tile_counts(frame_index)
         {
             self.exercise.lit_frames += 1;
-            self.exercise.standard_tiles += u64::from(standard);
-            self.exercise.extended_tiles += u64::from(extended);
-            self.exercise.extended_frames += u64::from(extended > 0);
+            self.exercise.standard_tiles += u64::from(standard + standard_area);
+            self.exercise.extended_tiles += u64::from(extended + extended_area);
+            self.exercise.extended_frames += u64::from(extended + extended_area > 0);
+            self.exercise.area_tiles += u64::from(standard_area + extended_area);
         }
         // Read once; set again only if this slot's next frame copies and is submitted.
         self.tile_counts_written[frame_index] = false;
@@ -2893,7 +2930,8 @@ impl Renderer {
         let mut frame_lighting = self
             .frame_lighting(scene)
             .with_lights(grid)
-            .with_baked_ao(self.lighting.baked_ao(), self.lighting_config);
+            .with_baked_ao(self.lighting.baked_ao(), self.lighting_config)
+            .with_area_lights(self.lighting_config);
         if self.contact.is_some() {
             frame_lighting = frame_lighting.with_contact_shadows(self.lighting_config);
         }
@@ -2929,6 +2967,18 @@ impl Renderer {
         self.lighting.write_decals(frame_index, &self.decal_upload);
         self.exercise.frames += 1;
         self.exercise.paint_decals += built.paint as u64;
+        let area = self.lighting.light_stats().area;
+        self.exercise.area_lights += u64::from(area);
+        self.exercise.area_frames += u64::from(area > 0);
+        // N2d: the tiles the area-mode lighting runs on are those these bounds touch.
+        self.area_rects = if self.lighting_config.area_lights.shader_mode() == 0 {
+            crate::lights::AreaRects::default()
+        } else {
+            crate::lights::AreaRects::build(scene.lights, raster_view_proj)
+        };
+        // ... and the water draws its shaped-light code only on the frames that bin one.
+        self.scene
+            .set_shaped_lights(area > 0 && self.lighting_config.area_lights.shader_mode() != 0);
         // ADR-0023 §1c: what the GPU reconstructs from depth is in the depth convention.
         let depth = self.frame_spec.depth;
         let (near, far) = (scene.camera.near, scene.camera.far);
@@ -3141,6 +3191,10 @@ impl Renderer {
         let (copied, classified) = self.tile_counts_recorded;
         self.tile_counts_written[frame_index] = copied;
         self.tile_header_written |= classified;
+        let sequence = self.profiler.next_sequence();
+        #[allow(clippy::cast_possible_truncation)] // Modulo 8.
+        let slot = (sequence % 8) as usize;
+        self.shaped_by_sequence[slot] = (sequence, self.lighting.light_stats().area);
         self.profiler.submitted(frame_index);
         self.last_submitted = true;
         if let Some(vfx) = self.vfx.as_mut() {
@@ -3263,7 +3317,17 @@ impl Renderer {
                 camera: self.scene.camera_set(frame_index),
                 lighting: self.lighting.set(frame_index),
                 render_size: render_extent,
+                area_rects: self.area_rects.tiles(
+                    [render_extent.width, render_extent.height],
+                    crate::passes::deferred::TILE,
+                ),
             });
+        if deferred_targets
+            .as_ref()
+            .is_some_and(|targets| targets.area_rects.1 > 0)
+        {
+            self.exercise.area_dispatch_frames += 1;
+        }
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
         self.profiler.begin_frame(command_buffers[0], frame_index);

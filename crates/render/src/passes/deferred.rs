@@ -32,6 +32,8 @@ use crate::shaders::ShaderSource;
 pub(crate) const TILE: u32 = 16;
 /// Frame slots of the tile counts' readback (the frames in flight).
 const COUNT_SLOTS: usize = crate::renderer::FRAMES_IN_FLIGHT;
+/// Bytes per slot of the readback: the five classes' counts.
+const COUNT_SLOT_BYTES: u64 = 20;
 
 /// The tile classes `light_classify` sorts into (`CLASS_*` in `light_classify.slang`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,12 +47,27 @@ pub(crate) enum TileClass {
     Standard = 1,
     /// Any other model: the full permutation.
     Extended = 2,
+    /// `Standard`, in a tile a shaped light's screen bound touches (N2d): lit by the
+    /// pipeline at the configured area mode.
+    StandardArea = 3,
+    /// `Extended`, likewise.
+    ExtendedArea = 4,
+}
+
+impl TileClass {
+    /// The four classes `deferred_light` dispatches, in order.
+    pub(crate) const LIT: [Self; 4] = [
+        Self::Standard,
+        Self::Extended,
+        Self::StandardArea,
+        Self::ExtendedArea,
+    ];
 }
 
 /// The tile buffer's layout (`light_classify.slang`, `deferred_light.comp`), in 32-bit words:
-/// the three classes' dispatch arguments (`x, y, z` each) and their tile counts (the sky's
-/// stay at their reset values), then the standard and the extended lists of `capacity` packed
-/// tiles (`x | y << 16`).
+/// the five classes' dispatch arguments (`x, y, z` each) and their tile counts (the sky's
+/// stay at their reset values), then the four lit classes' lists of `capacity` packed tiles
+/// (`x | y << 16`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TileLayout {
     /// Tiles per row of the largest rendered sub-rectangle.
@@ -61,12 +78,13 @@ pub(crate) struct TileLayout {
 
 impl TileLayout {
     /// Words before the lists (`TILE_HEADER_WORDS` in `light_classify.slang`).
-    pub(crate) const HEADER_WORDS: u32 = 12;
+    pub(crate) const HEADER_WORDS: u32 = 20;
     /// The word of the sky class's tile count (`TILE_COUNT_WORD`); the others follow.
-    pub(crate) const COUNT_WORD: u32 = 9;
+    pub(crate) const COUNT_WORD: u32 = 15;
     /// What `mask_clear` writes over the header each frame: every class's dispatch is
     /// `(0, 0, 1)` and its count 0; `light_classify` raises `x` and `y` with atomic maxima.
-    pub(crate) const RESET: [u32; 12] = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0];
+    pub(crate) const RESET: [u32; 20] =
+        [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0];
 
     /// The layout for rendered sub-rectangles up to `extent` (the swapchain's).
     pub(crate) fn for_extent(extent: vk::Extent2D) -> Self {
@@ -80,7 +98,7 @@ impl TileLayout {
 
     /// The buffer's size in bytes.
     pub(crate) fn bytes(self) -> u64 {
-        4 * (u64::from(Self::HEADER_WORDS) + 2 * u64::from(self.capacity))
+        4 * (u64::from(Self::HEADER_WORDS) + 4 * u64::from(self.capacity))
     }
 
     /// The byte offset of `class`'s `VkDispatchIndirectCommand`.
@@ -88,19 +106,22 @@ impl TileLayout {
         12 * class as u64
     }
 
-    /// The word offset of `class`'s tile list (standard or extended: the sky has none).
+    /// The word offset of `class`'s tile list (a lit class: the sky has none).
     pub(crate) const fn list_offset(self, class: TileClass) -> u32 {
         Self::HEADER_WORDS + (class as u32 - 1) * self.capacity
     }
 }
 
-/// `ClassifyPush` in `light_classify.slang` (16 bytes).
+/// `ClassifyPush` in `light_classify.slang` (128 bytes, `maxPushConstantsSize`'s minimum).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct ClassifyPush {
     render_size: [u32; 2],
     tiles_x: u32,
     capacity: u32,
+    area_count: u32,
+    pad: [u32; 3],
+    area_rects: [[u32; 2]; crate::lights::AREA_RECTS],
 }
 
 /// `DeferredPush` in `deferred_light.comp` (24 bytes).
@@ -131,14 +152,28 @@ pub(crate) struct DeferredTargets {
     pub(crate) camera: vk::DescriptorSet,
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) render_size: vk::Extent2D,
+    /// The shaped lights' screen bounds this frame, in tiles of the rendered sub-rectangle
+    /// (N2d, [`crate::lights::AreaRects::tiles`]): `light_classify` puts the tiles they touch
+    /// in the area classes, lit at the configured `AREA_MODE`; every other tile runs the
+    /// mode-0 pipelines, which light every point light the same way. Empty without a shaped
+    /// light.
+    pub(crate) area_rects: ([[u32; 2]; crate::lights::AREA_RECTS], u32),
+}
+
+/// The pass's pipelines: the classification, the two lighting permutations at the
+/// configured `AREA_MODE` (the area classes) and, when that mode is not 0, the same two at
+/// mode 0 (the other classes).
+pub(crate) struct DeferredPipelines {
+    classify: GraphicsPipeline,
+    standard: GraphicsPipeline,
+    extended: GraphicsPipeline,
+    plain: Option<[GraphicsPipeline; 2]>,
 }
 
 /// The `light_classify` and `deferred_light` passes and their tile buffer.
 pub(crate) struct DeferredPass {
     device: ash::Device,
-    classify: GraphicsPipeline,
-    standard: GraphicsPipeline,
-    extended: GraphicsPipeline,
+    pipelines: DeferredPipelines,
     classify_layout: PipelineLayout,
     light_layout: PipelineLayout,
     _classify_set_layout: DescriptorSetLayout,
@@ -157,6 +192,12 @@ pub(crate) struct DeferredPass {
     /// The lighting pipelines' `DEBUG_VIEW` specialisation constant (0 off;
     /// [`crate::post::TemporalDebugView::deferred_view`]).
     debug: u32,
+    /// Their `AREA_MODE` constant ([`crate::AreaLights`], N2d): the value the forward stages
+    /// read from the camera's `occlusion.z`. Only the area classes run it; the other tiles
+    /// run the mode-0 pipelines ([`DeferredTargets::area_rects`]): the LTC evaluation's
+    /// registers (117 against 74 on the RTX 5070 Ti, perf/0038) cost occupancy wherever
+    /// they run, shaped light or not.
+    area_mode: u32,
 }
 
 /// Why the deferred lighting cannot run on a device admitted to Tiered: the frame then
@@ -254,6 +295,7 @@ impl DeferredPass {
         lighting_layout: vk::DescriptorSetLayout,
         extent: vk::Extent2D,
         debug: u32,
+        area_mode: u32,
     ) -> RenderResult<Self> {
         let compute = vk::ShaderStageFlags::COMPUTE;
         // The renderer checked [`unsupported`] before choosing the deferred frame.
@@ -303,12 +345,12 @@ impl DeferredPass {
             ],
             &push(core::mem::size_of::<DeferredPush>()),
         )?;
-        let [classify, standard, extended] = Self::build(
+        let pipelines = Self::build(
             device,
             shaders,
             classify_layout.handle(),
             light_layout.handle(),
-            debug,
+            [debug, area_mode],
         )?;
         let layout = TileLayout::for_extent(extent);
         let tiles = Self::tile_buffer(device, layout)?;
@@ -316,15 +358,13 @@ impl DeferredPass {
             device.device.clone(),
             device.allocator(),
             "deferred tile counts",
-            COUNT_SLOTS as u64 * 16,
+            COUNT_SLOTS as u64 * COUNT_SLOT_BYTES,
             vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuToCpu,
         )?;
         Ok(Self {
             device: device.device.clone(),
-            classify,
-            standard,
-            extended,
+            pipelines,
             classify_layout,
             light_layout,
             _classify_set_layout: classify_set_layout,
@@ -337,6 +377,7 @@ impl DeferredPass {
             counts,
             layout,
             debug,
+            area_mode,
         })
     }
 
@@ -359,19 +400,28 @@ impl DeferredPass {
         shaders: &ShaderSource,
         classify_layout: vk::PipelineLayout,
         light_layout: vk::PipelineLayout,
-        debug: u32,
-    ) -> RenderResult<[GraphicsPipeline; 3]> {
-        // `deferred_light.comp`'s `DEBUG_VIEW` (constant_id 0); `light_classify` has none, and
-        // an unused entry is ignored.
-        let entries = [vk::SpecializationMapEntry::default()
-            .constant_id(0)
-            .offset(0)
-            .size(core::mem::size_of::<u32>())];
-        let data = debug.to_ne_bytes();
-        let specialization = vk::SpecializationInfo::default()
-            .map_entries(&entries)
-            .data(&data);
-        let pipeline = |name, layout| -> RenderResult<GraphicsPipeline> {
+        [debug, area_mode]: [u32; 2],
+    ) -> RenderResult<DeferredPipelines> {
+        // `deferred_light.comp`'s `DEBUG_VIEW` (constant_id 0) and `AREA_MODE` (constant_id 1,
+        // N2d); `light_classify` has neither, and unused entries are ignored.
+        let size = core::mem::size_of::<u32>();
+        let entries = [
+            vk::SpecializationMapEntry::default()
+                .constant_id(0)
+                .offset(0)
+                .size(size),
+            vk::SpecializationMapEntry::default()
+                .constant_id(1)
+                .offset(size as u32)
+                .size(size),
+        ];
+        let pipeline = |name, layout, area_mode: u32| -> RenderResult<GraphicsPipeline> {
+            let mut data = [0u8; 8];
+            data[..4].copy_from_slice(&debug.to_ne_bytes());
+            data[4..].copy_from_slice(&area_mode.to_ne_bytes());
+            let specialization = vk::SpecializationInfo::default()
+                .map_entries(&entries)
+                .data(&data);
             let module = shaders.module(device, name)?;
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
@@ -385,20 +435,32 @@ impl DeferredPass {
             )?;
             Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
         };
-        let pipelines = [
-            pipeline("light_classify.slang", classify_layout)?,
-            pipeline("deferred_light.comp", light_layout)?,
-            pipeline("deferred_light_extended.comp", light_layout)?,
-        ];
+        let pipelines = DeferredPipelines {
+            classify: pipeline("light_classify.slang", classify_layout, area_mode)?,
+            standard: pipeline("deferred_light.comp", light_layout, area_mode)?,
+            extended: pipeline("deferred_light_extended.comp", light_layout, area_mode)?,
+            plain: if area_mode == 0 {
+                None
+            } else {
+                Some([
+                    pipeline("deferred_light.comp", light_layout, 0)?,
+                    pipeline("deferred_light_extended.comp", light_layout, 0)?,
+                ])
+            },
+        };
         // `RenderConfig::pipeline_stats`: the permutations' registers (amendment 3 item 32).
+        let plain = pipelines.plain.as_ref();
         for (name, pipeline) in [
-            "light_classify",
-            "deferred_light",
-            "deferred_light_extended",
-        ]
-        .iter()
-        .zip(&pipelines)
-        {
+            ("light_classify", Some(&pipelines.classify)),
+            ("deferred_light", Some(&pipelines.standard)),
+            ("deferred_light_extended", Some(&pipelines.extended)),
+            ("deferred_light_plain", plain.map(|[standard, _]| standard)),
+            (
+                "deferred_light_extended_plain",
+                plain.map(|[_, extended]| extended),
+            ),
+        ] {
+            let Some(pipeline) = pipeline else { continue };
             for line in device.pipeline_statistics(pipeline.handle()) {
                 eprintln!("[render] pipeline-stats {name} {line}");
             }
@@ -412,24 +474,19 @@ impl DeferredPass {
         &self,
         device: &DeviceContext,
         shaders: &ShaderSource,
-    ) -> RenderResult<[GraphicsPipeline; 3]> {
+    ) -> RenderResult<DeferredPipelines> {
         Self::build(
             device,
             shaders,
             self.classify_layout.handle(),
             self.light_layout.handle(),
-            self.debug,
+            [self.debug, self.area_mode],
         )
     }
 
     /// Replaces the pipelines (the device is idle).
-    pub(crate) fn install_pipelines(
-        &mut self,
-        [classify, standard, extended]: [GraphicsPipeline; 3],
-    ) {
-        self.classify = classify;
-        self.standard = standard;
-        self.extended = extended;
+    pub(crate) fn install_pipelines(&mut self, pipelines: DeferredPipelines) {
+        self.pipelines = pipelines;
     }
 
     /// Re-sizes the tile buffer for rendered sub-rectangles up to `extent` (the device is
@@ -510,8 +567,8 @@ impl DeferredPass {
         let slot = (slot % COUNT_SLOTS) as u64;
         let region = vk::BufferCopy::default()
             .src_offset(u64::from(TileLayout::COUNT_WORD) * 4)
-            .dst_offset(slot * 16)
-            .size(12);
+            .dst_offset(slot * COUNT_SLOT_BYTES)
+            .size(20);
         // SAFETY: both buffers are live, the source has TRANSFER_SRC and the destination
         // TRANSFER_DST, and both ranges lie inside them (the header; one 16-byte slot).
         unsafe {
@@ -540,8 +597,8 @@ impl DeferredPass {
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .buffer(self.counts.handle())
-                .offset(slot * 16)
-                .size(16),
+                .offset(slot * COUNT_SLOT_BYTES)
+                .size(COUNT_SLOT_BYTES),
         ];
         device.cmd_pipeline_barrier2(
             cmd,
@@ -549,12 +606,12 @@ impl DeferredPass {
         );
     }
 
-    /// The `[standard, extended]` tile counts `record_reset` copied in frame slot `slot`
-    /// (the frame before that slot's last one), once the slot's fence has signalled; `None`
-    /// before any copy or if the buffer cannot be read.
-    pub(crate) fn tile_counts(&self, slot: usize) -> Option<[u32; 2]> {
-        let mut bytes = [0_u8; 12];
-        let offset = (slot % COUNT_SLOTS) * 16;
+    /// The `[standard, extended, standard area, extended area]` tile counts `record_reset`
+    /// copied in frame slot `slot` (the frame before that slot's last one), once the slot's
+    /// fence has signalled; `None` before any copy or if the buffer cannot be read.
+    pub(crate) fn tile_counts(&self, slot: usize) -> Option<[u32; 4]> {
+        let mut bytes = [0_u8; 20];
+        let offset = (slot % COUNT_SLOTS) * COUNT_SLOT_BYTES as usize;
         if !self.counts.read_bytes(offset, &mut bytes) {
             return None;
         }
@@ -566,7 +623,7 @@ impl DeferredPass {
                 bytes[4 * index + 3],
             ])
         };
-        Some([word(1), word(2)])
+        Some([word(1), word(2), word(3), word(4)])
     }
 
     /// Points both passes' sets at the current transients and the tile buffer. Called at
@@ -616,17 +673,21 @@ impl DeferredPass {
     /// Records `light_classify` over this frame's rendered sub-rectangle.
     pub(crate) fn record_classify(&self, cmd: vk::CommandBuffer, targets: &DeferredTargets) {
         let size = targets.render_size;
+        let (area_rects, area_count) = targets.area_rects;
         let push = ClassifyPush {
             render_size: [size.width, size.height],
             tiles_x: self.layout.tiles_x,
             capacity: self.layout.capacity,
+            area_count,
+            pad: [0; 3],
+            area_rects,
         };
         // SAFETY: the pipeline is live; `cmd` is recording outside a render pass.
         unsafe {
             self.device.cmd_bind_pipeline(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
-                self.classify.handle(),
+                self.pipelines.classify.handle(),
             );
         }
         // SAFETY: the layout and set are live, and the set was written by `bind_targets`.
@@ -664,15 +725,16 @@ impl DeferredPass {
         }
     }
 
-    /// Records `deferred_light`: the standard tiles, then the extended ones, each one indirect
-    /// dispatch over its list.
+    /// Records `deferred_light`: the standard tiles, then the extended ones, then (on a frame
+    /// with a shaped light on screen) the two area classes, each one indirect dispatch over
+    /// its list.
     ///
-    /// The two dispatches read and write `hdr` with no barrier between them. That is race
-    /// free because their pixels are disjoint: `light_classify` puts each tile in exactly one
-    /// list (by the models it holds), each group shades only the 16 x 16 pixels of its own
-    /// tile, and the lists hold no tile twice (one append per tile). So no pixel is loaded or
-    /// stored by both dispatches, and the graph's barrier after `deferred_light` orders both
-    /// against what follows.
+    /// The dispatches read and write `hdr` with no barrier between them. That is race free
+    /// because their pixels are disjoint: `light_classify` puts each tile in exactly one list
+    /// (by the models it holds and whether a shaped light's bound touches it), each group
+    /// shades only the 16 x 16 pixels of its own tile, and the lists hold no tile twice (one
+    /// append per tile). So no pixel is loaded or stored by two dispatches, and the graph's
+    /// barrier after `deferred_light` orders them all against what follows.
     pub(crate) fn record_light(&self, cmd: vk::CommandBuffer, targets: &DeferredTargets) {
         // SAFETY: the layout and sets are live: set 0 is the scene's camera set for this
         // frame's slot (written before the frame was recorded) and set 1 was written by
@@ -700,10 +762,22 @@ impl DeferredPass {
             );
         }
         let size = targets.render_size;
-        for (class, pipeline) in [
-            (TileClass::Standard, &self.standard),
-            (TileClass::Extended, &self.extended),
-        ] {
+        let (area, plain) = (
+            [&self.pipelines.standard, &self.pipelines.extended],
+            self.pipelines.plain.as_ref().map_or(
+                [&self.pipelines.standard, &self.pipelines.extended],
+                |[s, e]| [s, e],
+            ),
+        );
+        // Without a rectangle the area classes are empty: their dispatches are skipped.
+        let classes = if targets.area_rects.1 > 0 { 4 } else { 2 };
+        for class in TileClass::LIT.into_iter().take(classes) {
+            let pipeline = match class {
+                TileClass::Standard => plain[0],
+                TileClass::Extended => plain[1],
+                TileClass::StandardArea => area[0],
+                _ => area[1],
+            };
             let push = DeferredPush {
                 render_size: [size.width, size.height],
                 list_offset: self.layout.list_offset(class),
@@ -819,15 +893,21 @@ mod tests {
     }
 
     /// The debug views are `deferred_light.comp`'s specialisation constant 0 (the pipelines
-    /// are built with `constant_id` 0 = the view), not a push-constant branch.
+    /// are built with `constant_id` 0 = the view), not a push-constant branch; N2d's area
+    /// mode is constant 1, which the forward stages read from the camera's `occlusion.z`
+    /// (`lighting.glsl`'s `MOBA_AREA_MODE`), both from `LightingConfig::area_lights`.
     #[test]
-    fn debug_views_are_a_specialisation_constant() {
-        // OpDecorate <id> SpecId 0 in both permutations.
+    fn debug_views_and_the_area_mode_are_specialisation_constants() {
+        // OpDecorate <id> SpecId n in both permutations.
         const OP_DECORATE: u32 = 71;
         const SPEC_ID: u32 = 1;
         let light = include_str!("../../../shaders/shaders/deferred_light.comp");
         assert!(light.contains("layout(constant_id = 0) const uint DEBUG_VIEW = 0u;"));
+        assert!(light.contains("layout(constant_id = 1) const uint AREA_MODE = 0u;"));
+        assert!(light.contains("#define MOBA_AREA_MODE AREA_MODE"));
         assert!(!light.contains("push.debug"));
+        let lighting = include_str!("../../../shaders/shaders/include/lighting.glsl");
+        assert!(lighting.contains("#define MOBA_AREA_MODE uint(camera.occlusion.z)"));
         for spirv in [
             moba_shaders::DEFERRED_LIGHT_COMP,
             moba_shaders::DEFERRED_LIGHT_EXTENDED_COMP,
@@ -835,19 +915,32 @@ mod tests {
             let (chunks, _) = spirv.as_chunks::<4>();
             let words: Vec<u32> = chunks.iter().map(|&w| u32::from_le_bytes(w)).collect();
             let mut index = 5;
-            let mut found = false;
+            let mut found = [false; 2];
             while index < words.len() {
                 let count = (words[index] >> 16) as usize;
                 if words[index] & 0xFFFF == OP_DECORATE
                     && count >= 4
                     && words[index + 2] == SPEC_ID
-                    && words[index + 3] == 0
+                    && words[index + 3] < 2
                 {
-                    found = true;
+                    found[words[index + 3] as usize] = true;
                 }
                 index += count.max(1);
             }
-            assert!(found, "SpecId 0 decorated");
+            assert_eq!(found, [true; 2], "SpecId 0 and 1 decorated");
+        }
+        for tier in crate::QualityTier::ALL {
+            let config = crate::LightingConfig::for_tier(*tier);
+            let uniform = crate::lighting::FrameLighting::new(
+                &crate::SceneLighting::DEFAULT,
+                config,
+                1024,
+                None,
+                &crate::lighting::EnvironmentState::NONE,
+            )
+            .with_area_lights(config)
+            .occlusion[2];
+            assert_eq!(uniform, config.area_lights.shader_mode() as f32, "{tier:?}");
         }
     }
 
@@ -880,10 +973,26 @@ mod tests {
             ),
             ("tiles_x", core::mem::offset_of!(ClassifyPush, tiles_x)),
             ("capacity", core::mem::offset_of!(ClassifyPush, capacity)),
+            (
+                "area_count",
+                core::mem::offset_of!(ClassifyPush, area_count),
+            ),
+            ("pad0", core::mem::offset_of!(ClassifyPush, pad)),
+            ("pad1", core::mem::offset_of!(ClassifyPush, pad) + 4),
+            ("pad2", core::mem::offset_of!(ClassifyPush, pad) + 8),
+            (
+                "area_rects",
+                core::mem::offset_of!(ClassifyPush, area_rects),
+            ),
         ]
         .map(|(name, offset)| (name.to_owned(), offset as u64));
         assert_eq!(offsets, expected);
-        assert_eq!(core::mem::size_of::<ClassifyPush>(), 16);
+        assert_eq!(core::mem::size_of::<ClassifyPush>(), 128);
+        let classify = include_str!("../../../shaders/shaders/slang/light_classify.slang");
+        assert!(classify.contains(&format!(
+            "static const uint AREA_RECTS = {};",
+            crate::lights::AREA_RECTS
+        )));
     }
 
     /// The lights `dynamic_lights` (include/lighting.glsl) visits at `p`: the grid column's
@@ -957,7 +1066,7 @@ mod tests {
     #[allow(clippy::too_many_lines)] // The scene, the reconstruction and the comparison.
     fn forward_and_deferred_visit_the_same_lights() {
         use crate::depth::DepthConvention;
-        use crate::lights::{CELL_WORDS, GRID, LIGHT_VEC4S, MAX_LIGHTS, PointLight};
+        use crate::lights::{CELL_WORDS, GRID, LIGHT_LIST_VEC4S, Light, LightShape};
         use moba_core::math::{Vec3, Vec4};
 
         let (width, height) = (320u32, 180u32);
@@ -978,11 +1087,7 @@ mod tests {
         for centre in [Vec3::new(0.0, 1.0, 0.0), Vec3::new(9.0, 1.0, -6.0)] {
             for _ in 0..30 {
                 let offset = Vec3::new(random() - 0.5, random(), random() - 0.5) * 3.0;
-                lights.push(PointLight::new(
-                    centre + offset,
-                    4.0 + random() * 4.0,
-                    Vec3::ONE,
-                ));
+                lights.push(Light::new(centre + offset, 4.0 + random() * 4.0, Vec3::ONE));
             }
         }
         for _ in 0..180 {
@@ -991,7 +1096,30 @@ mod tests {
                 random() * 3.0,
                 random() * 50.0 - 27.0,
             );
-            lights.push(PointLight::new(position, 2.0 + random() * 10.0, Vec3::ONE));
+            lights.push(Light::new(position, 2.0 + random() * 10.0, Vec3::ONE));
+        }
+        // Every shape (ADR-0023 gate 3): the shapes are binned and early-outed by the same
+        // sphere as points, so the sets must still agree. Small shapes keep the radii; every
+        // eighth light is a long capsule whose extent raises its radius (twice the extent,
+        // `Light::sanitized`), so the raised radius is what both loops must use.
+        for (index, light) in lights.iter_mut().enumerate() {
+            light.shape = match index % 4 {
+                0 => LightShape::Point,
+                1 => LightShape::Sphere { radius: 0.3 },
+                2 if index % 8 == 6 => LightShape::Capsule {
+                    axis: Vec3::new(3.0, 0.2, 1.5),
+                    radius: 0.3,
+                },
+                2 => LightShape::Capsule {
+                    axis: Vec3::new(0.8, 0.1, -0.4),
+                    radius: 0.2,
+                },
+                _ => LightShape::Rect {
+                    normal: Vec3::new(0.0, -1.0, 0.2),
+                    half_width: 0.6,
+                    half_height: 0.4,
+                },
+            };
         }
         // Surface points: the ground (y = 0) and a slope (y = 0.3 x + 1), through pixel
         // centres of a `width` x `height` render with the scene's flipped viewport.
@@ -1020,13 +1148,26 @@ mod tests {
             }
         }
         assert!(points.len() > (width * height / 2) as usize);
+        // The radii the lights are binned and early-outed by: some raised by their shape.
+        let binned_radii: Vec<(Vec3, f32)> = lights
+            .iter()
+            .filter_map(|light| light.sanitized_for_tests())
+            .map(|light| (light.position, light.radius))
+            .collect();
+        assert!(
+            lights
+                .iter()
+                .zip(&binned_radii)
+                .any(|(light, &(_, radius))| radius > light.radius),
+            "a shape raises a light's radius"
+        );
         let footprint = crate::lights::ground_footprint(camera.view_proj);
         // The reconstruction is off by at most about 24 µm here (D32 reversed-Z at 40-60 m).
         let tolerance = 1e-4_f32;
         let mut worst = 0.0_f32;
         for &tier in crate::QualityTier::ALL {
             let config = crate::LightingConfig::for_tier(tier);
-            let mut light_words = vec![[0.0; 4]; MAX_LIGHTS * LIGHT_VEC4S];
+            let mut light_words = vec![[0.0; 4]; LIGHT_LIST_VEC4S];
             let mut cell_words = vec![0u32; GRID * GRID * CELL_WORDS];
             let mut counts = [0u8; GRID * GRID];
             let (params, stats) = crate::lights::bin(
@@ -1038,7 +1179,7 @@ mod tests {
                 &mut cell_words,
                 &mut counts,
             );
-            assert!(stats.binned > 0, "{tier:?}");
+            assert!(stats.binned > 0 && stats.area > 0, "{tier:?}");
             assert!(
                 stats.cell_overflows > 0,
                 "{tier:?}: the clusters overflow a column"
@@ -1063,8 +1204,8 @@ mod tests {
                 let near_edge = params.info[3] > 0
                     && (edge(forward.x, params.grid[0], params.grid[2])
                         || edge(forward.z, params.grid[1], params.grid[3]));
-                let near_radius = lights.iter().any(|light| {
-                    ((light.position - forward).length() - light.radius).abs() < tolerance
+                let near_radius = binned_radii.iter().any(|&(position, radius)| {
+                    ((position - forward).length() - radius).abs() < tolerance
                 });
                 if near_edge || near_radius {
                     skipped += 1;
@@ -1122,35 +1263,44 @@ mod tests {
     #[test]
     fn tile_layout_matches_the_shaders() {
         let classify = include_str!("../../../shaders/shaders/slang/light_classify.slang");
-        assert!(classify.contains("static const uint TILE_HEADER_WORDS = 12;"));
-        assert!(classify.contains("static const uint TILE_COUNT_WORD = 9;"));
+        assert!(classify.contains("static const uint TILE_HEADER_WORDS = 20;"));
+        assert!(classify.contains("static const uint TILE_COUNT_WORD = 15;"));
         assert!(classify.contains("static const uint TILE = 16;"));
         assert!(classify.contains("static const uint CLASS_SKY = 0;"));
         assert!(classify.contains("static const uint CLASS_STANDARD = 1;"));
         assert!(classify.contains("static const uint CLASS_EXTENDED = 2;"));
+        assert!(classify.contains("static const uint CLASS_AREA = 2;"));
+        assert!(classify.contains("tile_class += CLASS_AREA;"));
         assert!(classify.contains("[numthreads(16, 16, 1)]"));
         let light = include_str!("../../../shaders/shaders/deferred_light.comp");
         assert!(light.contains("local_size_x = 16, local_size_y = 16"));
-        assert!(light.contains("const uint TILE_COUNT_WORD = 9u;"));
+        assert!(light.contains("const uint TILE_COUNT_WORD = 15u;"));
         // The sky is not appended, and the list offset is the class's minus one.
         assert!(classify.contains("if (tile_class == CLASS_SKY)"));
         assert!(
             classify.contains("tiles[TILE_HEADER_WORDS + (tile_class - 1) * push.capacity + slot]")
         );
-        assert_eq!(TileLayout::COUNT_WORD, 9);
+        assert_eq!(TileLayout::COUNT_WORD, 15);
         assert_eq!(TileLayout::HEADER_WORDS as usize, TileLayout::RESET.len());
         assert_eq!(TileClass::Sky as u32, 0);
+        assert_eq!(
+            TileClass::LIT.map(|class| class as u32),
+            [1, 2, 3, 4],
+            "the area classes are the model classes plus CLASS_AREA"
+        );
         let layout = TileLayout::for_extent(ash::vk::Extent2D {
             width: 1920,
             height: 1080,
         });
         assert_eq!((layout.tiles_x, layout.capacity), (120, 120 * 68));
-        assert_eq!(layout.list_offset(TileClass::Standard), 12);
-        assert_eq!(layout.list_offset(TileClass::Extended), 12 + 8160);
-        assert_eq!(layout.bytes(), 4 * (12 + 2 * 8160));
+        assert_eq!(layout.list_offset(TileClass::Standard), 20);
+        assert_eq!(layout.list_offset(TileClass::Extended), 20 + 8160);
+        assert_eq!(layout.list_offset(TileClass::ExtendedArea), 20 + 3 * 8160);
+        assert_eq!(layout.bytes(), 4 * (20 + 4 * 8160));
         assert_eq!(TileLayout::args_offset(TileClass::Extended), 24);
+        assert_eq!(TileLayout::args_offset(TileClass::ExtendedArea), 48);
         // Each reset dispatch is (0, 0, 1), and every count 0.
-        for class in 0..3 {
+        for class in 0..5 {
             assert_eq!(&TileLayout::RESET[3 * class..3 * class + 3], &[0, 0, 1]);
             assert_eq!(
                 TileLayout::RESET[TileLayout::COUNT_WORD as usize + class],

@@ -129,6 +129,62 @@ impl core::fmt::Display for OutlineMode {
     }
 }
 
+/// How shaped lights ([`LightShape`](crate::LightShape)) are lit on Tiered (ADR-0023 §4a).
+/// Compat always lights them as points at their centres.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AreaLights {
+    /// As points at their centres (the off switch, `MOBA_AREA_LIGHTS=off`).
+    Off,
+    /// At the representative point: the shape's point closest to the reflection ray, with
+    /// the point light's falloff (`Low`).
+    RepresentativePoint,
+    /// LTC integrals over the shape (`Medium` and up).
+    #[default]
+    Ltc,
+}
+
+impl AreaLights {
+    /// Every mode.
+    pub const ALL: &'static [Self] = &[Self::Off, Self::RepresentativePoint, Self::Ltc];
+
+    /// Lower-case name, as accepted by [`Self::from_name`].
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::RepresentativePoint => "point",
+            Self::Ltc => "ltc",
+        }
+    }
+
+    /// Parses a mode name, ignoring ASCII case and surrounding whitespace.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|mode| mode.name().eq_ignore_ascii_case(name))
+    }
+
+    /// The shaders' `MOBA_AREA_MODE`: the camera's `occlusion.z` and `deferred_light`'s
+    /// `AREA_MODE` constant.
+    pub(crate) const fn shader_mode(self) -> u32 {
+        match self {
+            Self::Off => 0,
+            Self::RepresentativePoint => 1,
+            Self::Ltc => 2,
+        }
+    }
+}
+
+impl core::fmt::Display for AreaLights {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Most contact-shadow ray steps.
 pub const MAX_CONTACT_SHADOW_STEPS: u32 = 32;
 /// Contact-shadow ray length towards the sun, metres.
@@ -179,6 +235,9 @@ pub struct LightingConfig {
     /// Screen-space contact-shadow ray steps (`0` = off, at most
     /// [`MAX_CONTACT_SHADOW_STEPS`]). On, they add the depth pre-pass.
     pub contact_shadow_steps: u32,
+    /// How Tiered lights shaped lights (N2d): the representative point on `Low`, LTC from
+    /// `Medium`.
+    pub area_lights: AreaLights,
 }
 
 impl LightingConfig {
@@ -191,7 +250,8 @@ impl LightingConfig {
     /// | `High` | PCSS-lite, 16 + 16 taps | 2048² | on | 128 / 16 | screen | 8 steps |
     /// | `Ultra` | PCSS-lite, 16 + 32 taps | 4096² | on | 256 / 16 | screen | 16 steps |
     ///
-    /// Baked AO is on for every tier.
+    /// Baked AO is on for every tier. Shaped lights ([`AreaLights`]) are lit at their
+    /// representative points on `Low` and with LTC from `Medium` (ADR-0023 §4a).
     #[must_use]
     pub const fn for_tier(tier: QualityTier) -> Self {
         let (shadows, shadow_resolution, specular_ibl, pcss_taps) = match tier {
@@ -219,7 +279,18 @@ impl LightingConfig {
             outlines,
             baked_ao: true,
             contact_shadow_steps,
+            area_lights: match tier {
+                QualityTier::Low => AreaLights::RepresentativePoint,
+                _ => AreaLights::Ltc,
+            },
         }
+    }
+
+    /// Returns this config with [`LightingConfig::area_lights`] set.
+    #[must_use]
+    pub const fn with_area_lights(mut self, area_lights: AreaLights) -> Self {
+        self.area_lights = area_lights;
+        self
     }
 
     /// Returns this config with [`LightingConfig::max_lights`] set (`0` = no dynamic lights).
@@ -880,6 +951,12 @@ impl FrameLighting {
         self
     }
 
+    /// Sets how the shaders light shaped lights (`camera.occlusion.z`, `MOBA_AREA_MODE`).
+    pub(crate) fn with_area_lights(mut self, config: LightingConfig) -> Self {
+        self.occlusion[2] = config.area_lights.shader_mode() as f32;
+        self
+    }
+
     /// Turns on sampling the main view's contact-shadow target (`config`'s steps > 0).
     pub(crate) fn with_contact_shadows(mut self, config: LightingConfig) -> Self {
         let steps = config.contact_steps();
@@ -1026,9 +1103,10 @@ const SET_IMAGES: u32 = IMAGE_BINDINGS + 3;
 /// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image,
 /// light buffers and decals.
 pub(crate) const MAIN_SETS: usize = 2;
-const LIGHT_LIST_BYTES: u64 = (crate::lights::MAX_LIGHTS
-    * crate::lights::LIGHT_VEC4S
-    * core::mem::size_of::<[f32; 4]>()) as u64;
+/// Both parts of the light buffer: the 32-byte records Compat reads, then the shapes
+/// (ADR-0023 §4c).
+const LIGHT_LIST_BYTES: u64 =
+    (crate::lights::LIGHT_LIST_VEC4S * core::mem::size_of::<[f32; 4]>()) as u64;
 const LIGHT_GRID_WORDS: usize =
     crate::lights::GRID * crate::lights::GRID * crate::lights::CELL_WORDS;
 
@@ -1258,25 +1336,37 @@ impl LightingResources {
                 bytes: &[0, 0, 0, 255].repeat(6),
             },
         )?;
-        let compat_lut;
-        let lut: &[u8] = if tiered {
-            brdf_lut_tiered()
+        // Tiered's binding 3 is the atlas of the split-sum LUT and the LTC table (N2d,
+        // `ltc::lut_atlas`): one sampler, where the scene layout has none to spare.
+        let lut: Vec<u8>;
+        let (format, extent) = if tiered {
+            lut = crate::ltc::lut_atlas(brdf_lut_tiered(), BRDF_LUT_SIZE as usize);
+            (
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::Extent2D {
+                    width: crate::ltc::LUT_ATLAS_EXTENT[0],
+                    height: crate::ltc::LUT_ATLAS_EXTENT[1],
+                },
+            )
         } else {
-            compat_lut = brdf_lut();
-            &compat_lut
+            lut = brdf_lut();
+            (
+                vk::Format::R16G16_SFLOAT,
+                vk::Extent2D {
+                    width: BRDF_LUT_SIZE,
+                    height: BRDF_LUT_SIZE,
+                },
+            )
         };
         let brdf_lut = texture::upload_raw(
             device,
             "brdf-lut",
             &texture::RawImage {
-                format: vk::Format::R16G16_SFLOAT,
-                extent: vk::Extent2D {
-                    width: BRDF_LUT_SIZE,
-                    height: BRDF_LUT_SIZE,
-                },
+                format,
+                extent,
                 layers: texture::RawLayers::Plain,
                 levels: &[(0, lut.len())],
-                bytes: lut,
+                bytes: &lut,
             },
         )?;
         let default_ramp = texture::upload_rgba(device, "default-ramp", 1, 1, &[255; 4])?;
@@ -1438,7 +1528,7 @@ impl LightingResources {
     pub(crate) fn upload_lights(
         &mut self,
         frame: usize,
-        lights: &[crate::lights::PointLight],
+        lights: &[crate::lights::Light],
         view_proj: Mat4,
         config: LightingConfig,
     ) -> crate::lights::GridParams {
@@ -1450,7 +1540,7 @@ impl LightingResources {
         let LightFrame {
             lights: list, grid, ..
         } = &mut self.frames[frame % MAIN_SETS];
-        let words = crate::lights::MAX_LIGHTS * crate::lights::LIGHT_VEC4S;
+        let words = crate::lights::LIGHT_LIST_VEC4S;
         let (Some(list), Some(cells)) = (
             list.mapped_slice_mut::<[f32; 4]>(words),
             grid.mapped_slice_mut::<u32>(LIGHT_GRID_WORDS),

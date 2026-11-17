@@ -136,6 +136,12 @@ pub const MAX_VFX_LIGHT_INTENSITY: f32 = 64.0;
 pub const MAX_VFX_LIGHT_RADIUS: f32 = 24.0;
 const LIGHT_RADIUS_RANGE: (f32, f32) = (0.25, MAX_VFX_LIGHT_RADIUS);
 const LIGHT_COLOR_RANGE: (f32, f32) = (0.0, 4.0);
+/// A shaped light's `source_radius`, metres (N2d, ADR-0023 §4c).
+const LIGHT_SOURCE_RADIUS_RANGE: (f32, f32) = (0.01, 2.0);
+/// A shaped light's `length` and `width`, metres.
+const LIGHT_SIZE_RANGE: (f32, f32) = (0.01, 8.0);
+/// The `source_radius` of a sphere or capsule that names none, metres.
+const DEFAULT_LIGHT_SOURCE_RADIUS: f32 = 0.1;
 const LIGHT_FADE_RANGE: (f32, f32) = (0.0, 10.0);
 const DECAL_RADIUS_RANGE: (f32, f32) = (0.1, 50.0);
 const DECAL_WIDTH_RANGE: (f32, f32) = (0.05, 20.0);
@@ -520,6 +526,41 @@ pub struct VfxLight {
     pub team_tint: f32,
     /// Scale `radius` by the event's radius (zones, areas).
     pub scale_with_radius: bool,
+    /// The emitting shape (N2d, ADR-0023 §4c; default `point`).
+    pub shape: VfxLightShape,
+}
+
+/// The shape of an effect's light (`[light] shape`, ADR-0023 §4c). Shaped lights keep the
+/// point light's total power; the renderer lights them with LTC from Medium, at their
+/// representative point on Low and as points on Compat. The axis is the effect's travel
+/// direction (a projectile's flight, else source to target, on the ground).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub enum VfxLightShape {
+    /// A point (`shape = "point"`, the default).
+    #[default]
+    Point,
+    /// A sphere of `source_radius` (`0.01..=2` m, default 0.1).
+    Sphere {
+        /// Source radius, metres.
+        source_radius: f32,
+    },
+    /// A capsule `length` long (`0.01..=8` m) along the travel direction, of
+    /// `source_radius`.
+    Capsule {
+        /// End to end, metres.
+        length: f32,
+        /// Source radius, metres.
+        source_radius: f32,
+    },
+    /// A one-sided rect facing the travel direction, `width` across it (horizontal) and
+    /// `length` tall (`0.01..=8` m each).
+    Rect {
+        /// Horizontal extent, metres.
+        width: f32,
+        /// Vertical extent, metres.
+        length: f32,
+    },
 }
 
 impl VfxLight {
@@ -789,6 +830,93 @@ struct RawLight {
     team_tint: Option<f32>,
     #[serde(default)]
     scale_with_radius: bool,
+    #[serde(default)]
+    shape: Option<String>,
+    #[serde(default)]
+    source_radius: Option<f32>,
+    #[serde(default)]
+    length: Option<f32>,
+    #[serde(default)]
+    width: Option<f32>,
+}
+
+/// `[light] shape` and its sizes: each key only with the shapes that use it.
+fn light_shape(raw: &RawLight) -> Result<VfxLightShape, VfxError> {
+    #[derive(Clone, Copy, Default)]
+    enum Kind {
+        #[default]
+        Point,
+        Sphere,
+        Capsule,
+        Rect,
+    }
+    let kind = keyword(
+        raw.shape.as_deref(),
+        &[
+            ("point", Kind::Point),
+            ("sphere", Kind::Sphere),
+            ("capsule", Kind::Capsule),
+            ("rect", Kind::Rect),
+        ],
+        "light shape must be point, sphere, capsule or rect",
+    )?;
+    let source_radius = || {
+        check(
+            raw.source_radius.unwrap_or(DEFAULT_LIGHT_SOURCE_RADIUS),
+            LIGHT_SOURCE_RADIUS_RANGE,
+            "light source_radius must be 0.01..=2 metres",
+        )
+    };
+    let size = |value: Option<f32>, what: &'static str| {
+        value
+            .ok_or(VfxError::Invalid(what))
+            .and_then(|value| check(value, LIGHT_SIZE_RANGE, what))
+    };
+    let unused = |present: bool, what: &'static str| {
+        if present {
+            Err(VfxError::Invalid(what))
+        } else {
+            Ok(())
+        }
+    };
+    match kind {
+        Kind::Point => {
+            unused(
+                raw.source_radius.is_some() || raw.length.is_some() || raw.width.is_some(),
+                "light source_radius, length and width need a shape",
+            )?;
+            Ok(VfxLightShape::Point)
+        }
+        Kind::Sphere => {
+            unused(
+                raw.length.is_some() || raw.width.is_some(),
+                "a sphere light has no length or width",
+            )?;
+            Ok(VfxLightShape::Sphere {
+                source_radius: source_radius()?,
+            })
+        }
+        Kind::Capsule => {
+            unused(raw.width.is_some(), "a capsule light has no width")?;
+            Ok(VfxLightShape::Capsule {
+                length: size(
+                    raw.length,
+                    "a capsule light needs a length of 0.01..=8 metres",
+                )?,
+                source_radius: source_radius()?,
+            })
+        }
+        Kind::Rect => {
+            unused(
+                raw.source_radius.is_some(),
+                "a rect light has no source_radius",
+            )?;
+            Ok(VfxLightShape::Rect {
+                width: size(raw.width, "a rect light needs a width of 0.01..=8 metres")?,
+                length: size(raw.length, "a rect light needs a length of 0.01..=8 metres")?,
+            })
+        }
+    }
 }
 
 fn light(raw: &RawLight) -> Result<VfxLight, VfxError> {
@@ -848,6 +976,7 @@ fn light(raw: &RawLight) -> Result<VfxLight, VfxError> {
             "light team_tint must be 0..=1",
         )?,
         scale_with_radius: raw.scale_with_radius,
+        shape: light_shape(raw)?,
     })
 }
 
@@ -2085,6 +2214,52 @@ scale_with_radius = true
                 VfxEffect::parse(&format!("{base}{bad}")).is_err(),
                 "accepted {bad}"
             );
+        }
+    }
+
+    #[test]
+    fn parses_light_shapes_and_rejects_their_misuse() {
+        let base = "duration = 1\n[[emitters]]\nburst = 1\nlifetime = [0.2, 0.2]\n\
+                    size = [1, 1]\ncolor = [1, 1, 1, 1]\n[light]\ncolor = [1, 1, 1]\nradius = 4\n";
+        let shape = |extra: &str| {
+            VfxEffect::parse(&format!("{base}{extra}"))
+                .map(|effect| effect.light.expect("light").shape)
+        };
+        assert_eq!(shape("").expect("point"), VfxLightShape::Point);
+        assert_eq!(
+            shape("shape = \"sphere\"").expect("sphere"),
+            VfxLightShape::Sphere {
+                source_radius: DEFAULT_LIGHT_SOURCE_RADIUS
+            }
+        );
+        assert_eq!(
+            shape("shape = \"Capsule\"\nlength = 1.5\nsource_radius = 0.05").expect("capsule"),
+            VfxLightShape::Capsule {
+                length: 1.5,
+                source_radius: 0.05
+            }
+        );
+        assert_eq!(
+            shape("shape = \"rect\"\nwidth = 2\nlength = 1").expect("rect"),
+            VfxLightShape::Rect {
+                width: 2.0,
+                length: 1.0
+            }
+        );
+        for bad in [
+            "shape = \"cone\"",
+            "source_radius = 0.2",
+            "shape = \"sphere\"\nsource_radius = 3",
+            "shape = \"sphere\"\nsource_radius = 0",
+            "shape = \"sphere\"\nlength = 1",
+            "shape = \"capsule\"",
+            "shape = \"capsule\"\nlength = 9",
+            "shape = \"capsule\"\nlength = 1\nwidth = 1",
+            "shape = \"rect\"\nwidth = 1",
+            "shape = \"rect\"\nwidth = 1\nlength = nan",
+            "shape = \"rect\"\nwidth = 1\nlength = 1\nsource_radius = 0.1",
+        ] {
+            assert!(shape(bad).is_err(), "accepted {bad}");
         }
     }
 

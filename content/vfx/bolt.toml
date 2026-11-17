@@ -27,3 +27,8 @@ color = [1.0, 1.0, 1.0]
 intensity = 3.0
 radius = 4.0
 offset = [0, 0, 0]
+# N2d (ADR-0023 §4): a streak along the flight, a capsule light (LTC from Medium, its
+# representative point on Low, a point on Compat), with the point light's total power.
+shape = "capsule"
+length = 0.8
+source_radius = 0.06

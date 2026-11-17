@@ -1,7 +1,7 @@
 //! Device-free entry points for the renderer's benchmarks (`benches/`). Not public API:
 //! hidden from the docs and free to change.
 
-use crate::lights::{self, CELL_WORDS, CellCounts, GRID, LIGHT_VEC4S, LightStats, PointLight};
+use crate::lights::{self, CELL_WORDS, CellCounts, GRID, LIGHT_LIST_VEC4S, Light, LightStats};
 use moba_core::math::Mat4;
 
 /// The CPU half of [`Renderer`](crate::Renderer)'s light upload (footprint and binning)
@@ -20,7 +20,7 @@ impl LightBinning {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            list: vec![[0.0; 4]; crate::MAX_LIGHTS * LIGHT_VEC4S],
+            list: vec![[0.0; 4]; LIGHT_LIST_VEC4S],
             grid: vec![0; GRID * GRID * CELL_WORDS],
             counts: [0; GRID * GRID],
         }
@@ -29,7 +29,7 @@ impl LightBinning {
     /// Fits the grid to `view_proj` and bins `lights` with `max_lights` and `per_cell` caps.
     pub fn bin(
         &mut self,
-        lights: &[PointLight],
+        lights: &[Light],
         view_proj: Mat4,
         max_lights: usize,
         per_cell: usize,
@@ -46,6 +46,16 @@ impl LightBinning {
         )
         .1
     }
+}
+
+/// The deferred lighting's area tiles for `lights` (N2d): their shaped lights' screen
+/// bounds under `view_proj`, then those bounds in 16 px tiles of a `size` target. Returns
+/// the number of tile rects.
+#[must_use]
+pub fn area_tiles(lights: &[Light], view_proj: Mat4, size: [u32; 2]) -> u32 {
+    lights::AreaRects::build(lights, view_proj)
+        .tiles(size, 16)
+        .1
 }
 
 impl Default for LightBinning {

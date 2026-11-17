@@ -20,6 +20,14 @@
 //   real thickness sets the fade.
 
 #include "camera.glsl"
+// Shaped lights at their representative point, LTC or not (lighting.glsl, N2d).
+#define MOBA_AREA_LTC 0
+#ifdef MOBA_TIERED_SHADING
+// N2d (ADR-0023 amendment 4): `false` on the frames without a shaped light, whose pipeline
+// then compiles the shaped-light code out (it costs the water its registers every frame).
+layout(constant_id = 0) const bool WATER_SHAPED_LIGHTS = true;
+#define MOBA_AREA_MODE (WATER_SHAPED_LIGHTS ? uint(camera.occlusion.z) : 0u)
+#endif
 #include "lighting.glsl"
 #include "atmosphere.glsl"
 #include "decals.glsl"

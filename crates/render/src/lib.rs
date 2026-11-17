@@ -35,6 +35,7 @@ mod graph;
 mod instance;
 mod lighting;
 mod lights;
+mod ltc;
 mod material;
 mod memory;
 mod mesh;
@@ -82,10 +83,11 @@ pub use instance::{
     ProbedDevice, ValidationMode, VulkanProbe, choose_device, probe_devices, probe_vulkan,
 };
 pub use lighting::{
-    BakedAo, LightingConfig, MAX_CONTACT_SHADOW_STEPS, MAX_SHADOW_RESOLUTION,
+    AreaLights, BakedAo, LightingConfig, MAX_CONTACT_SHADOW_STEPS, MAX_SHADOW_RESOLUTION,
     MIN_SHADOW_RESOLUTION, OutlineMode, SceneLighting, ShadowFilter,
 };
-pub use lights::{LightStats, MAX_LIGHTS, MAX_LIGHTS_PER_CELL, PointLight};
+#[allow(deprecated)] // `PointLight` stays exported for one release (ADR-0023 §4c).
+pub use lights::{Light, LightShape, LightStats, MAX_LIGHTS, MAX_LIGHTS_PER_CELL, PointLight};
 pub use material::{
     MAX_MATERIALS, MAX_TEXTURES, MaterialData, MaterialId, MaterialStats, TextureId,
 };

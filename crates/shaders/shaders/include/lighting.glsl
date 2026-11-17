@@ -108,10 +108,12 @@ vec3 multiscatter_compensation(vec3 f0, vec2 brdf) {
 // puts its texel centres on the end points, texel i at i / (size − 1) on both axes, so one
 // bilinear fetch covers 0..=1 without clamping the roughest lobes' row (ADR-0023 amendment 3;
 // the white furnace test in `lighting.rs` models this fetch). `MOBA_BRDF_LUT_SIZE` is
-// `BRDF_LUT_SIZE`.
+// `BRDF_LUT_SIZE`. Since N2d the LUT is the corner of an atlas that also holds the LTC table
+// (`lut_atlas` in ltc.rs, `ltc.glsl`): `MOBA_LUT_ATLAS` is its size in texels.
 #define MOBA_BRDF_LUT_SIZE 32.0
+#define MOBA_LUT_ATLAS vec2(160.0, 64.0)
 vec2 brdf_lut_sample(float n_dot_v, float roughness) {
-    vec2 uv = (vec2(n_dot_v, roughness) * (MOBA_BRDF_LUT_SIZE - 1.0) + 0.5) / MOBA_BRDF_LUT_SIZE;
+    vec2 uv = (vec2(n_dot_v, roughness) * (MOBA_BRDF_LUT_SIZE - 1.0) + 0.5) / MOBA_LUT_ATLAS;
     return textureLod(brdf_lut, uv, 0.0).rg;
 }
 #endif
@@ -299,6 +301,176 @@ float moba_luminance(vec3 color) {
 #include "shading_models.glsl"
 #endif
 
+#ifdef MOBA_TIERED_SHADING
+#include "ltc.glsl"
+
+// N2d (ADR-0023 §4): how shaped lights are lit, `LightingConfig::area_lights`: 0 as points at
+// their centres (`MOBA_AREA_LIGHTS=off`), 1 at the representative point (Low), 2 with LTC
+// (Medium and up). The forward stages read the camera's `occlusion.z`; the deferred lighting
+// defines it as its specialisation constant, set from the same value.
+#ifndef MOBA_AREA_MODE
+#define MOBA_AREA_MODE uint(camera.occlusion.z)
+#endif
+// Whether this stage has the LTC evaluation at all: the water defines it 0 and lights shaped
+// lights at their representative point in mode 2 too (with LTC its registers cost the water
+// pass 0.006 ms; ADR-0023 amendment 4 item 11), and on frames without a shaped light draws
+// with a pipeline whose shaped-light code is compiled out (`WATER_SHAPED_LIGHTS`).
+#ifndef MOBA_AREA_LTC
+#define MOBA_AREA_LTC 1
+#endif
+// Where the shapes start in the light list, in `vec4`s (`SHAPE_BASE` in lights.rs).
+#define MOBA_LIGHT_SHAPE_BASE 512u
+
+// A rect's half-extent directions from its shape `vec4` (`LightShape::words`): `xyz` the
+// normal times the half-width, `w` the half-height; the width runs along the horizontal
+// normalize(Y x normal) (+X when the normal is vertical).
+void moba_rect_axes(vec4 shape, out vec3 normal, out vec3 ex, out vec3 ey) {
+    float half_width = length(shape.xyz);
+    normal = shape.xyz / max(half_width, 1e-6);
+    vec3 across = cross(vec3(0.0, 1.0, 0.0), normal);
+    float across2 = dot(across, across);
+    vec3 width = across2 > 1e-8 ? across * inversesqrt(across2) : vec3(1.0, 0.0, 0.0);
+    ex = width * half_width;
+    ey = cross(normal, width) * shape.w;
+}
+
+// The representative point (Karis 2013): the point of the shape (`tag`, `shape`, centred at
+// `to_light` from the shaded point) closest to the reflection ray `r`. Low lights every shape
+// at it, and extended models' lobes too.
+vec3 moba_representative_point(float tag, vec4 shape, vec3 to_light, vec3 r) {
+    vec3 centre = to_light;
+    float radius = shape.w;
+    if (tag > 2.5) {
+        vec3 normal;
+        vec3 ex;
+        vec3 ey;
+        moba_rect_axes(shape, normal, ex, ey);
+        float facing = dot(r, normal);
+        float t = facing < 0.0 ? dot(to_light, normal) / facing : -1.0;
+        vec3 local = (t > 0.0 ? r * t : to_light) - to_light;
+        float half_width = length(ex);
+        float half_height = length(ey);
+        vec3 x = ex / max(half_width, 1e-6);
+        vec3 y = ey / max(half_height, 1e-6);
+        return to_light + x * clamp(dot(local, x), -half_width, half_width)
+            + y * clamp(dot(local, y), -half_height, half_height);
+    }
+    if (tag > 1.5) {
+        // The segment's point closest to the ray, then the sphere around it.
+        vec3 p0 = to_light - shape.xyz;
+        vec3 segment = 2.0 * shape.xyz;
+        float r_dot_segment = dot(r, segment);
+        float denominator = dot(segment, segment) - r_dot_segment * r_dot_segment;
+        float t = denominator > 1e-8
+            ? clamp((dot(r, p0) * r_dot_segment - dot(p0, segment)) / denominator, 0.0, 1.0)
+            : 0.5;
+        centre = p0 + segment * t;
+    }
+    vec3 centre_to_ray = dot(centre, r) * r - centre;
+    float reach = length(centre_to_ray);
+    return centre + centre_to_ray * clamp(radius / max(reach, 1e-6), 0.0, 1.0);
+}
+
+// The largest half-extent of a shape (`LightShape::extent`): a sphere's radius, a capsule's
+// half-length plus radius, a rect's half-diagonal.
+float moba_shape_extent(float tag, vec4 shape) {
+    return tag > 2.5 ? length(vec2(length(shape.xyz), shape.w))
+         : tag > 1.5 ? length(shape.xyz) + shape.w
+                     : shape.w;
+}
+
+// The span cut-off (ADR-0023 amendment 4 item 15): under LTC a shape whose
+// extent spans less than MOBA_LTC_SPAN_LOW of its centre's distance is lit as the point light
+// at its centre (a one-sided rect at its representative point), from MOBA_LTC_SPAN_HIGH with
+// LTC alone, and between by a smoothstep blend of the two. A vanishing shape is then the
+// engine's point light (gate 3), and LTC runs only where a shape subtends enough angle to
+// show its form.
+#define MOBA_LTC_SPAN_LOW 0.08
+#define MOBA_LTC_SPAN_HIGH 0.12
+
+// The representative point's specular normalisation (Karis 2013's form, §4a: the same total
+// power, a smaller highlight): alpha / alpha' per axis of the shape, alpha' = clamp(alpha +
+// MOBA_AREA_WIDEN x half-extent / distance, 0, 1); a sphere's two axes its radius, a
+// capsule's its radius and its half-length plus radius, a rect's its half-extents. The
+// constant is ours, measured against Monte Carlo (amendment 4 item 8).
+#define MOBA_AREA_WIDEN 0.5
+float moba_area_widen(float alpha, float half_extent, float distance) {
+    return alpha / clamp(alpha + MOBA_AREA_WIDEN * half_extent / max(distance, 1e-4),
+                         max(alpha, 1e-6), 1.0);
+}
+float moba_area_normalisation(float tag, vec4 shape, float distance, float alpha) {
+    float across = moba_area_widen(alpha, shape.w, distance);
+    return tag > 2.5 ? across * moba_area_widen(alpha, length(shape.xyz), distance)
+         : tag > 1.5 ? across * moba_area_widen(alpha, length(shape.xyz) + shape.w, distance)
+                     : across * across;
+}
+
+// One shaped light by LTC: `(diffuse form factor, specular lobe integral)` and, in
+// `radiance_scale`, the radiance per unit of colour that gives the shape the point light's
+// total power: sphere 1 / R², capsule 1 / (R² + R h), one-sided rect pi / (w h) for the
+// half-length h and half-extents w, h. A sphere is its own vector form factor (the diffuse)
+// and the disk spanning its cone (the lobe); a capsule and a rect are one quad (`ltc.glsl`).
+// Everything is evaluated in the shading frame (t1 toward v, t2, n), with the pixel's lobe
+// `m`, both computed once per pixel by the caller.
+vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 t1, vec3 t2, vec3 n,
+                         vec4 m, out float radiance_scale) {
+    float radius = shape.w;
+    float distance = length(to_light);
+    vec3 centre = vec3(dot(to_light, t1), dot(to_light, t2), dot(to_light, n));
+    if (tag < 1.5) {
+        radiance_scale = 1.0 / max(radius * radius, 1e-6);
+        float grow = ltc_grow(distance, radius);
+        return vec2(ltc_sphere_form(centre, radius * grow), ltc_sphere(m, centre, radius * grow))
+            / (grow * grow);
+    }
+    vec3 q[4];
+    float grow;
+    if (tag > 2.5) {
+        vec3 normal;
+        vec3 ex;
+        vec3 ey;
+        moba_rect_axes(shape, normal, ex, ey);
+        radiance_scale = MOBA_PI / max(length(ex) * length(ey), 1e-6);
+        if (dot(to_light, normal) >= 0.0) {
+            return vec2(0.0); // Behind the emitting side.
+        }
+        grow = ltc_grow(distance, max(length(ex), length(ey)));
+        ex *= grow;
+        ey *= grow;
+        q[0] = to_light - ex - ey;
+        q[1] = to_light - ex + ey;
+        q[2] = to_light + ex + ey;
+        q[3] = to_light + ex - ey;
+    } else {
+        float half_length = length(shape.xyz);
+        radiance_scale = 1.0 / max(radius * radius + radius * half_length, 1e-6);
+        // Inside the capsule: the whole hemisphere, as the sphere (its facing quad would be
+        // behind the point; amendment 4 item 3).
+        vec3 start = to_light - shape.xyz;
+        float along = clamp(dot(-start, shape.xyz) / max(2.0 * half_length * half_length, 1e-12),
+                            0.0, 1.0);
+        vec3 nearest = start + 2.0 * shape.xyz * along;
+        if (dot(nearest, nearest) <= radius * radius) {
+            return vec2(1.0);
+        }
+        grow = ltc_grow(distance, radius + half_length);
+        vec3 half_axis = shape.xyz * grow;
+        radius *= grow;
+        ltc_facing_quad(to_light - half_axis, to_light + half_axis, radius,
+                        0.25 * MOBA_PI * radius, q);
+    }
+    for (int k = 0; k < 4; k++) {
+        q[k] = vec3(dot(q[k], t1), dot(q[k], t2), dot(q[k], n));
+    }
+    // The clamped cosine (the diffuse), then the lobe, over the same corners.
+    vec2 integral;
+    for (int k = 0; k < 2; k++) {
+        integral[k] = ltc_quad(k == 0 ? vec4(1.0, 0.0, 0.0, 1.0) : m, q);
+    }
+    return integral / (grow * grow);
+}
+#endif
+
 // Clustered dynamic point lights (ADR-0016): the lights binned into this fragment's grid
 // column, each with a windowed inverse-square falloff, wrap-lit diffuse and GGX specular,
 // unshadowed. Lights only add light, so team colour in albedo survives (ADR-0011 rule 1).
@@ -315,8 +487,46 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
     uint count = min(light_grid.cells[base], stride - 1u);
     vec3 sum = vec3(0.0);
     float irradiance = 0.0;
+#ifdef MOBA_TIERED_SHADING
+#if MOBA_AREA_LTC
+    // The LTC lobe and shading frame, fetched on the pixel's first LTC light (hoisted out
+    // of the per-light work).
+    bool ltc_ready = false;
+    vec4 ltc_m = vec4(1.0, 0.0, 0.0, 1.0);
+    vec2 ltc_magnitude_fresnel = vec2(0.0);
+    vec3 ltc_t1 = vec3(1.0, 0.0, 0.0);
+#endif
+#endif
+#ifdef MOBA_SCALAR_LIGHT_LOOP
+    // The deferred lighting's scalarised loop where `MOBA_SCALAR_LIGHT_LOOP` (a specialisation
+    // constant) holds (N2d, ADR-0023 amendment 4 item 14): each pass takes the subgroup's
+    // lowest pending light, so the light's loads are uniform, and the pixels holding it light
+    // it. Each pixel still lights its own cell's lights in its list's order, so the sum is the
+    // same.
+    uint i = 0u;
+    for (;;) {
+        uint index;
+        if (MOBA_SCALAR_LIGHT_LOOP) {
+            uint candidate = i < count ? light_grid.cells[base + 1u + i] : 0xFFFFFFFFu;
+            index = subgroupMin(candidate);
+            if (index == 0xFFFFFFFFu) {
+                break;
+            }
+            if (candidate != index) {
+                continue;
+            }
+        } else {
+            if (i >= count) {
+                break;
+            }
+            index = light_grid.cells[base + 1u + i];
+        }
+        i++;
+        index = min(index, total - 1u);
+#else
     for (uint i = 0u; i < count; i++) {
         uint index = min(light_grid.cells[base + 1u + i], total - 1u);
+#endif
         vec4 position_radius = light_list.lights[index * 2u];
         vec3 color = light_list.lights[index * 2u + 1u].rgb;
         vec3 to_light = position_radius.xyz - surface.world_pos;
@@ -329,6 +539,85 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
         float window = clamp(1.0 - ratio * ratio, 0.0, 1.0);
         float attenuation = window * window / max(d2, MOBA_LIGHT_NEAR_FIELD);
         vec3 l = to_light * inversesqrt(max(d2, 1e-8));
+#ifdef MOBA_TIERED_SHADING
+        // N2d: a shaped light (ADR-0023 §4a), LTC from Medium where it spans enough (the
+        // span cut-off), else at its representative point; Compat and `MOBA_AREA_MODE` 0
+        // light it as the point at its centre.
+        float specular_scale = 1.0;
+        float shape_tag = light_list.lights[index * 2u + 1u].w;
+        if (shape_tag > 0.5 && MOBA_AREA_MODE != 0u) {
+            vec4 shape = light_list.lights[MOBA_LIGHT_SHAPE_BASE + index];
+            float distance = sqrt(max(d2, 1e-8));
+#if MOBA_AREA_LTC
+#ifdef MOBA_SHADING_MODELS
+            // The extended models' own lobes (coat, sheen, anisotropy, film) are lit at the
+            // representative point, as §4d does for sheen.
+            bool ltc = MOBA_AREA_MODE == 2u
+                && (surface.model < MOBA_MODEL_CLEARCOAT || surface.model > MOBA_MODEL_THIN_FILM);
+#else
+            bool ltc = MOBA_AREA_MODE == 2u;
+#endif
+            float blend = ltc ? smoothstep(MOBA_LTC_SPAN_LOW, MOBA_LTC_SPAN_HIGH,
+                                           moba_shape_extent(shape_tag, shape) / distance)
+                              : 0.0;
+            if (blend > 0.0) {
+                if (!ltc_ready) {
+                    // The pixel's shading frame and lobe, once, on its first LTC light.
+                    ltc_t1 = v - n * dot(v, n);
+                    float t1_length2 = dot(ltc_t1, ltc_t1);
+                    vec3 helper = abs(n.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+                    ltc_t1 = t1_length2 > 1e-8 ? ltc_t1 * inversesqrt(t1_length2)
+                                               : normalize(cross(n, helper));
+                    vec2 coord = vec2(sqrt(alpha), sqrt(1.0 - clamp(n_dot_v, 0.0, 1.0)));
+                    ltc_m = ltc_fetch(0.0, coord);
+                    ltc_magnitude_fresnel = ltc_fetch(1.0, coord).xy;
+                    ltc_ready = true;
+                }
+                float radiance_scale;
+                vec2 integral = moba_area_integrals(shape_tag, shape, to_light, ltc_t1,
+                                                    cross(n, ltc_t1), n, ltc_m, radiance_scale);
+                // ADR-0016's 1 m near-field floor at the centre's distance, as the point
+                // light's attenuation has it.
+                vec3 radiance = color * (radiance_scale * window * window * blend * d2
+                                         / max(d2, MOBA_LIGHT_NEAR_FIELD));
+                // The diffuse's Fresnel at the half vector toward the centre (the point
+                // light's, exactly, as the shape shrinks); no wrap (ADR-0023 amendment 4).
+                vec3 half_centre = v + l;
+                float half_centre2 = dot(half_centre, half_centre);
+                vec3 h_centre = half_centre2 > 1e-12 ? half_centre * inversesqrt(half_centre2) : n;
+                vec3 kd_area = (vec3(1.0) - fresnel_schlick(f0, max(dot(v, h_centre), 0.0)))
+                    * (1.0 - surface.metallic);
+                vec3 specular_area = integral.y
+                    * (f0 * ltc_magnitude_fresnel.x + (vec3(1.0) - f0) * ltc_magnitude_fresnel.y)
+                    * surface.specular.rgb * surface.specular.w * moba_energy_compensation;
+                sum += (kd_area * surface.albedo * integral.x + specular_area) * radiance;
+                irradiance += moba_luminance(radiance) * integral.x;
+                if (blend >= 1.0) {
+                    continue;
+                }
+                attenuation *= 1.0 - blend;
+            }
+            // Below the cut-off a sphere or capsule with LTC is the engine's point light at
+            // its centre, which is nearer the true shape there than the representative
+            // point (amendment 4 item 15); a rect keeps its representative point, being
+            // one-sided.
+            if (!ltc || shape_tag > 2.5) {
+#endif
+                vec3 point = moba_representative_point(shape_tag, shape, to_light,
+                                                       reflect(-v, n));
+                l = point * inversesqrt(max(dot(point, point), 1e-8));
+                if (shape_tag > 2.5) {
+                    // A one-sided rect's intensity, 4 cos θ times the point's for the same
+                    // power, toward its front only.
+                    vec3 rect_normal = shape.xyz / max(length(shape.xyz), 1e-6);
+                    attenuation *= 4.0 * max(-dot(to_light / distance, rect_normal), 0.0);
+                }
+                specular_scale = moba_area_normalisation(shape_tag, shape, distance, alpha);
+#if MOBA_AREA_LTC
+            }
+#endif
+        }
+#endif
         float n_dot_l_raw = dot(n, l);
         float n_dot_l = max(n_dot_l_raw, 0.0);
         float wrapped = clamp((n_dot_l_raw + surface.wrap) / (1.0 + surface.wrap), 0.0, 1.0);
@@ -342,7 +631,7 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
         vec3 specular = MOBA_PI * d * vis * fresnel * n_dot_l
             * surface.specular.rgb * surface.specular.w;
 #ifdef MOBA_TIERED_SHADING
-        specular *= moba_energy_compensation;
+        specular *= moba_energy_compensation * specular_scale;
 #endif
 #ifdef MOBA_SHADING_MODELS
         sum += model_direct(surface, n, v, l, h, n_dot_v, n_dot_l, alpha, f0,

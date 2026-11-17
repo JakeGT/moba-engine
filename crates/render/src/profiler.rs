@@ -282,6 +282,11 @@ impl GpuProfiler {
         }
     }
 
+    /// The sequence number the next [`Self::submitted`] gives.
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
     /// The most recent completed timings.
     pub(crate) fn latest(&self) -> Option<GpuTimings> {
         self.latest
