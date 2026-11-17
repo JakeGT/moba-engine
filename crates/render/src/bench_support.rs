@@ -48,6 +48,16 @@ impl LightBinning {
     }
 }
 
+/// The deferred lighting's area tiles for `lights` (N2d): their shaped lights' screen
+/// bounds under `view_proj`, then those bounds in 16 px tiles of a `size` target. Returns
+/// the number of tile rects.
+#[must_use]
+pub fn area_tiles(lights: &[Light], view_proj: Mat4, size: [u32; 2]) -> u32 {
+    lights::AreaRects::build(lights, view_proj)
+        .tiles(size, 16)
+        .1
+}
+
 impl Default for LightBinning {
     fn default() -> Self {
         Self::new()

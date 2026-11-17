@@ -558,16 +558,25 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
                 }
                 attenuation *= 1.0 - blend;
             }
+            // Below the cut-off a sphere or capsule with LTC is the engine's point light at
+            // its centre, which is nearer the true shape there than the representative
+            // point (amendment 4 item 15); a rect keeps its representative point, being
+            // one-sided.
+            if (!ltc || shape_tag > 2.5) {
 #endif
-            vec3 point = moba_representative_point(shape_tag, shape, to_light, reflect(-v, n));
-            l = point * inversesqrt(max(dot(point, point), 1e-8));
-            if (shape_tag > 2.5) {
-                // A one-sided rect's intensity, 4 cos θ times the point's for the same
-                // power, toward its front only.
-                vec3 rect_normal = shape.xyz / max(length(shape.xyz), 1e-6);
-                attenuation *= 4.0 * max(-dot(to_light / distance, rect_normal), 0.0);
+                vec3 point = moba_representative_point(shape_tag, shape, to_light,
+                                                       reflect(-v, n));
+                l = point * inversesqrt(max(dot(point, point), 1e-8));
+                if (shape_tag > 2.5) {
+                    // A one-sided rect's intensity, 4 cos θ times the point's for the same
+                    // power, toward its front only.
+                    vec3 rect_normal = shape.xyz / max(length(shape.xyz), 1e-6);
+                    attenuation *= 4.0 * max(-dot(to_light / distance, rect_normal), 0.0);
+                }
+                specular_scale = moba_area_normalisation(shape_tag, shape, distance, alpha);
+#if MOBA_AREA_LTC
             }
-            specular_scale = moba_area_normalisation(shape_tag, shape, distance, alpha);
+#endif
         }
 #endif
         float n_dot_l_raw = dot(n, l);

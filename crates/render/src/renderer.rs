@@ -2962,6 +2962,9 @@ impl Renderer {
         } else {
             crate::lights::AreaRects::build(scene.lights, raster_view_proj)
         };
+        // ... and the water draws its shaped-light code only on the frames that bin one.
+        self.scene
+            .set_shaped_lights(area > 0 && self.lighting_config.area_lights.shader_mode() != 0);
         // ADR-0023 §1c: what the GPU reconstructs from depth is in the depth convention.
         let depth = self.frame_spec.depth;
         let (near, far) = (scene.camera.near, scene.camera.far);

@@ -301,14 +301,17 @@ pub(crate) fn light(mode: u32, surface: &Surface, n: Vec3, v: Vec3, light: &Ligh
             }
             attenuation *= 1.0 - blend;
         }
-        let r = (2.0 * n * n.dot(v) - v).normalize();
-        let point = representative_point(light.tag, light.shape, light.to_light, r);
-        l = point / point.length().max(1e-4);
-        if light.tag > 2.5 {
-            let (normal, _, _) = rect_axes(light.shape);
-            attenuation *= 4.0 * (-(light.to_light / distance).dot(normal)).max(0.0);
+        // Below the cut-off, LTC's sphere and capsule are the point light at the centre.
+        if mode != 2 || light.tag > 2.5 {
+            let r = (2.0 * n * n.dot(v) - v).normalize();
+            let point = representative_point(light.tag, light.shape, light.to_light, r);
+            l = point / point.length().max(1e-4);
+            if light.tag > 2.5 {
+                let (normal, _, _) = rect_axes(light.shape);
+                attenuation *= 4.0 * (-(light.to_light / distance).dot(normal)).max(0.0);
+            }
+            specular_scale = normalisation(light.tag, light.shape, distance, alpha);
         }
-        specular_scale = normalisation(light.tag, light.shape, distance, alpha);
     }
     sum + point_term(surface, n, v, l, attenuation, specular_scale) * light.color
 }

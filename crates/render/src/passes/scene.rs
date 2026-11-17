@@ -515,6 +515,10 @@ pub(crate) struct ScenePipelines {
     /// Full water with refraction (R3b), single-sampled after any resolve; `None` unless the
     /// full water passes run (built in the single-sample set only).
     water_full: Option<GraphicsPipeline>,
+    /// `water` and `water_full` with the shaped-light code compiled out (`WATER_SHAPED_LIGHTS`
+    /// false, N2d), for the frames without a shaped light; Tiered only.
+    water_plain: Option<GraphicsPipeline>,
+    water_full_plain: Option<GraphicsPipeline>,
     /// Water surfaces into the transparency-and-composition mask (ADR-0021 §2d); temporal
     /// only.
     tc_mask: Option<GraphicsPipeline>,
@@ -906,24 +910,71 @@ impl ScenePipelines {
             SceneBlend::Premultiplied,
         )
         .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
-        // The full water draws after any MSAA resolve: single-sampled, in the base set only.
-        let water_full = if environment.full_water && samples == vk::SampleCountFlags::TYPE_1 {
-            let fragment = module(if tiered_water {
-                "water_refraction_tiered.frag"
-            } else {
-                "water_refraction.frag"
-            })?;
+        // N2d (ADR-0023 amendment 4): the tiered water's twin without the shaped-light code
+        // (`WATER_SHAPED_LIGHTS`, constant 0, false), for the frames that bin none.
+        let plain_data = 0u32.to_ne_bytes();
+        let plain_entries = [vk::SpecializationMapEntry::default()
+            .constant_id(0)
+            .offset(0)
+            .size(core::mem::size_of::<vk::Bool32>())];
+        let plain_specialization = vk::SpecializationInfo::default()
+            .map_entries(&plain_entries)
+            .data(&plain_data);
+        let water_plain = if tiered_water {
             Some(
-                pipeline::create_blended(
+                pipeline::create_blended_specialised(
                     device,
-                    &water_spec(fragment.handle(), vk::SampleCountFlags::TYPE_1),
-                    SceneBlend::OpaqueTestOnly,
+                    &water_spec(water_fragment.handle(), samples),
+                    SceneBlend::Premultiplied,
+                    Some(&plain_specialization),
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?,
             )
         } else {
             None
         };
+        // The full water draws after any MSAA resolve: single-sampled, in the base set only.
+        let (water_full, water_full_plain) =
+            if environment.full_water && samples == vk::SampleCountFlags::TYPE_1 {
+                let fragment = module(if tiered_water {
+                    "water_refraction_tiered.frag"
+                } else {
+                    "water_refraction.frag"
+                })?;
+                let full = |specialization| {
+                    pipeline::create_blended_specialised(
+                        device,
+                        &water_spec(fragment.handle(), vk::SampleCountFlags::TYPE_1),
+                        SceneBlend::OpaqueTestOnly,
+                        specialization,
+                    )
+                    .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+                };
+                let plain = if tiered_water {
+                    Some(full(Some(&plain_specialization))?)
+                } else {
+                    None
+                };
+                (Some(full(None)?), plain)
+            } else {
+                (None, None)
+            };
+        // `RenderConfig::pipeline_stats`: the water with and without its shaped-light code
+        // (N2d, ADR-0023 amendment 4 item 14).
+        for (name, pipeline) in [
+            ("water", Some(&water)),
+            ("water_plain", water_plain.as_ref()),
+            ("water_full", water_full.as_ref()),
+            ("water_full_plain", water_full_plain.as_ref()),
+        ] {
+            let Some(pipeline) = pipeline else { continue };
+            for line in device.pipeline_statistics(pipeline.handle()) {
+                eprintln!(
+                    "[render] pipeline-stats {name} samples={} {line}",
+                    samples.as_raw()
+                );
+            }
+        }
         let (unit_shadow, skinned_shadow) = match shadow {
             Some(spec) => {
                 let unit_shadow =
@@ -1158,6 +1209,8 @@ impl ScenePipelines {
             foliage,
             water,
             water_full,
+            water_plain,
+            water_full_plain,
             tc_mask,
             overlay,
         })
@@ -1631,6 +1684,9 @@ pub(crate) struct ScenePass {
     pipelines: ScenePipelines,
     /// The main view's MSAA pipelines (and its prepass), when MSAA is on (ADR-0015).
     msaa_pipelines: Option<ScenePipelines>,
+    /// Whether this frame bins a shaped light (N2d, [`Self::set_shaped_lights`]): the water
+    /// draws without its shaped-light code when not.
+    shaped_lights: bool,
     color_format: vk::Format,
     depth_format: vk::Format,
     /// The shadow casters' spec; `None` when shadows are off.
@@ -2007,6 +2063,7 @@ impl ScenePass {
             },
             environment,
             motion,
+            shaped_lights: true,
         })
     }
 
@@ -2776,7 +2833,7 @@ impl ScenePass {
                 device,
                 command_buffer,
                 frame,
-                pipelines.water.handle(),
+                self.water_pipeline(pipelines),
                 targets.lighting,
                 false,
             );
@@ -2831,7 +2888,7 @@ impl ScenePass {
             device,
             command_buffer,
             frame,
-            pipelines.water.handle(),
+            self.water_pipeline(pipelines),
             targets.lighting,
             false,
         );
@@ -2880,6 +2937,10 @@ impl ScenePass {
             targets.extent,
         );
         self.bind_view_sets(device, command_buffer, &self.views[0], frame);
+        let pipeline = match &self.pipelines.water_full_plain {
+            Some(plain) if !self.shaped_lights => plain,
+            _ => pipeline,
+        };
         self.environment.record_water(
             device,
             command_buffer,
@@ -2889,6 +2950,21 @@ impl ScenePass {
             true,
         );
         device.cmd_end_rendering(command_buffer);
+    }
+
+    /// The simple water's pipeline in `pipelines`: without the shaped-light code on the
+    /// frames that bin no shaped light (N2d).
+    fn water_pipeline(&self, pipelines: &ScenePipelines) -> vk::Pipeline {
+        match &pipelines.water_plain {
+            Some(plain) if !self.shaped_lights => plain.handle(),
+            _ => pipelines.water.handle(),
+        }
+    }
+
+    /// Whether this frame bins a shaped light the shaders light as a shape (N2d): the water
+    /// then draws with its shaped-light code.
+    pub(crate) fn set_shaped_lights(&mut self, shaped: bool) {
+        self.shaped_lights = shaped;
     }
 
     /// Binds `state`'s camera and instance sets (0 and 1) for this frame.

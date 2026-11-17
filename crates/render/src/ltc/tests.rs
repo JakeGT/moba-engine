@@ -847,7 +847,8 @@ fn a_long_thin_capsule_is_lit_along_its_length() {
 }
 
 /// The span cut-off's error (ADR-0023 amendment 4 item 15), recorded: at `SPAN_LOW` (the
-/// representative point alone) and at `SPAN_HIGH` (LTC alone), each shape's whole term (a
+/// point light at the centre, or a rect's representative point) and at `SPAN_HIGH` (LTC
+/// alone), each shape's whole term (a
 /// dielectric, no wrap) against a Monte Carlo reference of the engine's BRDF over the true
 /// shape, and the engine's point light at the centre against the same reference. Normalised
 /// by the point light's irradiance at normal incidence; relative, floored at 0.02.
@@ -914,16 +915,17 @@ fn the_span_cut_off_is_recorded() {
 }
 
 /// `the_span_cut_off_is_recorded`'s recorded worst errors with ~15% headroom (amendment 4
-/// item 15), the representative point at `SPAN_LOW` and LTC at `SPAN_HIGH`: sphere 0.449 and
-/// 0.267, capsule 0.303 and 0.273, rect 0.307 and 0.280 (the engine's point light at the
-/// centre, for comparison: sphere 0.349 and 0.344, capsule 0.176 and 0.228, rect 0.761 and
-/// 0.786). Without the normalisation the representative point read 8.69 (sphere), 0.62
-/// (capsule) and 4.35 (rect) at `SPAN_LOW`. All are the worst over `cases()`: glossy lobes
-/// (roughness 0.15) seen at 40° with the highlight on the shape, or grazing views at 75°.
+/// item 15). At `SPAN_LOW` the sphere and capsule are the engine's point light at the centre,
+/// the rect its representative point: sphere 0.349, capsule 0.176, rect 0.307; LTC alone at
+/// `SPAN_HIGH`: sphere 0.267, capsule 0.273, rect 0.280 (the point light at the centre there:
+/// 0.344, 0.228 and 0.786). The representative point at `SPAN_LOW` (Low's path) read sphere
+/// 0.449, capsule 0.303 and rect 0.307 with its normalisation, 8.69, 0.62 and 4.35 without.
+/// All are the worst over `cases()`: glossy lobes (roughness 0.15) seen at 40° with the
+/// highlight on the shape, or grazing views at 75°.
 const CUT_OFF_TOLERANCE: [(&str, f64); 6] = [
-    ("sphere low area", 0.52),
+    ("sphere low area", 0.40),
     ("sphere high area", 0.31),
-    ("capsule low area", 0.35),
+    ("capsule low area", 0.21),
     ("capsule high area", 0.32),
     ("rect low area", 0.36),
     ("rect high area", 0.33),

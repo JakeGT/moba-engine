@@ -154,16 +154,31 @@ pub(crate) fn create_blended(
     spec: &PipelineSpec,
     blend: SceneBlend,
 ) -> RenderResult<vk::Pipeline> {
+    create_blended_specialised(device, spec, blend, None)
+}
+
+/// [`create_blended`] with the fragment stage's specialisation constants (the water's
+/// shaped-light switch, N2d).
+pub(crate) fn create_blended_specialised(
+    device: &DeviceContext,
+    spec: &PipelineSpec,
+    blend: SceneBlend,
+    fragment_specialization: Option<&vk::SpecializationInfo<'_>>,
+) -> RenderResult<vk::Pipeline> {
     let entry_point = c"main";
+    let fragment = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(spec.fragment)
+        .name(entry_point);
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(spec.vertex)
             .name(entry_point),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(spec.fragment)
-            .name(entry_point),
+        match fragment_specialization {
+            Some(specialization) => fragment.specialization_info(specialization),
+            None => fragment,
+        },
     ];
 
     let bindings = [vk::VertexInputBindingDescription::default()
