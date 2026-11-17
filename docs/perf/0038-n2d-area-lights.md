@@ -80,6 +80,14 @@ only (so it lowers `off` and widens every difference): area sheet High point +0.
 rounds): area sheet High point +0.008, LTC +0.048; Low point +0.007; combined point +0.007,
 LTC +0.044.
 
+In absolute terms the shaped-light frames barely moved across the three builds (area sheet
+High, p50: point 0.722 pre-review, 0.723 `s0`, 0.726 head; LTC 0.762, 0.761, 0.763; N2c
+draws the same sheet in 0.704); `off` fell with the scalarised loop (0.714 → 0.713 → 0.708),
+so part of the head's wider differences is a cheaper baseline, not a dearer feature. These
+are three-round probes, not the five-round campaign: within a configuration the rounds agree
+within 0.003 ms, and the sheets' differences are 3 to 11 times their limits, but the
+teamfight's Low +0.006 against 0.005 is inside that noise and is not what fails the rule.
+
 **The levers and what each recovered** (on the configurations where it acts):
 
 | Lever | What was built | Measured recovery |
