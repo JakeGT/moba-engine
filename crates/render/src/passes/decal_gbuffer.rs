@@ -159,16 +159,16 @@ impl DecalGBufferPass {
                 target.extent,
             );
             let sets = [target.camera, self.sets[frame % self.sets.len()]];
-            // SAFETY: the pipeline, its layout and both sets (allocated with the layout's set
-            // layouts) are live; the box is built from `gl_VertexIndex` and the decal records,
-            // `gl_InstanceIndex` below the buffer's 128 records (the shader clamps it to the
-            // frame's count).
+            // SAFETY: the pipeline is live and the command buffer is recording.
             unsafe {
                 device.device.cmd_bind_pipeline(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.pipeline.handle(),
                 );
+            }
+            // SAFETY: both sets were allocated with the layout's set layouts and are live.
+            unsafe {
                 device.device.cmd_bind_descriptor_sets(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -177,6 +177,11 @@ impl DecalGBufferPass {
                     &sets,
                     &[],
                 );
+            }
+            // SAFETY: the box is built from `gl_VertexIndex` and the decal records,
+            // `gl_InstanceIndex` below the buffer's 128 records (the shader clamps it to the
+            // frame's count).
+            unsafe {
                 device
                     .device
                     .cmd_draw(command_buffer, 36, target.decals.min(128), 0, 0);

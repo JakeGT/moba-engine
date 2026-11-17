@@ -1,0 +1,14 @@
+# Sample material for the material-model sheet (ADR-0023 gate 5 and 8; one sphere per
+# shading model, MOBA_MATERIAL_SHEET=samples). Textures: texture-bake material-sample
+# (scripts/bake-sample-textures.sh). docs/content-authoring.md#materials has the keys.
+# ANISOTROPIC: brushed metal, the lobe stretched along the sphere's latitude.
+shader = "textured"
+base_color = "material-sample-base"
+metallic_roughness = "material-sample-mr"
+base_color_factor = [0.95, 0.93, 0.88, 1.0]
+metallic = 1.0
+roughness = 0.35
+model = "anisotropic"
+[anisotropic]
+strength = 0.8
+rotation = 0.0

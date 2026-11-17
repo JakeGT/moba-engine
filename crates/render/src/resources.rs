@@ -444,27 +444,7 @@ impl GpuImage {
     ) -> RenderResult<Self> {
         assert!(extent.width > 0 && extent.height > 0);
         assert!(mip_levels > 0);
-        let (layers, flags, image_type, depth) = match kind {
-            Layers::Single => (1, vk::ImageCreateFlags::empty(), vk::ImageType::TYPE_2D, 1),
-            Layers::Cube => (
-                6,
-                vk::ImageCreateFlags::CUBE_COMPATIBLE,
-                vk::ImageType::TYPE_2D,
-                1,
-            ),
-            Layers::Array(layers) => (
-                layers,
-                vk::ImageCreateFlags::empty(),
-                vk::ImageType::TYPE_2D,
-                1,
-            ),
-            Layers::Volume(depth) => (
-                1,
-                vk::ImageCreateFlags::empty(),
-                vk::ImageType::TYPE_3D,
-                depth.max(1),
-            ),
-        };
+        let (layers, flags, image_type, depth) = image_shape(kind);
         let formats = [format, srgb.unwrap_or(format)];
         let mut format_list = vk::ImageFormatListCreateInfo::default().view_formats(&formats);
         let flags = if srgb.is_some() {
@@ -635,6 +615,31 @@ enum Layers {
     Array(u32),
     /// A 3D image `n` slices deep, a `3D` view (R6).
     Volume(u32),
+}
+
+/// An image's array layers, create flags, type and depth for `kind`.
+fn image_shape(kind: Layers) -> (u32, vk::ImageCreateFlags, vk::ImageType, u32) {
+    match kind {
+        Layers::Single => (1, vk::ImageCreateFlags::empty(), vk::ImageType::TYPE_2D, 1),
+        Layers::Cube => (
+            6,
+            vk::ImageCreateFlags::CUBE_COMPATIBLE,
+            vk::ImageType::TYPE_2D,
+            1,
+        ),
+        Layers::Array(layers) => (
+            layers,
+            vk::ImageCreateFlags::empty(),
+            vk::ImageType::TYPE_2D,
+            1,
+        ),
+        Layers::Volume(depth) => (
+            1,
+            vk::ImageCreateFlags::empty(),
+            vk::ImageType::TYPE_3D,
+            depth.max(1),
+        ),
+    }
 }
 
 /// A view of mip levels `0..levels` and every layer: `2D`, `CUBE`, `2D_ARRAY` or `3D` by

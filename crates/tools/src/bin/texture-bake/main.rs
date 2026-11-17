@@ -3,6 +3,7 @@
 //! ```text
 //! texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|weights|mask [--format F] [--no-mips]
 //! texture-bake generate sentinel <dir>     # the self-generated sample set, as PNG sources
+//! texture-bake generate material-sample <dir>  # the material-model samples (ADR-0023)
 //! texture-bake generate vfx <dir>          # the procedural particle atlas (ADR-0013)
 //! texture-bake generate terrain <dir>      # self-generated terrain layers, as PNG sources
 //! texture-bake info <file.ktx2>            # format, size, levels, bytes
@@ -31,8 +32,12 @@ use moba_assets::{TextureData, TextureFormat};
 
 const USAGE: &str = "usage:
   texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|weights|mask [--format F] [--no-mips]
-  texture-bake generate sentinel|terrain|vfx <dir>
+  texture-bake generate sentinel|material-sample|terrain|vfx <dir>
   texture-bake info <file.ktx2>";
+
+/// The material-model sample maps (`patterns::material_sample`), with the kind and format
+/// each is baked as by `scripts/bake-sample-textures.sh`.
+const MATERIAL_SAMPLE_MAPS: [&str; 4] = ["base", "mr", "emissive", "model"];
 
 /// Largest PNG accepted, in bytes (sources are authoring files, still bounded).
 const MAX_PNG_BYTES: u64 = 64 * 1024 * 1024;
@@ -296,6 +301,14 @@ fn generate(args: &[String]) -> Result<(), String> {
                 ));
             }
         }
+        "material-sample" => {
+            for map in MATERIAL_SAMPLE_MAPS {
+                images.push((
+                    format!("material-sample-{map}.png"),
+                    patterns::material_sample(map).expect("known map"),
+                ));
+            }
+        }
         "terrain" => {
             for layer in patterns::TERRAIN_LAYERS {
                 let maps = patterns::terrain(layer).expect("known layer");
@@ -303,7 +316,11 @@ fn generate(args: &[String]) -> Result<(), String> {
                 images.push((format!("terrain-{layer}-normal.png"), maps.normal));
             }
         }
-        _ => return Err(format!("unknown set {set} (known: sentinel, terrain, vfx)")),
+        _ => {
+            return Err(format!(
+                "unknown set {set} (known: sentinel, material-sample, terrain, vfx)"
+            ));
+        }
     }
     let dir = Path::new(dir);
     std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
@@ -694,6 +711,49 @@ mod tests {
             assert!(
                 committed.level(0) == level0.level(0),
                 "content/textures/sentinel-{map}.ktx2 is stale; run scripts/bake-sample-textures.sh"
+            );
+        }
+    }
+
+    /// The material-model samples (ADR-0023, N2c): every map is level-0 identical to the
+    /// generator's bake, as `scripts/bake-sample-textures.sh` writes it.
+    #[test]
+    fn committed_material_samples_match_the_generator() {
+        for (map, kind, format, committed) in [
+            (
+                "base",
+                Kind::Color,
+                TextureFormat::Bc7Srgb,
+                &include_bytes!("../../../../../content/textures/material-sample-base.ktx2")[..],
+            ),
+            (
+                "mr",
+                Kind::Weights,
+                TextureFormat::Rgba8Unorm,
+                &include_bytes!("../../../../../content/textures/material-sample-mr.ktx2")[..],
+            ),
+            (
+                "emissive",
+                Kind::Color,
+                TextureFormat::Bc7Srgb,
+                &include_bytes!("../../../../../content/textures/material-sample-emissive.ktx2")[..],
+            ),
+            (
+                "model",
+                Kind::Weights,
+                TextureFormat::Rgba8Unorm,
+                &include_bytes!("../../../../../content/textures/material-sample-model.ktx2")[..],
+            ),
+        ] {
+            let committed = moba_assets::load_ktx2(committed).expect("committed texture loads");
+            let rgba = patterns::material_sample(map).expect("map");
+            let size = patterns::SIZE;
+            let level0 = bake_texture(&rgba, size, size, kind, format, false).expect("bakes");
+            assert_eq!(committed.format(), format, "{map}");
+            assert!(
+                committed.level(0) == level0.level(0),
+                "content/textures/material-sample-{map}.ktx2 is stale; run \
+                 scripts/bake-sample-textures.sh"
             );
         }
     }

@@ -413,7 +413,8 @@ impl ClientApp {
                     + 64
                     + moba_assets::MAX_SOCKETS * 10
                     + 64
-                    + stress::MAX_STRESS_MINIONS,
+                    + stress::MAX_STRESS_MINIONS
+                    + material_sheet::MAX_SPHERES,
             ),
             models: {
                 let mut models = models::ModelLibrary::from_env();
@@ -1609,6 +1610,7 @@ impl App for ClientApp {
                         pinned,
                     );
                 }
+                models.push_sheet(units);
                 if let Some(stress) = stress.as_mut() {
                     stress.push(
                         units,
@@ -1797,6 +1799,7 @@ mod foliage;
 mod launch;
 mod local_feed;
 mod map_visuals;
+mod material_sheet;
 mod materials;
 mod minions;
 mod models;

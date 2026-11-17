@@ -17,6 +17,19 @@ made_with = "Procedural patterns (crates/tools/src/bin/texture-bake/patterns.rs,
 
 [[asset]]
 files = [
+    "material-sample-base.ktx2",
+    "material-sample-emissive.ktx2",
+    "material-sample-model.ktx2",
+    "material-sample-mr.ktx2",
+]
+title = "Material-model sample textures"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Procedural patterns (texture-bake generate material-sample) baked by texture-bake (scripts/bake-sample-textures.sh)"
+
+[[asset]]
+files = [
     "terrain-dirt-normal.ktx2",
     "terrain-dirt.ktx2",
     "terrain-grass-normal.ktx2",

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regenerates the self-generated textures shipped in content/textures/ (ADR-0010): the
-# `sentinel` material sample set and the `terrain-*` layer set (albedo + AO, normal; ADR-0014),
+# `sentinel` material sample set, the `material-sample-*` set (ADR-0023's sample materials)
+# and the `terrain-*` layer set (albedo + AO, normal; ADR-0014),
 # the particle atlas content/vfx/atlas.ktx2 (ADR-0013) and the colour-grading LUTs in
 # content/grading/ (R6).
 #
@@ -21,6 +22,16 @@ mkdir -p content/textures
 "$bake" bake "$src/sentinel-normal.png" content/textures/sentinel-normal.ktx2 --kind normal
 "$bake" bake "$src/sentinel-mr.png" content/textures/sentinel-mr.ktx2 --kind data
 "$bake" bake "$src/sentinel-mask.png" content/textures/sentinel-mask.ktx2 --kind mask
+# The material-model samples (ADR-0023, N2c): base and emissive colour, a four-channel
+# metallic-roughness with the emissive mask in B, and the model texture.
+"$bake" generate material-sample "$src"
+"$bake" bake "$src/material-sample-base.png" content/textures/material-sample-base.ktx2 --kind color
+"$bake" bake "$src/material-sample-mr.png" content/textures/material-sample-mr.ktx2 \
+  --kind weights --format rgba8
+"$bake" bake "$src/material-sample-emissive.png" content/textures/material-sample-emissive.ktx2 \
+  --kind color
+"$bake" bake "$src/material-sample-model.png" content/textures/material-sample-model.ktx2 \
+  --kind weights --format rgba8
 "$bake" generate terrain "$src"
 for layer in grass dirt rock moss pebbles; do
   "$bake" bake "$src/terrain-$layer.png" "content/textures/terrain-$layer.ktx2" --kind color

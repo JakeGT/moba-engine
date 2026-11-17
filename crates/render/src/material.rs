@@ -508,7 +508,7 @@ impl Materials {
         device: &DeviceContext,
         compressed: bool,
         anisotropy: Option<f32>,
-        mut bindless: Option<&mut BindlessTable>,
+        bindless: Option<&mut BindlessTable>,
     ) -> RenderResult<Self> {
         let bindings = set_layout_bindings();
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &bindings)?;
@@ -549,7 +549,7 @@ impl Materials {
         ];
         let mut default_handles = [0; TextureSlot::COUNT];
         let mut table = None;
-        if let Some(bindless) = bindless.as_deref_mut() {
+        if let Some(bindless) = bindless {
             for (handle, image) in default_handles.iter_mut().zip(&defaults) {
                 *handle = bindless.register_texture(image.view())?.index();
             }

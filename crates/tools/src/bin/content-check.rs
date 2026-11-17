@@ -164,6 +164,9 @@ fn main() {
     // Materials next to the unit models (`materials/<model>.toml`, ADR-0010): what a client
     // would load. One descriptor set per textured material; the pool is sized from this.
     let materials = content.assets.material_report(pack_dir);
+    // Every descriptor under `materials/`, bound to a model or not (the sample sets), against
+    // both evaluators (ADR-0023 §10, gate 8).
+    errors.extend(moba_assets::check_material_dir(pack_dir));
     // Per-tier budgets of every unit model (R8, ADR-0018 §4): over a tier is a warning (the
     // tier degrades or drops the model's optional maps); over Ultra, or a model that does
     // not load, is an error.

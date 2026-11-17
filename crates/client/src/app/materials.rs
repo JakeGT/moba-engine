@@ -98,20 +98,37 @@ impl MaterialLibrary {
         sink: &mut impl MaterialSink,
         models: impl IntoIterator<Item = ModelMeshes<'a>>,
     ) {
+        let root = self.root.clone();
+        self.bind_files(
+            sink,
+            models.into_iter().map(|model| {
+                let path = material_path(&root, model.name);
+                (model.name.to_owned(), path, model.meshes)
+            }),
+        );
+    }
+
+    /// As [`Self::bind`], with each material read from an explicit descriptor file (`None`:
+    /// no descriptor) instead of `materials/<name>.toml`: the material sheet's samples
+    /// (`material_sheet`, ADR-0023 gate 5). `name` is the log's label and the once-only key.
+    pub(crate) fn bind_files(
+        &mut self,
+        sink: &mut impl MaterialSink,
+        models: impl IntoIterator<Item = (String, Option<PathBuf>, [Option<MeshId>; 4])>,
+    ) {
         let mut pending: Vec<(String, [Option<MeshId>; 4], MaterialData)> = Vec::new();
-        for model in models {
-            if self.seen.iter().any(|seen| seen == model.name) {
+        for (name, path, meshes) in models {
+            if self.seen.contains(&name) {
                 continue;
             }
-            self.seen.push(model.name.to_owned());
-            match self.resolve(sink, model.name) {
+            self.seen.push(name.clone());
+            match self.resolve(sink, path.as_deref()) {
                 Ok(Some(material)) => {
-                    pending.push((model.name.to_owned(), model.meshes, material));
+                    pending.push((name, meshes, material));
                 }
                 Ok(None) => {}
                 Err(reason) => eprintln!(
-                    "[assets] material for model '{}': {reason}; using the vertex-colour look",
-                    model.name
+                    "[assets] material for model '{name}': {reason}; using the vertex-colour look"
                 ),
             }
         }
@@ -141,25 +158,25 @@ impl MaterialLibrary {
                 }
             }
             if applied {
-                eprintln!("[assets] model '{name}' drawn with materials/{name}.toml");
+                eprintln!("[assets] model '{name}' drawn with its material");
                 self.applied.push(name);
             }
         }
     }
 
-    /// The material for `model`: `Ok(None)` when it has no descriptor.
+    /// The material read from `path`: `Ok(None)` when there is no descriptor there.
     fn resolve(
         &mut self,
         sink: &mut impl MaterialSink,
-        model: &str,
+        path: Option<&std::path::Path>,
     ) -> Result<Option<MaterialData>, String> {
-        let Some(path) = material_path(&self.root, model) else {
+        let Some(path) = path else {
             return Ok(None);
         };
         if !path.exists() {
             return Ok(None);
         }
-        let desc = MaterialDesc::load_file(&path)
+        let desc = MaterialDesc::load_file(path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         // Resolve and check every slot first, upload afterwards: a material that fails on its
         // third texture must not leave its first two uploaded (and counted toward the

@@ -9,10 +9,12 @@ Original content
   Map visuals descriptors (ember, frost, grass) - MOBA Engine contributors - MIT OR Apache-2.0
   Baked map ambient occlusion (ember, frost) - MOBA Engine contributors - MIT OR Apache-2.0
   Sentinel sample material descriptor - MOBA Engine contributors - MIT OR Apache-2.0
+  Material-model sample descriptors (one per shading model) - MOBA Engine contributors - MIT OR Apache-2.0
   Sentinel sample hero model - MOBA Engine contributors - MIT OR Apache-2.0
   Sentinel sample hero model, rigged and animated - MOBA Engine contributors - MIT OR Apache-2.0
   Sample map meshes (crystal prop, rampart wall) - MOBA Engine contributors - MIT OR Apache-2.0
   Sentinel sample material textures - MOBA Engine contributors - MIT OR Apache-2.0
+  Material-model sample textures - MOBA Engine contributors - MIT OR Apache-2.0
   Terrain layer textures (grass, dirt, rock, moss, pebbles) - MOBA Engine contributors - MIT OR Apache-2.0
   Minion vertex-animation texture - MOBA Engine contributors - MIT OR Apache-2.0
   Particle sprite atlas - MOBA Engine contributors - MIT OR Apache-2.0

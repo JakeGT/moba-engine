@@ -1,0 +1,9 @@
+# Sample material for the material-model sheet (ADR-0023 gate 5 and 8; one sphere per
+# shading model, MOBA_MATERIAL_SHEET=samples). Textures: texture-bake material-sample
+# (scripts/bake-sample-textures.sh). docs/content-authoring.md#materials has the keys.
+# UNLIT: hard light, the emissive alone.
+shader = "textured"
+base_color = "material-sample-base"
+emissive_texture = "material-sample-emissive"
+emissive = [2.0, 1.6, 0.8]
+model = "unlit"

@@ -102,7 +102,7 @@ impl MaterialShader {
 }
 
 /// The shading model of a material (ADR-0023 §6c): a bounded set, one optional top layer at
-/// most, each named after its glTF `KHR_materials_*` / OpenPBR source.
+/// most, each named after its glTF `KHR_materials_*` / `OpenPBR` source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ShadingModel {
@@ -1207,7 +1207,7 @@ impl MaterialDesc {
                 // KHR_materials_anisotropy: alpha_t = mix(alpha, 1, strength²), alpha_b = alpha.
                 let alpha = out.roughness * out.roughness;
                 let alpha_t = alpha + (1.0 - alpha) * strength * strength;
-                out.roughness = (0.5 * (alpha + alpha_t)).sqrt();
+                out.roughness = f32::midpoint(alpha, alpha_t).sqrt();
             }
             ModelParams::ThinFilm {
                 thickness_max, ior, ..
@@ -1262,7 +1262,7 @@ impl MaterialDesc {
     ///   Tiered, an emissive texture, and a Compat emissive), since both draw nothing else;
     /// - an `emissive_texture` with a non-zero `emissive` comes with the mask or a
     ///   `[compat] emissive`: Compat ignores the texture and would glow over the whole
-    ///   surface;
+    ///   surface (an `unlit` material is all emissive, so it may);
     /// - a `model_texture` is on a model that reads it (every model but `unlit`).
     ///
     /// Bible ranges per material class are not checked here: they belong to the art bible
@@ -1289,7 +1289,7 @@ impl MaterialDesc {
         if self.shading_model() == ShadingModel::Unlit {
             if !lit(compat.emissive) {
                 return Err(MaterialError::Invalid(
-                    "an unlit material draws its emissive alone: Compat's emissive is zero,                      so it is black there",
+                    "an unlit material draws its emissive alone: Compat's emissive is zero, so it is black there",
                 ));
             }
             if self.texture(TextureSlot::Model).is_some() {
@@ -1298,7 +1298,8 @@ impl MaterialDesc {
                 ));
             }
         }
-        if self.texture(TextureSlot::Emissive).is_some()
+        if self.shading_model() != ShadingModel::Unlit
+            && self.texture(TextureSlot::Emissive).is_some()
             && lit(self.emissive)
             && self.compat.emissive.is_none()
             && !emissive_mask
@@ -1608,7 +1609,7 @@ roughness = 0.6
         // Each model's table, with its defaults.
         for model in ShadingModel::ALL {
             let parsed = MaterialDesc::parse(&format!("{base}model = \"{}\"\n", model.name()))
-                .expect(model.name());
+                .unwrap_or_else(|_| panic!("{}", model.name()));
             assert_eq!(parsed.shading_model(), *model);
             assert_eq!(parsed.model, ModelParams::defaults(*model));
             assert_eq!(ShadingModel::from_name(model.name()), Some(*model));
@@ -1709,7 +1710,7 @@ roughness = 0.6
         let coat = collapse("model = \"clearcoat\"\n[clearcoat]\nweight = 1\nroughness = 0.1");
         assert!((coat.roughness - 0.25).abs() < 1e-6, "mix(0.4, 0.1, 0.5)");
         let aniso = collapse("model = \"anisotropic\"\n[anisotropic]\nstrength = 1");
-        assert!((aniso.roughness - (0.5_f32 * (0.16 + 1.0)).sqrt()).abs() < 1e-6);
+        assert!((aniso.roughness - f32::midpoint(0.16, 1.0).sqrt()).abs() < 1e-6);
         assert!(aniso.roughness > 0.4, "anisotropy widens the mean lobe");
         let unlit = collapse("model = \"unlit\"");
         assert_eq!(unlit.base_color_factor, [0.0, 0.0, 0.0, 1.0]);
