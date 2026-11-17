@@ -266,6 +266,9 @@ struct ClientApp {
     gpu_log: Option<Vec<[f32; launch::GPU_LANES.len()]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
+    /// Per `gpu_log` sample: whether its frame binned a shaped light (N2d), for the frame
+    /// log's area-frame columns.
+    gpu_area_log: Option<Vec<bool>>,
     /// Per-frame Reflex timings `[simulation, render_submit, present, gpu, total]` in ms
     /// while logging ([`moba_render::Renderer::latency_report`]); empty without Reflex.
     latency_log: Option<Vec<[f32; 5]>>,
@@ -353,6 +356,9 @@ impl ClientApp {
             .as_ref()
             .map(|_| Vec::with_capacity(frame_log_frames));
         let latency_log = frame_log_path
+            .as_ref()
+            .map(|_| Vec::with_capacity(frame_log_frames));
+        let gpu_area_log = frame_log_path
             .as_ref()
             .map(|_| Vec::with_capacity(frame_log_frames));
         let latency = launch::latency_setting(
@@ -501,6 +507,7 @@ impl ClientApp {
             work_log,
             gpu_log,
             gpu_logged_frame: None,
+            gpu_area_log,
             latency_log,
             latency,
             paced_frames: 0,
@@ -1765,6 +1772,13 @@ impl App for ClientApp {
                     .as_ref()
                     .map_or(0.0, |renderer| renderer.light_stats().binned as f32);
                 gpu.push(launch::gpu_sample(&timings, stats, lights));
+                if let Some(area) = self.gpu_area_log.as_mut() {
+                    area.push(self.renderer.as_ref().is_some_and(|renderer| {
+                        renderer
+                            .shaped_lights_at(timings.frame)
+                            .is_some_and(|shaped| shaped > 0)
+                    }));
+                }
             }
         }
         // Reflex's timings for the frames that completed since the last call (it keeps 64):

@@ -1776,8 +1776,11 @@ item here.
    `Capsule { axis, radius }` (`axis` is half the segment) and
    `Rect { normal, half_width, half_height }`. Sizes are clamped to 1 mm..=16 m (a smaller or
    non-finite one makes the light a point, and a capsule without length its sphere), and the
-   light's radius is raised to cover the shape, so binning by the bounding sphere (§4a)
-   holds.
+   light's radius is raised to twice the shape's extent (its largest half-extent: a sphere's
+   radius, a capsule's half-length plus radius, a rect's half-diagonal), so binning by the
+   bounding sphere (§4a) holds and the window, taken at the centre's distance, is still at
+   least (1 − 1/16)² ≈ 0.88 of its curve at a long shape's tip (with the radius only at the
+   extent, the tip's window was 0; `a_long_thin_capsule_is_lit_along_its_length`).
 2. **The rect's axes:** the width runs along the horizontal `normalize(Y × normal)` (+X when
    the normal is vertical) and the height along `normal × that`. A rect is one-sided: nothing
    behind its plane is lit, and its LTC polygon is the rect itself (no horizon clipping of the
@@ -1792,7 +1795,10 @@ item here.
      shaded point: at each end, the radius either side across the view and `π R / 4` beyond
      the end along the axis, so a distant view sees `2 R × projected length + π R²`, the
      capsule's own projected area at every angle. Against the Monte Carlo reference the
-     line-and-caps form missed by far more on glossy lobes, and cost a second integral.
+     line-and-caps form missed by far more on glossy lobes, and cost a second integral. A
+     point inside the capsule (within its radius of the segment) is lit by the whole
+     hemisphere, as inside the sphere: before review the facing quad fell behind such a
+     point and the inside went dark at the surface (`a_capsule_lights_its_inside`).
    - **A square instead of the sphere's disk was tried and dropped:** it was no faster on the
      RTX 5070 Ti (the area-light sheet within 0.001 ms over 3 rounds; 119 registers with the
      disk against 118 in that build, 117 as shipped) and three times further from the
@@ -1826,32 +1832,49 @@ item here.
 8. **The representative point** (Karis 2013, §4a's Low): the shape's closest point to the
    reflection ray, used for every lobe on Low; a rect is also weighted by `4 cos θ` toward
    its front and dark behind, which keeps its power. The point light's attenuation at the
-   centre's distance is kept.
+   centre's distance is kept. **Its specular is energy-normalised** as Karis's `(α / α′)²`,
+   per axis: `α′ = clamp(α + k e / d, α, 1)` for each of the shape's two half-extents `e`
+   across the view (a sphere's radius twice; a capsule's radius and half-length plus radius;
+   a rect's half-width and half-height), the scale being the product of `α / α′` over the
+   two. Karis's `k` is 0.5; 0, 0.25, 0.5 and 1 were tried against the Monte Carlo reference
+   at the span cut-off (item 15) and 0.5 kept. Without it the representative point's worst
+   relative error at a span of 0.08 was 8.69 (sphere), 0.62 (capsule) and 4.35 (rect); with
+   it 0.449, 0.303 and 0.307 (`the_span_cut_off_is_recorded`; CPU twins in `ltc::shade`,
+   which also check that each shape has the point light's power). It costs the
+   representative point 0.003–0.004 ms on the area-light sheet (item 14).
 9. **The extended models' lobes stay at the representative point under LTC** (extends §4d
    from sheen to `CLEARCOAT`, `ANISOTROPIC` and `THIN_FILM`): the table fits GGX's
    isotropic lobe, not a coat over a base, an anisotropic lobe or a film's Fresnel, and the
    extended permutation already needs 128 registers with LTC for its standard pixels. `STANDARD`,
    `FOLIAGE` and `TRANSMISSIVE_FALLBACK` pixels get LTC in either permutation, so tile
    classes do not change how a standard pixel is lit.
-10. **A frame without a shaped light runs the mode-0 lighting pipelines.** `deferred_light`
-    and `deferred_light_extended` are built twice, at the configured `AREA_MODE`
-    (specialisation constant 1) and at 0, and each frame picks by whether its light list
-    holds a shaped light. With LTC the standard permutation needs 117 registers on the RTX
-    5070 Ti (74 without; 80 is the occupancy boundary), which cost the whole pass about
-    0.009 ms at High on the teamfight whether a shaped light was near or not. A point light
-    skips the area code in both pipelines, so the choice should move no pixel; CI's
-    unchanged hashes show the mode-0 pipelines draw N2c's frames, but no capture compares
-    the two pipelines on the same frame. The forward stages read the mode from the camera's
-    `occlusion.z`.
+10. **Only the tiles a shaped light reaches run the area-mode lighting pipelines.**
+    `deferred_light` and `deferred_light_extended` are built twice, at the configured
+    `AREA_MODE` (specialisation constant 1) and at 0. `light_classify` sorts tiles into five
+    classes: sky, standard, extended, and standard and extended "area" tiles, those inside
+    one of up to 12 screen rectangles the CPU bounds the frame's shaped lights' spheres with
+    (`AreaRects`, in the 128-byte classify push block; past 12 the last is the union of the
+    rest, and a sphere reaching behind the eye is the whole screen). The area tiles run the
+    configured pipelines, the rest the mode-0 ones, and a frame without a rectangle skips the
+    area dispatches. The tile list's header grows to 20 words (five counts). With LTC the
+    standard permutation needs 127 registers on the RTX 5070 Ti (64 at mode 0), which cost
+    the whole pass about 0.009 ms at High on the teamfight before review whether a shaped
+    light was near or not. A point light skips the area code in both pipelines, so the
+    choice moves no pixel. **The mode-0 pipelines scalarise the light loop** (review round
+    1's B7): each pass takes the subgroup's lowest pending light (`subgroupMin`, which
+    `light_classify` already requires), so the light's loads are uniform; per pixel the
+    lights and their order are unchanged, so the sum is too. It took 0.006–0.008 ms off
+    `deferred_light` on the teamfight and 74 → 64 registers; in the area-mode pipelines it
+    was 0.002 ms slower, so they keep the plain loop. The forward stages read the mode from
+    the camera's `occlusion.z`.
 11. **The water lights shapes at their representative point** (`MOBA_AREA_LTC 0` in
     `water.frag`), LTC or not: with the LTC code the water pass cost 0.006 ms more on every
-    frame (one round at 1280×720). The representative point's code still costs it 0.002–
-    0.003 ms at 1920×1080 (0.020 → 0.023 ms at High, 0.019 → 0.021 at Low), most of N2d's
-    cost on the teamfight; compiling the water at mode 0 (shapes as points at their centres)
-    is the lever left for it. The water's specular is its own mirror and ripples; the other
-    forward Tiered stages
-    (units, terrain, foliage) keep LTC, so the forward frame lights area lights as the
-    deferred one does (gate 2).
+    frame (one round at 1280×720). It is built twice, `WATER_SHAPED_LIGHTS` (specialisation
+    constant 0) on and off, and a frame that bins no shaped light draws the water without
+    any shaped-light code (64 registers against 78; the teamfight's `water` lane 0.023 →
+    0.021 ms at High against the pre-review build). The water's specular is its own mirror
+    and ripples; the other forward Tiered stages (units, terrain, foliage) keep LTC, so the
+    forward frame lights area lights as the deferred one does (gate 2).
 12. **Effects:** the `[light]` table takes `shape = "point" | "sphere" | "capsule" | "rect"`,
     `source_radius` (sphere and capsule, 0.01..=2 m, default 0.1), `length` (capsule, the
     whole segment along the effect's forward axis, 0.01..=8 m) and `width` with `length`
@@ -1863,62 +1886,111 @@ item here.
     sphere, a capsule and a rect light over open ground at the material sheet's spot, the
     scene gate 2, the `ltc` golden and gate 7's area-light rows use.
 
-14. **Gate 7 is not met with LTC at High where large shaped lights cover the screen, and
-    the levers were not tried** (departs from §9b's 1.10×; Medium reads as High, item 7). On the area-light sheet (item 13:
-    three lights each covering a few metres of ground, on every frame) LTC costs +0.046 ms
-    (far camera) and +0.049 ms (close) over the same lights as points, all in
-    `deferred_light`. Against an estimate of N1 drawing the lights as points (N1's frame of
-    the view plus the points' +0.010 ms; not a measurement) the frame is about 1.126× far
-    and 1.140× close, **over by about 0.018 and 0.026 ms** (1.143× and 1.158× N1's frame
-    without the lights, over by 0.029 and 0.037 ms). N2e and N2f have no headroom on this
-    scene at High. The cost mixes LTC's arithmetic on the pixels the shapes reach with the
-    LTC pipeline's occupancy on every pixel (117 registers against mode 0's 74; 0.009 ms of
-    `deferred_light` at 1280×720 on the teamfight, item 10); the split at 1920×1080 is not
-    measured. The representative point costs +0.007–0.008 ms at High and +0.004 ms at Low
-    (Low 1.082× N1). The teamfight, the replay the gate is defined on, meets it at every
-    preset. Untried: amendment 3's levers (the scalarised loop, the terrain without decal
-    code per frame, `light_classify` folded in), which act on the whole pass and so on the
-    occupancy share, and for the arithmetic LTC only within a light's inner radius or a
-    lower area mode at High. Until one is measured, an effect's shaped light should stay
-    small or short-lived, as the bolts are, and a map or effect that keeps large shaped
-    lights on screen should be timed against this item before it ships.
+14. **N2d's budget is not met where shaped lights fill the screen, by any area mode, after
+    the levers; the default at Medium and up is the maintainer's decision** (departs from
+    §9b's budget; review round 1). The rule: each area mode minus `MOBA_AREA_LIGHTS=off`, same
+    build and rounds, at most 0.005 ms at Low and 0.008 at High, and 0.005 on the material
+    sheet under the area-light sheet, measured on frames that carry the feature. After the
+    levers (perf/0038, "Review round 1"; RTX 5070 Ti, 1920×1080, three-round probes):
+
+    | Frames | point − off | LTC − off | Budget |
+    |---|---|---|---|
+    | Area-light sheet, High | +0.018 | +0.055 | 0.008 |
+    | Area-light sheet, Low (the point is Low's default) | +0.017 | — | 0.005 |
+    | Material sheet under the area-light sheet, High | +0.019 | +0.055 | 0.005 |
+    | Teamfight, its frames with a shaped light, High (Low) | (+0.006) | +0.012 | 0.008 (0.005) |
+
+    The levers and what each recovered: per-tile area classes (item 10), nothing on the
+    sheets, whose lights' bounds cover the screen, and with the water pair and the binning
+    change −0.002 ms p50 and −0.006 ms p95 on the teamfight at High; the lazy per-pixel LTC
+    invariants, register-neutral; the span cut-off (item 15), nothing measurable on the
+    sheets, whose capsule and rect span at least 0.21 and 0.11; the water's pair (item 11),
+    0.002 ms of the teamfight's water lane; no shape store for points, 0.12 µs of CPU per
+    frame; the scalarised loop (item 10), 0.006–0.008 ms in the mode-0 pipelines and none in
+    the area ones; the forward Tiered frame, timed in perf/0038. The representative point's
+    normalisation (item 8) costs 0.003–0.004 ms of its own. Neither LTC nor the
+    representative point fits as a default, so the fallback this review set out (the path
+    that fits by default, LTC opt-in through `MOBA_AREA_LIGHTS`) has no path to fall back to
+    but `off`, which lights every shape as a point at its centre. Until the maintainer
+    chooses (`off` by default, a larger budget for scenes full of shaped lights, or a
+    cheaper path), the presets keep item 7's mapping, and the preset matrix's "plus LTC area
+    lights" cell stays `Planned(N2)`. An effect's shaped light should stay small or
+    short-lived, as the bolts are.
+15. **A span cut-off: LTC only where a shape spans enough** (extends §4a; review round 1).
+    A shaped light's span is its extent (item 1) over its centre's distance. Under LTC a
+    pixel lights a shape with LTC alone above a span of 0.12 (`MOBA_LTC_SPAN_HIGH`), without
+    LTC below 0.08 (`MOBA_LTC_SPAN_LOW`), and with the two blended by a smoothstep between.
+    Below the cut-off a sphere or capsule is the engine's point light at its centre (GGX
+    `D·Vis·F·N·L` with Fresnel at the half vector, the wrapped diffuse, the 1 m near-field
+    floor), and a rect its representative point with item 8's normalisation (a rect is
+    one-sided, which the point at its centre is not). So a shrinking shape becomes the
+    engine's point light exactly, which gate 3 asks for, and a small or distant shape skips
+    the LTC arithmetic. The LTC radiance keeps ADR-0016's near-field floor:
+    `d² / max(d², 1 m²)` at the centre's distance, as the point light's attenuation has it
+    (`ltc_keeps_the_near_field_floor`: a sphere within 8 % of the point light from 0.3 to
+    2 m). Within 1 m the floor dims a shape that is large against its distance below the
+    point light's floored value, because the shape's own form factor already saturates: a
+    capsule of radius 0.2 m and half-length 0.5 m over a rough floor is 0.83 of the point
+    light at 0.6 m, 0.39 at 0.25 m and 0.28 at its surface (`a_capsule_lights_its_inside`).
+    It is kept as ADR-0016 has it; a large shaped light should sit at least about its extent
+    from the surfaces it lights. The error at the thresholds, worst over gate 3's cases
+    against the Monte Carlo reference of the engine's BRDF over the true shape (whole term,
+    a dielectric; `the_span_cut_off_is_recorded`, with tolerances ~15 % above):
+
+    | Shape | At 0.08 (as lit below the cut-off) | At 0.12 (LTC alone) | The point at the centre, at 0.08 and 0.12 | The representative point at 0.08 (Low) |
+    |---|---|---|---|---|
+    | Sphere | 0.349 | 0.267 | 0.349, 0.344 | 0.449 |
+    | Capsule | 0.176 | 0.273 | 0.176, 0.228 | 0.303 |
+    | Rect | 0.307 | 0.280 | 0.761, 0.786 | 0.307 |
+
+    The thresholds are a cost choice, measured in item 14; below 0.08 the point light at the
+    centre stays within 0.35 of the reference for the sphere and capsule, and it becomes
+    exact as the span falls (`a_shrinking_sphere_tends_to_the_engine_point_light`).
 
 **Gates** ([perf/0038](../perf/0038-n2d-area-lights.md)):
 
 - **2. Parity:** `deferred-parity.sh` at 1280×720 on lavapipe, with the area-light sheet
   (item 13) as a fifth scene lit with LTC on both paths: worst pixels 3 (default), 3 (sky
-  off), 3 (river), 6 (teamfight, whose bolts are capsule lights) and 3/255 (area-light
-  sheet), each within 2/255 on at least 99.999 % of pixels, alike with the decal pass forced
-  on. The forward Tiered stages light shapes as the deferred pass does (item 11's water
+  off), 3 (river), 6 (teamfight, whose bolts are capsule lights) and 2/255 (area-light
+  sheet; 3 before review round 1), each within 2/255 on at least 99.999 % of pixels, alike
+  with the decal pass forced on, on the head after review round 1. The forward Tiered stages light shapes as the deferred pass does (item 11's water
   aside). Met.
 - **3. LTC** (the Rust twin of `ltc.glsl` against a fixed-seed Monte Carlo reference over
-  each true shape, 120 cases per shape): worst relative error of the evaluation, diffuse
-  and specular against GGX: sphere 0.058, 0.0002, 0.099; capsule 0.145, 0.042, 0.056; rect
-  0.116, 0.002, 0.105, each under its recorded tolerance (sphere 0.07, 0.002, 0.12; capsule
-  0.17, 0.05, 0.07; rect 0.13, 0.003, 0.12). `RGBA16F` is kept (item 6). A shrinking sphere of
-  the same power tends to the point light (diffuse 2.4e-4, specular 6.6e-4 from R/d 0.01
-  down to 5e-6, item 4). The light-set test gives every fourth light a shape and the forward
-  and deferred loops visit the same lights. The white furnace is unchanged (0.9861). Met; a
-  rendered comparison is not measured.
+  each true shape, 120 cases per shape). Three regression metrics, each under its recorded
+  tolerance: the evaluation error (the LTC lobe's integral against Monte Carlo of the same
+  lobe, relative above 0.02 and absolute below), the diffuse error (the form factor,
+  relative above 0.001) and the specular error as a fraction of the lobe's energy (not a
+  relative error): sphere 0.058, 0.0002, 0.099; capsule 0.145, 0.042, 0.056; rect 0.116,
+  0.002, 0.105 (tolerances sphere 0.07, 0.002, 0.12; capsule 0.17, 0.05, 0.07; rect 0.13,
+  0.003, 0.12). The plain relative errors over references of at least 0.01 (evaluation,
+  diffuse, specular): sphere 0.079, 0.000, 0.537; capsule 0.145, 0.042, 0.587; rect 0.141,
+  0.002, 0.509, the specular's being the table's fit of GGX at grazing view. `RGBA16F` is
+  kept (item 6): the half table against ltc-bake's full-precision one over the same cases
+  differs by at most 1.1e-5, 6.5e-4 and 1.5e-5 absolute (diffuse, lobe × magnitude, lobe ×
+  Fresnel; relative 2.5e-4, 1.9e-3, 8.8e-4). The disk is stable where it is near-circular
+  (item 3's eigen decomposition as a guarded symmetric rotation; before review 0.80, 0.59
+  and 1.00 off at N·V 0.8 and 1). A shrinking sphere tends to the engine's point light
+  (GGX `D·Vis·F·N·L`, the wrapped diffuse, the near-field floor), exactly at and below the
+  span cut-off (item 15); 0.116 from it at a span of 0.1, 0.230 at 0.12, where the
+  difference is the sphere's size. Each shape has the point light's power, the rect's axes
+  and the representative point are checked on the CPU, and a long thin capsule is lit
+  along its length (item 1). The light-set test gives three lights of every four a shape
+  (every eighth a long capsule, whose radius is raised) and the forward and deferred loops
+  visit the same lights. The white furnace is unchanged (0.9861). Met; a rendered
+  comparison is not measured.
 - **5. Goldens:** Compat's 11 scenes byte-identical to `fa661a7` and its SPIR-V unchanged;
   all fourteen tiered goldens two-run identical, the new `ltc` and `fsr3-ltc` among them;
   exact hashes from CI, where only `decals` and `fsr3-decals` moved (the teamfight's bolts).
   Validation and sync validation clean on lavapipe and on the RTX 5070 Ti (36 captures,
   both pipelines of item 10's choice). Met.
-- **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay at
-  1920×1080, three interleaved rounds: GPU total 1.020–1.067× (Low, High, Ultra, Overdrive,
-  Low and High with FSR 3.1; span 1.036–1.082×), Compat Ultra 1.003×; Medium, the lowest
-  preset with LTC, 1.056× in three rounds of its own (+0.003 ms over N2c). Met. N2d's budget
-  against `fa661a7` (amendment 3: 0.005 ms at Low, 0.008 at High) is met on p50 (+0.002 at
-  Low, +0.004 at High and Ultra, +0.005 at Overdrive); on p95 High reads +0.010–0.011 ms,
-  from the 11 % of frames with a bolt. A shaped light was in the light list on 326 of
-  3,000 frames.
-  - **Headroom** against 1.10× N1 (`gpu_total`, ms): Low 0.0184, High 0.0253, Ultra 0.0254,
-    Overdrive 0.0435, Low with FSR 3.1 0.0282, High with FSR 3.1 0.0394. After N2e's and
-    N2f's amendment 3 budgets: Low 0.0134, High 0.0123.
-  - **The extended-model check** (the close material sheet at High): +0.001 ms over N2c on
-    p50 (+0.007 on p95), so amendment 3's 0.005 ms becomes about 0.004 ms.
-  - **The area-light sheet:** not met at High with LTC, levers untried (item 14).
+- **7. Performance: not met; pending the maintainer's decision (item 14).** Every area
+  mode exceeds N2d's budget on the frames that carry shaped lights, after the levers (area
+  sheet at High: LTC +0.055 ms, the representative point +0.018 over `off`; Low's point
+  +0.017; the combined sheet +0.055 and +0.019; the teamfight's frames with a shaped light
+  +0.012 at High). The teamfight over all its frames is unchanged by the feature (+0.000 ms
+  at High) and in the first round was 1.020–1.067× N1's GPU total at every preset
+  (pre-review build); review round 1 changed the frame, and the five-round campaign against
+  N1 and N2c at every preset waits on the decision.
 
 ## Corrections to the roadmap
 

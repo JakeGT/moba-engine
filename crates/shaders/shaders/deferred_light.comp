@@ -1,6 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_samplerless_texture_functions : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 // Deferred lighting on Tiered (ADR-0023 §2, N2b): one 16 x 16 tile per workgroup, dispatched
 // indirectly per tile class from `light_classify`'s lists. Each pixel decodes the thin
@@ -47,6 +48,11 @@ layout(constant_id = 1) const uint AREA_MODE = 0u;
 #ifdef DEFERRED_EXTENDED
 #define MOBA_SHADING_MODELS
 #endif
+// N2d: the light loop scalarised across the subgroup (include/lighting.glsl) in the mode-0
+// pipelines, where it was measured faster (in the area modes slower; ADR-0023 amendment 4
+// item 14). The renderer requires subgroup arithmetic in compute for Tiered's deferred
+// lighting (`light_classify`).
+#define MOBA_SCALAR_LIGHT_LOOP (AREA_MODE == 0u)
 #include "camera.glsl"
 #include "lighting.glsl"
 #include "atmosphere.glsl"

@@ -1389,8 +1389,13 @@ impl Drop for ClientApp {
         let scale = scale_report(&scales);
         // GPU pass times from timestamp queries, same warm-up skipped.
         let gpu_samples = self.gpu_log.take().unwrap_or_default();
+        let gpu_area = self.gpu_area_log.take().unwrap_or_default();
         let gpu_columns = if gpu_samples.len() > warmup {
             gpu_report(&gpu_samples[warmup..])
+                + &area_report(
+                    &gpu_samples[warmup..],
+                    gpu_area.get(warmup..).unwrap_or_default(),
+                )
         } else {
             String::from("gpu_timing=unavailable ")
         };
@@ -1696,6 +1701,44 @@ fn scale_report(scales: &[f32]) -> String {
     format!(
         "scale_first={first:.3} scale_final={last:.3} scale_min={min:.3} scale_max={max:.3} \
          scale_changes_late={changes} "
+    )
+}
+
+/// N2d's area-frame columns (ADR-0023 amendment 4, perf/0038): `gpu_area_frames`, the logged
+/// frames that binned a shaped light, and over those frames only `gpu_total_area_p50_ms`,
+/// `_p95_ms` and `gpu_deferred_light_area_p50_ms`, so a scene whose shaped lights come and go
+/// (the teamfight) is judged on the frames that carry them. `area[i]` flags `samples[i]`;
+/// the columns are left out without a flagged frame.
+fn area_report(samples: &[[f32; GPU_LANES.len()]], area: &[bool]) -> String {
+    let lane = |name| GPU_LANES.iter().position(|&lane| lane == name);
+    let (Some(total), Some(deferred)) = (lane("total"), lane("deferred_light")) else {
+        return String::new();
+    };
+    let pick = |index: usize| {
+        let mut values: Vec<f32> = samples
+            .iter()
+            .zip(area)
+            .filter(|(_, flagged)| **flagged)
+            .map(|(sample, _)| sample[index])
+            .collect();
+        values.sort_by(f32::total_cmp);
+        values
+    };
+    let totals = pick(total);
+    if totals.is_empty() {
+        return String::from("gpu_area_frames=0 ");
+    }
+    let at = |values: &[f32], fraction: f32| {
+        values[((values.len() - 1) as f32 * fraction).round() as usize]
+    };
+    let deferred = pick(deferred);
+    format!(
+        "gpu_area_frames={} gpu_total_area_p50_ms={:.3} gpu_total_area_p95_ms={:.3} \
+         gpu_deferred_light_area_p50_ms={:.3} ",
+        totals.len(),
+        at(&totals, 0.50),
+        at(&totals, 0.95),
+        at(&deferred, 0.50),
     )
 }
 
@@ -2402,6 +2445,37 @@ mod tests {
         // Oscillating in the second half.
         let scales = [1.0, 0.9, 1.0, 0.9, 1.0, 0.9];
         assert!(super::scale_report(&scales).ends_with("scale_changes_late=2 "));
+    }
+
+    /// N2d: the area-frame columns cover only the flagged frames, and say so when none is.
+    #[test]
+    fn area_report_covers_the_frames_with_shaped_lights() {
+        let lane = |name| {
+            super::GPU_LANES
+                .iter()
+                .position(|&lane| lane == name)
+                .expect("lane")
+        };
+        let samples: Vec<[f32; super::GPU_LANES.len()]> = (0..10)
+            .map(|index| {
+                let mut sample = [0.0; super::GPU_LANES.len()];
+                sample[lane("total")] = if index < 5 { 1.0 } else { 2.0 };
+                sample[lane("deferred_light")] = if index < 5 { 0.1 } else { 0.3 };
+                sample
+            })
+            .collect();
+        let area: Vec<bool> = (0..10).map(|index| index >= 5).collect();
+        assert_eq!(
+            super::area_report(&samples, &area),
+            "gpu_area_frames=5 gpu_total_area_p50_ms=2.000 gpu_total_area_p95_ms=2.000 \
+             gpu_deferred_light_area_p50_ms=0.300 "
+        );
+        assert_eq!(
+            super::area_report(&samples, &[false; 10]),
+            "gpu_area_frames=0 "
+        );
+        // A shorter flag list (a renderer that never answered) flags nothing past its end.
+        assert_eq!(super::area_report(&samples, &[]), "gpu_area_frames=0 ");
     }
 
     #[test]

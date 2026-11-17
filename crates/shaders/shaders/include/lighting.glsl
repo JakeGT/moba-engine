@@ -312,8 +312,9 @@ float moba_luminance(vec3 color) {
 #define MOBA_AREA_MODE uint(camera.occlusion.z)
 #endif
 // Whether this stage has the LTC evaluation at all: the water defines it 0 and lights shaped
-// lights at their representative point in mode 2 too (its registers cost the water pass
-// 0.006 ms every frame, shaped light or not; ADR-0023 amendment 4).
+// lights at their representative point in mode 2 too (with LTC its registers cost the water
+// pass 0.006 ms; ADR-0023 amendment 4 item 11), and on frames without a shaped light draws
+// with a pipeline whose shaped-light code is compiled out (`WATER_SHAPED_LIGHTS`).
 #ifndef MOBA_AREA_LTC
 #define MOBA_AREA_LTC 1
 #endif
@@ -378,11 +379,12 @@ float moba_shape_extent(float tag, vec4 shape) {
                      : shape.w;
 }
 
-// The span cut-off (ADR-0023 amendment 4 item 15): under LTC a shape whose largest
-// half-extent spans less than MOBA_LTC_SPAN_LOW of its centre's distance is lit at its
-// representative point, from MOBA_LTC_SPAN_HIGH with LTC alone, and between by a smoothstep
-// blend of the two. A vanishing shape is then the engine's point light (gate 3), and LTC
-// runs only where a shape subtends enough angle to show its form.
+// The span cut-off (ADR-0023 amendment 4 item 15): under LTC a shape whose
+// extent spans less than MOBA_LTC_SPAN_LOW of its centre's distance is lit as the point light
+// at its centre (a one-sided rect at its representative point), from MOBA_LTC_SPAN_HIGH with
+// LTC alone, and between by a smoothstep blend of the two. A vanishing shape is then the
+// engine's point light (gate 3), and LTC runs only where a shape subtends enough angle to
+// show its form.
 #define MOBA_LTC_SPAN_LOW 0.08
 #define MOBA_LTC_SPAN_HIGH 0.12
 
@@ -442,6 +444,15 @@ vec2 moba_area_integrals(float tag, vec4 shape, vec3 to_light, vec3 t1, vec3 t2,
     } else {
         float half_length = length(shape.xyz);
         radiance_scale = 1.0 / max(radius * radius + radius * half_length, 1e-6);
+        // Inside the capsule: the whole hemisphere, as the sphere (its facing quad would be
+        // behind the point; amendment 4 item 3).
+        vec3 start = to_light - shape.xyz;
+        float along = clamp(dot(-start, shape.xyz) / max(2.0 * half_length * half_length, 1e-12),
+                            0.0, 1.0);
+        vec3 nearest = start + 2.0 * shape.xyz * along;
+        if (dot(nearest, nearest) <= radius * radius) {
+            return vec2(1.0);
+        }
         grow = ltc_grow(distance, radius + half_length);
         vec3 half_axis = shape.xyz * grow;
         radius *= grow;
@@ -486,8 +497,36 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
     vec3 ltc_t1 = vec3(1.0, 0.0, 0.0);
 #endif
 #endif
+#ifdef MOBA_SCALAR_LIGHT_LOOP
+    // The deferred lighting's scalarised loop where `MOBA_SCALAR_LIGHT_LOOP` (a specialisation
+    // constant) holds (N2d, ADR-0023 amendment 4 item 14): each pass takes the subgroup's
+    // lowest pending light, so the light's loads are uniform, and the pixels holding it light
+    // it. Each pixel still lights its own cell's lights in its list's order, so the sum is the
+    // same.
+    uint i = 0u;
+    for (;;) {
+        uint index;
+        if (MOBA_SCALAR_LIGHT_LOOP) {
+            uint candidate = i < count ? light_grid.cells[base + 1u + i] : 0xFFFFFFFFu;
+            index = subgroupMin(candidate);
+            if (index == 0xFFFFFFFFu) {
+                break;
+            }
+            if (candidate != index) {
+                continue;
+            }
+        } else {
+            if (i >= count) {
+                break;
+            }
+            index = light_grid.cells[base + 1u + i];
+        }
+        i++;
+        index = min(index, total - 1u);
+#else
     for (uint i = 0u; i < count; i++) {
         uint index = min(light_grid.cells[base + 1u + i], total - 1u);
+#endif
         vec4 position_radius = light_list.lights[index * 2u];
         vec3 color = light_list.lights[index * 2u + 1u].rgb;
         vec3 to_light = position_radius.xyz - surface.world_pos;

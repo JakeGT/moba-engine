@@ -749,6 +749,9 @@ pub struct Renderer {
     tile_counts_written: [bool; FRAMES_IN_FLIGHT],
     /// This frame's shaped lights' screen bounds (N2d): the deferred lighting's area classes.
     area_rects: crate::lights::AreaRects,
+    /// The shaped lights binned by recently submitted frames, by their timings' sequence
+    /// number ([`Self::shaped_lights_at`]); a ring longer than the frames in flight.
+    shaped_by_sequence: [(u64, u32); 8],
     /// [`RenderConfig::tile_counts`].
     tile_counts: bool,
     /// A submitted frame has run `light_classify` on the current tile buffer, so its header
@@ -1550,6 +1553,7 @@ impl Renderer {
             exercise: ExerciseStats::default(),
             tile_counts_written: [false; FRAMES_IN_FLIGHT],
             area_rects: crate::lights::AreaRects::default(),
+            shaped_by_sequence: [(u64::MAX, 0); 8],
             tile_counts: config.tile_counts,
             tile_header_written: false,
             tile_counts_recorded: (false, false),
@@ -2005,6 +2009,16 @@ impl Renderer {
     #[must_use]
     pub fn light_stats(&self) -> LightStats {
         self.lighting.light_stats()
+    }
+
+    /// The shaped lights (N2d) the frame whose [`GpuTimings::frame`] is `sequence` binned, so
+    /// a frame log can split its timings by them; `None` once the frame is too old (more
+    /// than eight frames back).
+    #[must_use]
+    pub fn shaped_lights_at(&self, sequence: u64) -> Option<u32> {
+        #[allow(clippy::cast_possible_truncation)] // Modulo 8.
+        let (at, area) = self.shaped_by_sequence[(sequence % 8) as usize];
+        (at == sequence).then_some(area)
     }
 
     /// Binds a registered 2D colour texture as the stylisation ramp (`None` removes it), used
@@ -3177,6 +3191,10 @@ impl Renderer {
         let (copied, classified) = self.tile_counts_recorded;
         self.tile_counts_written[frame_index] = copied;
         self.tile_header_written |= classified;
+        let sequence = self.profiler.next_sequence();
+        #[allow(clippy::cast_possible_truncation)] // Modulo 8.
+        let slot = (sequence % 8) as usize;
+        self.shaped_by_sequence[slot] = (sequence, self.lighting.light_stats().area);
         self.profiler.submitted(frame_index);
         self.last_submitted = true;
         if let Some(vfx) = self.vfx.as_mut() {

@@ -372,6 +372,12 @@ fn disk(minv: Minv, centre: Vec3, radius: f32) -> f32 {
 pub(crate) fn capsule(frame: &Frame, minv: Minv, p1: Vec3, p2: Vec3, radius: f32) -> f32 {
     let centre = (p1 + p2) * 0.5;
     let half = (p2 - p1) * 0.5;
+    // Inside the capsule: the whole (transformed) upper hemisphere, as `sphere`.
+    let segment = p2 - p1;
+    let along = ((-p1).dot(segment) / segment.length_squared().max(1e-12)).clamp(0.0, 1.0);
+    if (p1 + segment * along).length_squared() <= radius * radius {
+        return 1.0;
+    }
     let grow = grow(centre, radius + half.length());
     let (half, radius) = (half * grow, radius * grow);
     polygon(

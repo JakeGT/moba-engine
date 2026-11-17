@@ -660,10 +660,13 @@ fn sphere_light(centre: Vec3, radius: f32) -> LightIn {
 /// Gate 3's limit, as worded (ADR-0023 §9b): a sphere light's result tends to the point
 /// light's as its radius tends to 0, the engine's point light itself (GGX × Smith × Schlick
 /// at the half vector, the wrapped diffuse, the 1 m near-field floor), not the LTC lobe's
-/// point value. Below `SPAN_LOW` a shape is lit at its representative point (amendment 4
-/// item 15), which converges to the centre, with its normalisation to 1.
+/// point value. Below `SPAN_LOW` a sphere under LTC is that point light (amendment 4 item 15),
+/// so the limit is exact there; above it the worst error per span is recorded in
+/// `SHRINKING_SPHERE`.
 #[test]
 fn a_shrinking_sphere_tends_to_the_engine_point_light() {
+    let spans = [0.3f32, 0.2, 0.12, 0.1, 0.08, 0.05, 0.01, 1e-5];
+    let mut worst = [0.0f32; 8];
     for (roughness, view, wrap, metallic) in [
         (0.15f32, 0.0f32, 0.0f32, 0.0f32),
         (0.3, 40.0, 0.3, 0.0),
@@ -685,25 +688,28 @@ fn a_shrinking_sphere_tends_to_the_engine_point_light() {
             for distance in [0.5f32, 2.0] {
                 let centre = direction.normalize() * distance;
                 let point = shade::point_light(&surface, n, v, &sphere_light(centre, 0.0));
-                let mut last = f32::INFINITY;
-                for radius in [0.05f32, 0.02, 0.01, 1e-3, 1e-5] {
-                    let radius = radius * distance;
+                for (slot, span) in spans.iter().enumerate() {
+                    let radius = span * distance;
                     let lit = shade::light(2, &surface, n, v, &sphere_light(centre, radius));
                     let error = (lit - point).abs() / point.max(1e-3);
-                    assert!(
-                        error <= last + 1e-3,
-                        "r{roughness} v{view} d{distance} R{radius}: {lit} vs {point}"
-                    );
-                    last = error;
+                    worst[slot] = worst[slot].max(error);
                 }
-                assert!(
-                    last < 2e-3,
-                    "r{roughness} v{view} d{distance}: {last} from the point light"
-                );
             }
         }
     }
+    for (span, error) in spans.iter().zip(&worst) {
+        eprintln!("span {span}: worst relative error {error:.4}");
+    }
+    for ((span, error), limit) in spans.iter().zip(&worst).zip(SHRINKING_SPHERE) {
+        assert!(*error <= limit, "span {span}: {error} > {limit}");
+    }
 }
+
+/// `a_shrinking_sphere_tends_to_the_engine_point_light`'s worst differences from the point
+/// light per span with ~15% headroom: 0.235 (span 0.3), 0.232 (0.2), 0.230 (0.12, LTC alone),
+/// 0.116 (0.1, the blend) and 0 at and below `SPAN_LOW` (0.08), where the sphere is the point
+/// light. Above the cut-off the difference is the sphere's size, not an error.
+const SHRINKING_SPHERE: [f32; 8] = [0.27, 0.27, 0.27, 0.14, 1e-6, 1e-6, 1e-6, 1e-6];
 
 /// ADR-0016's near-field floor holds under LTC too: within 1 m a sphere's radiance is scaled
 /// by d² / max(d², 1), so its diffuse is the point light's `cos θ / max(d², 1)`, not
@@ -995,7 +1001,9 @@ fn the_half_table_integrates_as_the_full_one() {
     let bytes = std::fs::read(path).expect("the full-precision table");
     assert_eq!(bytes.len(), 2 * LTC_SIZE * LTC_SIZE * 16);
     let full: Vec<[f32; 4]> = bytes
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|texel| {
             core::array::from_fn(|i| {
                 f32::from_le_bytes(texel[4 * i..4 * i + 4].try_into().expect("4 bytes"))
@@ -1031,4 +1039,51 @@ fn the_half_table_integrates_as_the_full_one() {
          lobe × magnitude, lobe × Fresnel) {absolute:?}, relative {relative:?}"
     );
     assert!(relative.iter().all(|&error| error < 0.01), "{relative:?}");
+}
+
+/// A capsule lights a point inside it as the whole hemisphere, as the sphere does, with no
+/// step at its surface (amendment 4 item 3; before review its facing quad fell behind the
+/// point and the inside was dark). Within 1 m the near-field floor (amendment 4 item 15)
+/// dims a shape larger than the distance below the point light's floored value, recorded:
+/// a capsule of radius 0.2 m and half-length 0.5 m over a rough floor is 0.83 of the point
+/// light at 0.6 m, 0.39 at 0.25 m and 0.28 at its surface.
+#[test]
+fn a_capsule_lights_its_inside() {
+    let (frame, _, _) = frame_for(0.0);
+    let n = frame.n;
+    let surface = dielectric(0.8, 0.0);
+    let radius = 0.2f32;
+    let lit = |height: f32| {
+        let light = LightIn {
+            to_light: Vec3::new(0.0, height, 0.0),
+            radius: 64.0,
+            color: 1.0,
+            tag: shade::CAPSULE,
+            shape: [0.5, 0.0, 0.0, radius],
+        };
+        shade::light(2, &surface, n, n, &light)
+    };
+    let (outside, inside) = (lit(radius * 1.005), lit(radius * 0.995));
+    assert!(
+        (inside - outside).abs() < 0.05 * outside,
+        "{inside} inside against {outside} outside"
+    );
+    assert!(lit(0.1) > 0.0, "the inside is lit");
+    let point = shade::point_light(
+        &surface,
+        n,
+        n,
+        &LightIn {
+            to_light: Vec3::new(0.0, 0.6, 0.0),
+            radius: 64.0,
+            color: 1.0,
+            tag: 0.0,
+            shape: [0.0; 4],
+        },
+    );
+    let ratio = lit(0.6) / point;
+    assert!(
+        (0.78..0.88).contains(&ratio),
+        "{ratio} of the point light at 0.6 m"
+    );
 }
