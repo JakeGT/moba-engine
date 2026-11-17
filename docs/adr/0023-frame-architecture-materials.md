@@ -1864,7 +1864,7 @@ item here.
     scene gate 2, the `ltc` golden and gate 7's area-light rows use.
 
 14. **Gate 7 is not met with LTC at High where large shaped lights cover the screen, and
-    the levers were not tried** (departs from §9b's 1.10×). On the area-light sheet (item 13:
+    the levers were not tried** (departs from §9b's 1.10×; Medium reads as High, item 7). On the area-light sheet (item 13:
     three lights each covering a few metres of ground, on every frame) LTC costs +0.046 ms
     (far camera) and +0.049 ms (close) over the same lights as points, all in
     `deferred_light`. Against an estimate of N1 drawing the lights as points (N1's frame of
@@ -1907,7 +1907,8 @@ item here.
   both pipelines of item 10's choice). Met.
 - **7. Performance** on the RTX 5070 Ti against `ab42718`, the teamfight replay at
   1920×1080, three interleaved rounds: GPU total 1.020–1.067× (Low, High, Ultra, Overdrive,
-  Low and High with FSR 3.1; span 1.036–1.082×), Compat Ultra 1.003×. Met. N2d's budget
+  Low and High with FSR 3.1; span 1.036–1.082×), Compat Ultra 1.003×; Medium, the lowest
+  preset with LTC, 1.056× in three rounds of its own (+0.003 ms over N2c). Met. N2d's budget
   against `fa661a7` (amendment 3: 0.005 ms at Low, 0.008 at High) is met on p50 (+0.002 at
   Low, +0.004 at High and Ultra, +0.005 at Overdrive); on p95 High reads +0.010–0.011 ms,
   from the 11 % of frames with a bolt. A shaped light was in the light list on 326 of

@@ -32,7 +32,7 @@ Every lavapipe and RTX run below printed no `[vulkan` line.
 | 2. Deferred–forward parity | **Met** locally at 1280×720 on lavapipe, with the area-light sheet as a fifth scene lit with LTC on both paths: worst pixel 3, 3, 3, 6 and 3/255 (default, default without the sky, river, teamfight, area-light sheet), at least 99.999 % within 2/255; the same with `MOBA_PAINT_DECAL_PASS=1`, and on the RTX 5070 Ti |
 | 3. LTC | **Met** (the CPU twin of `ltc.glsl`): each shape within a recorded tolerance of a Monte Carlo reference (worst evaluation, diffuse and specular: sphere 0.058, 0.0002, 0.099; capsule 0.145, 0.042, 0.056; rect 0.116, 0.002, 0.105); `RGBA16F` kept (rounding ≤ 4.9e-4); a shrinking sphere tends to the point light (2.4e-4 diffuse, 6.6e-4 specular); the forward and deferred loops visit the same shaped lights; the white furnace unchanged (0.9861) |
 | 5. Goldens | **Met.** Compat byte-identical to `fa661a7` (11 scenes) and its SPIR-V unchanged; all fourteen tiered goldens two-run identical, the new `ltc` and `fsr3-ltc` among them; exact hashes from CI (only `decals` and `fsr3-decals` moved, the teamfight's bolts now being capsules) |
-| 7. Performance (≤ 1.10× N1) | **Met on the teamfight, every preset:** GPU total 1.020–1.067× `ab42718` (span 1.036–1.082×); N2d's budget met on p50 (+0.002 ms at Low, +0.004 at High; amendment 3: 0.005 and 0.008), +0.010–0.011 on p95 at High; Compat 1.003×; least headroom after N2e and N2f's budgets Tiered High, 0.0123 ms. Extended-model check +0.001 ms. **Not met on the area-light sheet at High, with the levers untried:** LTC costs +0.046 ms (far) and +0.049 ms (close) over the same lights as points; about 1.126× and 1.140× an estimate of N1 drawing the lights (over by 0.018 and 0.026 ms; 1.143× and 1.158× N1's frame without them); how much is occupancy and how much arithmetic is not measured; N2e and N2f have no headroom there. Low (the representative point) 1.082×. Amendment 4 item 14 |
+| 7. Performance (≤ 1.10× N1) | **Met on the teamfight, every preset:** GPU total 1.020–1.067× `ab42718` (span 1.036–1.082×; Medium 1.056×, timed in its own rounds); N2d's budget met on p50 (+0.002 ms at Low, +0.003 at Medium, +0.004 at High; amendment 3: 0.005 and 0.008), +0.010–0.011 on p95 at Medium and High; Compat 1.003×; least headroom after N2e and N2f's budgets Tiered High, 0.0123 ms. Extended-model check +0.001 ms. **Not met on the area-light sheet at Medium and High (LTC), with the levers untried:** LTC costs +0.046 ms (far) and +0.049 ms (close) over the same lights as points; about 1.126× and 1.140× an estimate of N1 drawing the lights (over by 0.018 and 0.026 ms; 1.143× and 1.158× N1's frame without them); how much is occupancy and how much arithmetic is not measured; N2e and N2f have no headroom there. Low (the representative point) 1.082×. Amendment 4 item 14 |
 | Validation | **Met:** 0 messages on lavapipe and on the RTX 5070 Ti (36 captures, both pipelines of the per-frame choice) |
 
 ## Gate 3: LTC against Monte Carlo
@@ -154,12 +154,23 @@ count alike).
 
 Within each configuration and build the three rounds agree within 0.006 ms.
 
-- **Every preset is within 1.10× N1** on `gpu_total` (1.020–1.067×; span 1.036–1.082×).
+**Medium** (the lowest preset with LTC; perf/0037 did not time it) ran afterwards in three
+more interleaved rounds of the three builds (`r1/medium/`), the same binaries:
+
+| Configuration | N1 total | N2c total | branch total | branch p95 | branch span | `deferred_light` N2c → branch | `water` N2c → branch | ÷ N1 total (span) | branch − N2c, p50 (p95) |
+|---|---|---|---|---|---|---|---|---|---|
+| Tiered Medium (TAAU) | 0.604 | 0.635 | 0.638 | 0.657 | 0.653 | 0.059 → 0.060 | 0.021 → 0.023 | **1.056** (1.070) | +0.003 (+0.010) |
+
+Medium reads as High does (0.638 against 0.638 ms): a Tiered device runs the High
+configuration tier at every preset (amendment 4 item 7), and Medium takes LTC as High does.
+
+- **Every preset is within 1.10× N1** on `gpu_total` (1.020–1.067×, Medium 1.056×; span
+  1.036–1.082×).
 - **N2d's budget is met on p50** (amendment 3: at most 0.005 ms at Low, 0.008 ms at High):
-  +0.002 at Low (TAAU and FSR 3.1), +0.004 at High and Ultra, +0.005 at Overdrive, +0.002 at
-  High with FSR 3.1. **On p95 the High presets read +0.010–0.011 ms**: the 11 % of frames
-  with a shaped light run the LTC pipelines, which is the cost a budget measured on p50
-  does not show. Most of the p50 cost is the water lane (above).
+  +0.002 at Low (TAAU and FSR 3.1), +0.003 at Medium, +0.004 at High and Ultra, +0.005 at
+  Overdrive, +0.002 at High with FSR 3.1. **On p95 Medium and the High presets read
+  +0.010–0.011 ms**: the 11 % of frames with a shaped light run the LTC pipelines, which is
+  the cost a budget measured on p50 does not show. Most of the p50 cost is the water lane (above).
 - **The extended-model check** (the close material sheet, High): the branch is +0.001 ms
   over N2c on p50 in the same rounds (0.706 against 0.705; +0.007 on p95), so amendment 3's
   0.005 ms of headroom becomes about 0.004 ms. The sheet holds a shaped light on 258 of
@@ -172,6 +183,7 @@ Within each configuration and build the three rounds agree within 0.006 ms.
 | Configuration | 1.10× N1 total | branch | headroom | N2c's headroom, same rounds | after N2e and N2f's budgets |
 |---|---|---|---|---|---|
 | Tiered Low (TAAU) | 0.6094 | 0.591 | +0.0184 | +0.0204 | +0.0134 (N2e 0.005, N2f 0) |
+| Tiered Medium (TAAU), `r1/medium/` | 0.6644 | 0.638 | +0.0264 | +0.0294 | +0.0134 (High's budgets) |
 | Tiered High (TAAU) | 0.6633 | 0.638 | +0.0253 | +0.0293 | +0.0123 (N2e 0.008, N2f 0.005) |
 | Tiered Ultra (TAAU) | 0.6644 | 0.639 | +0.0254 | +0.0294 | +0.0124 |
 | Tiered Overdrive | 0.5995 | 0.556 | +0.0435 | +0.0485 | +0.0305 |
@@ -202,6 +214,7 @@ at their centres) is the frame the feature is measured against. Two runs:
 | High, far | 0.704 | 0.714 | 0.721 | 0.760 | 0.065 → 0.072 → 0.111 | **+0.046** | +0.007 |
 | High, close | 0.678 | 0.688 | 0.696 | 0.737 | 0.059 → 0.066 → 0.107 | **+0.049** | +0.008 |
 | Low, far (the representative point) | 0.629 | 0.640 | 0.644 | — | 0.060 → 0.067 | — | +0.004 |
+| Medium, far, `r1/medium/` | 0.703 | 0.715 | — | 0.760 | 0.065 → 0.111 (off → LTC) | **+0.045** | — |
 
 (Low's row is `area-low`, which runs the representative point by default, against
 `areaoffsheet-low`; p95 moves with p50 in every row, within 0.003 ms.)
@@ -226,6 +239,8 @@ at their centres) is the frame the feature is measured against. Two runs:
   0.026 ms close** (0.029 and 0.037 ms against N1 without the lights). It is recorded as
   amendment 4 item 14, with the levers below untried. Low (the representative point) is
   1.082× N1's frame without the lights, and the point mode at High 1.081×: both within.
+  Medium is High's case (`r1/medium/`, N1 0.664 ms): LTC 1.145× N1's frame without the
+  lights, about 1.128× the estimate (0.674 ms), over by about 0.019 ms.
   N2e and N2f have no headroom on this scene at High.
 - **Per light:** the sheet's three lights each cover a few metres of open ground at both
   cameras, so about 0.015 ms per large shaped light on screen at 1920×1080, both causes
