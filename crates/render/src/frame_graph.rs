@@ -2492,13 +2492,17 @@ mod tests {
     fn the_deferred_frame_classifies_then_lights() {
         let mut largest = 0;
         for spec in tiered_specs() {
-            for gbuffer_debug in [false, true] {
+            for (gbuffer_debug, gbuffer_decals) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
                 let spec = FrameSpec {
                     deferred: true,
                     gbuffer_debug,
+                    gbuffer_decals,
                     ..spec
                 };
                 assert!(spec.has_deferred());
+                assert_eq!(spec.has_gbuffer_decals(), gbuffer_decals);
                 let base = build(&spec, false, 0).expect("compiles");
                 for haze in [false, true] {
                     for capture in [false, true] {
@@ -2551,6 +2555,35 @@ mod tests {
                 };
                 let tiles = base.resources.tiles.expect("the tile buffer");
                 let temporal = base.resources.temporal.expect("temporal");
+                // N2c (§7a): the G-buffer pass split around the decals, the receivers first;
+                // the decals blend into gb0 (sRGB view) with the depth sampled, and the rest
+                // loads everything and tests the depth again.
+                let decals = at(PassKind::GBufferDecals);
+                let rest = at(PassKind::GBufferRest);
+                assert_eq!(decals.is_some(), gbuffer_decals, "{spec:?}");
+                assert_eq!(rest.is_some(), gbuffer_decals, "{spec:?}");
+                if let (Some(decals), Some(rest)) = (decals, rest) {
+                    assert_eq!((decals, rest), (prepass + 1, prepass + 2), "{spec:?}");
+                    assert!(rest < classify);
+                    let gb0 = temporal.gbuffer[0];
+                    assert!(graph[decals].uses(gb0));
+                    assert_eq!(layout(decals, gb0), L::COLOR_ATTACHMENT_OPTIMAL);
+                    assert_eq!(
+                        layout(decals, base.resources.depth),
+                        L::SHADER_READ_ONLY_OPTIMAL
+                    );
+                    assert_eq!(
+                        layout(rest, base.resources.depth),
+                        L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                    );
+                    for gb in temporal.gbuffer {
+                        assert_eq!(layout(rest, gb), L::COLOR_ATTACHMENT_OPTIMAL);
+                    }
+                    assert_eq!(
+                        layout(rest, base.resources.hdr),
+                        L::COLOR_ATTACHMENT_OPTIMAL
+                    );
+                }
                 // The G-buffer pass writes `hdr`; the lighting reads the G-buffer and the depth
                 // sampled, and `hdr` as a storage image; the sky draws over it.
                 assert_eq!(
@@ -2644,8 +2677,9 @@ mod tests {
         }
         assert!(largest <= crate::graph::MAX_PASSES, "{largest} passes");
         // The largest deferred frame: a G-buffer debug view with everything on (the full
-        // water, so no `simple_water`), one pass more than the forward one.
-        assert_eq!(largest, 39);
+        // water, so no `simple_water`) and the G-buffer decals (N2c: two passes more, the
+        // decals and the rest), three passes more than the forward one.
+        assert_eq!(largest, 41);
     }
 
     /// A G-buffer debug view (ADR-0023 §1f) runs after `temporal` and before the post chain,

@@ -224,7 +224,7 @@ vec3 model_ambient(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 ambient_
                    float ao, float specular_ao) {
     if (surface.model == MOBA_MODEL_CLEARCOAT) {
         float coat_roughness = clamp(surface.model_data.y, MOBA_MIN_ROUGHNESS, 1.0);
-        vec2 coat_brdf = textureLod(brdf_lut, vec2(n_dot_v, coat_roughness), 0.0).rg;
+        vec2 coat_brdf = brdf_lut_sample(n_dot_v, coat_roughness);
         float weight = surface.model_data.x;
         float fc = (MOBA_COAT_F0 + (1.0 - MOBA_COAT_F0) * pow(1.0 - n_dot_v, 5.0)) * weight;
         vec3 coat = ambient_specular(reflect(-v, n), coat_roughness)

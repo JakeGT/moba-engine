@@ -896,7 +896,7 @@ impl Materials {
 
 #[cfg(test)]
 mod tests {
-    use super::{MaterialData, MaterialParamsGpu, TextureId};
+    use super::{MaterialData, MaterialParamsGpu, MaterialRecord, TextureId};
     use moba_assets::{MaterialShader, TextureSlot};
 
     #[test]
@@ -924,5 +924,118 @@ mod tests {
         assert_eq!(styled.emissive[3], 2.0);
         assert_eq!(material.texture(TextureSlot::Mask), Some(TextureId(3)));
         assert_eq!(material.texture(TextureSlot::Normal), None);
+    }
+
+    /// The record's model word: the model data as UNORM8 channels (§6c), the G-buffer
+    /// model ID, the emissive-mask flag; the texture words two handles each.
+    #[test]
+    fn material_record_packs_the_model_word() {
+        use moba_assets::ModelParams;
+        let mut material = MaterialData::new(MaterialShader::Textured);
+        let mut textures = [0_u32; TextureSlot::COUNT];
+        textures[TextureSlot::BaseColor.index()] = 7;
+        textures[TextureSlot::Normal.index()] = 9;
+        textures[TextureSlot::Model.index()] = 11;
+        let record = MaterialRecord::new(&material, textures, true);
+        // STANDARD (1): F0 0.04 as sqrt(F0 / 0.16) = 0.5, AO 1.
+        assert_eq!(record.model, 128 | (255 << 8) | (1 << 24) | (1 << 28));
+        assert_eq!(record.base_normal, 7 | (9 << 16));
+        assert_eq!(record.emissive_model, 11 << 16);
+        material.model = ModelParams::ThinFilm {
+            thickness_min: 100.0,
+            thickness_max: 400.0,
+            ior: 1.3,
+        };
+        let record = MaterialRecord::new(&material, textures, false);
+        // (1.3 − 1) · 255 rounds to 76 in f32.
+        assert_eq!(record.model, (76 << 8) | (255 << 16) | (5 << 24));
+        material.model = ModelParams::Anisotropic {
+            strength: 1.0,
+            rotation: -core::f32::consts::FRAC_PI_2,
+        };
+        let record = MaterialRecord::new(&material, textures, false);
+        // −π/2 is π/2 modulo π: 0.5.
+        assert_eq!(record.model, 255 | (128 << 8) | (255 << 16) | (4 << 24));
+    }
+
+    /// The reflected fields of a Slang struct type: (name, byte offset).
+    fn fields(ty: &serde_json::Value) -> Vec<(String, u64)> {
+        ty["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .map(|field| {
+                (
+                    field["name"].as_str().expect("name").to_owned(),
+                    field["binding"]["offset"].as_u64().expect("offset"),
+                )
+            })
+            .collect()
+    }
+
+    /// ADR-0023 gate 1: `MaterialRecord` and the material push match their Slang twins in
+    /// `unit_material_gbuffer.slang`'s reflection (ADR-0020 §4c), the record through the
+    /// push's table pointer.
+    #[test]
+    fn material_record_and_push_match_the_slang_layout() {
+        use crate::passes::scene::MaterialPush;
+        use core::mem::{offset_of, size_of};
+        for module in [
+            "unit_material_gbuffer.slang",
+            "unit_material_gbuffer_ids.slang",
+            "unit_material_gbuffer_hdr.slang",
+            "unit_material_gbuffer_ids_hdr.slang",
+        ] {
+            let json = moba_shaders::reflection(module).expect("reflection");
+            let reflection: serde_json::Value = serde_json::from_str(json).expect("json");
+            let push = reflection["parameters"]
+                .as_array()
+                .expect("parameters")
+                .iter()
+                .find(|parameter| parameter["name"] == "push")
+                .expect("push");
+            let push_type = &push["type"]["elementType"];
+            let expected = [
+                ("skin", offset_of!(MaterialPush, skin)),
+                ("table", offset_of!(MaterialPush, table)),
+                ("material", offset_of!(MaterialPush, material)),
+                ("reserved", offset_of!(MaterialPush, reserved)),
+            ]
+            .map(|(name, offset)| (name.to_owned(), offset as u64));
+            assert_eq!(fields(push_type), expected, "{module}: MaterialPush");
+            assert_eq!(size_of::<MaterialPush>(), 32);
+
+            let table = push_type["fields"]
+                .as_array()
+                .expect("fields")
+                .iter()
+                .find(|field| field["name"] == "table")
+                .expect("table");
+            assert_eq!(
+                table["type"]["kind"], "pointer",
+                "{module}: the table is a pointer"
+            );
+            let record = &table["type"]["valueType"];
+            assert_eq!(record["name"], "MaterialRecord");
+            let expected = [
+                (
+                    "base_color_factor",
+                    offset_of!(MaterialRecord, base_color_factor),
+                ),
+                ("emissive", offset_of!(MaterialRecord, emissive)),
+                ("normal_scale", offset_of!(MaterialRecord, normal_scale)),
+                ("metallic", offset_of!(MaterialRecord, metallic)),
+                ("roughness", offset_of!(MaterialRecord, roughness)),
+                ("team_tint", offset_of!(MaterialRecord, team_tint)),
+                ("dust", offset_of!(MaterialRecord, dust)),
+                ("base_normal", offset_of!(MaterialRecord, base_normal)),
+                ("mr_mask", offset_of!(MaterialRecord, mr_mask)),
+                ("emissive_model", offset_of!(MaterialRecord, emissive_model)),
+                ("model", offset_of!(MaterialRecord, model)),
+            ]
+            .map(|(name, offset)| (name.to_owned(), offset as u64));
+            assert_eq!(fields(record), expected, "{module}: MaterialRecord");
+            assert_eq!(size_of::<MaterialRecord>(), 64);
+        }
     }
 }

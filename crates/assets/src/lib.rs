@@ -491,6 +491,12 @@ impl AssetManifest {
             };
             report.materials += 1;
             report.textured += usize::from(stats.textured);
+            if let Some(slot) = ShadingModel::ALL
+                .iter()
+                .position(|model| *model == stats.model)
+            {
+                report.models[slot] += 1;
+            }
             report.bound_textures += stats.textures.len();
             for (name, bytes) in stats.textures {
                 if !seen.contains(&name) {
@@ -582,10 +588,13 @@ pub struct MaterialReport {
     pub bound_textures: usize,
     /// Texel bytes of the distinct textures, every mip level, as stored on disk.
     pub texture_bytes: usize,
+    /// Materials per shading model, in [`ShadingModel::ALL`] order (ADR-0023 §6c).
+    pub models: [usize; ShadingModel::ALL.len()],
 }
 
 struct MaterialStats {
     textured: bool,
+    model: ShadingModel,
     /// `(texture name, texel bytes)` per bound texture.
     textures: Vec<(String, usize)>,
 }
@@ -622,6 +631,7 @@ fn check_material(
     let material = MaterialDesc::load_file(&canonical)
         .map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
     let mut textures = Vec::new();
+    let mut emissive_mask = false;
     for (slot, name) in material.bound_textures() {
         let shown = format!("{shown}: {} texture textures/{name}.ktx2", slot.name());
         let texture_file = texture_path(root, name).expect("validated by MaterialDesc");
@@ -635,10 +645,17 @@ fn check_material(
                 texture.format()
             )));
         }
+        emissive_mask |=
+            slot == TextureSlot::MetallicRoughness && has_emissive_mask(texture.format());
         textures.push((name.to_owned(), texture.data().len()));
     }
+    // ADR-0023 §10: the material against both evaluators.
+    material
+        .check_evaluators(emissive_mask)
+        .map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
     Ok(Some(MaterialStats {
         textured: material.shader == MaterialShader::Textured,
+        model: material.shading_model(),
         textures,
     }))
 }

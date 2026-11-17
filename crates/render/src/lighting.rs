@@ -616,7 +616,12 @@ fn orthographic(radius: f32, far: f32) -> Mat4 {
 
 /// Edge of the split-sum BRDF LUT (`R16G16_SFLOAT`, 4 KiB).
 pub(crate) const BRDF_LUT_SIZE: u32 = 32;
+/// Samples per texel of Compat's LUT (unchanged: Compat's pixels are frozen until C1).
 const BRDF_LUT_SAMPLES: u32 = 128;
+/// Samples per texel of Tiered's LUT (N2c, ADR-0023 amendment 3): the multiscatter
+/// compensation divides by the LUT's albedo, so its noise (about 3 % at 128 samples on rough
+/// lobes) would show in the white furnace; 1024 keeps it below 0.5 %.
+const BRDF_LUT_TIERED_SAMPLES: u32 = 1024;
 
 fn radical_inverse(bits: u32) -> f32 {
     bits.reverse_bits() as f32 * (1.0 / 4_294_967_296.0)
@@ -664,12 +669,21 @@ pub(crate) fn integrate_brdf(n_dot_v: f32, roughness: f32, samples: u32) -> (f32
 
 /// The LUT texels, `R16G16_SFLOAT` row-major: `u` = N·V, `v` = roughness (texel centres).
 pub(crate) fn brdf_lut() -> Vec<u8> {
+    brdf_lut_with(BRDF_LUT_SAMPLES)
+}
+
+/// Tiered's LUT: the same texels with [`BRDF_LUT_TIERED_SAMPLES`] samples each.
+pub(crate) fn brdf_lut_tiered() -> Vec<u8> {
+    brdf_lut_with(BRDF_LUT_TIERED_SAMPLES)
+}
+
+fn brdf_lut_with(samples: u32) -> Vec<u8> {
     let mut bytes = Vec::with_capacity((BRDF_LUT_SIZE * BRDF_LUT_SIZE * 4) as usize);
     for row in 0..BRDF_LUT_SIZE {
         let roughness = (row as f32 + 0.5) / BRDF_LUT_SIZE as f32;
         for column in 0..BRDF_LUT_SIZE {
             let n_dot_v = (column as f32 + 0.5) / BRDF_LUT_SIZE as f32;
-            let (scale, bias) = integrate_brdf(n_dot_v, roughness, BRDF_LUT_SAMPLES);
+            let (scale, bias) = integrate_brdf(n_dot_v, roughness, samples);
             bytes.extend_from_slice(&moba_assets::f16_from_f32(scale).to_le_bytes());
             bytes.extend_from_slice(&moba_assets::f16_from_f32(bias).to_le_bytes());
         }
@@ -1084,13 +1098,14 @@ impl LightingResources {
     /// The set layout, samplers, default images, the BRDF LUT, the light buffers and the
     /// sets. `shadow_format` is the shadow map's format (or the depth format when shadows are
     /// off), `shadow_filter_linear` whether it can be sampled with linear filtering and
-    /// `anisotropy` the terrain layers' maximum anisotropy.
+    /// `anisotropy` the terrain layers' maximum anisotropy; `tiered` picks Tiered's BRDF LUT.
     #[allow(clippy::too_many_lines)] // Layout, samplers, default images and buffers, in order.
     pub(crate) fn new(
         device: &DeviceContext,
         shadow_format: vk::Format,
         shadow_filter_linear: bool,
         anisotropy: Option<f32>,
+        tiered: bool,
     ) -> RenderResult<Self> {
         let bindings = set_layout_bindings();
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &bindings)?;
@@ -1188,7 +1203,11 @@ impl LightingResources {
                 bytes: &[0, 0, 0, 255].repeat(6),
             },
         )?;
-        let lut = brdf_lut();
+        let lut = if tiered {
+            brdf_lut_tiered()
+        } else {
+            brdf_lut()
+        };
         let brdf_lut = texture::upload_raw(
             device,
             "brdf-lut",
@@ -1745,6 +1764,64 @@ mod tests {
         assert!(scale + bias < 0.9 && scale + bias > 0.3, "{scale} {bias}");
         let lut = brdf_lut();
         assert_eq!(lut.len(), (BRDF_LUT_SIZE * BRDF_LUT_SIZE * 4) as usize);
+    }
+
+    /// ADR-0023 gate 3, white furnace: a metal with F0 = 1 under a uniform white
+    /// environment returns 1 ± 0.02 at every roughness with multiscatter on. The
+    /// single-scatter albedo is a 4096-sample integral of the GGX lobe (the direct lights'
+    /// lobe over a white hemisphere); the compensation is `lighting.glsl`'s
+    /// `multiscatter_compensation` (1 + F0 (1 / E − 1)), with E read from Tiered's
+    /// `R16G16_SFLOAT` LUT as `brdf_lut_sample` reads it. The ambient's own split sum,
+    /// `(F0 A + B)` times the same compensation, is 1 by construction at F0 = 1.
+    #[test]
+    fn white_furnace_with_multiscatter_is_one() {
+        let lut = brdf_lut_tiered();
+        let size = BRDF_LUT_SIZE as usize;
+        let texel = |x: usize, y: usize| {
+            let at = (y * size + x) * 4;
+            let half = |i: usize| {
+                moba_assets::f32_from_f16(u16::from_le_bytes([lut[at + i], lut[at + i + 1]]))
+            };
+            half(0) + half(2)
+        };
+        // `brdf_lut_sample` in lighting.glsl: bilinear, clamped in N·V; in roughness past the
+        // last row's centre, extrapolated from the last two rows.
+        let sample = |n_dot_v: f32, roughness: f32| {
+            let p = (n_dot_v * BRDF_LUT_SIZE as f32 - 0.5).clamp(0.0, (size - 1) as f32);
+            let x = (p.floor() as usize).min(size - 2);
+            let fx = p - x as f32;
+            let q = (roughness * BRDF_LUT_SIZE as f32 - 0.5).max(0.0);
+            let y = (q.floor() as usize).min(size - 2);
+            let fy = q - y as f32;
+            let top = texel(x, y) * (1.0 - fx) + texel(x + 1, y) * fx;
+            let bottom = texel(x, y + 1) * (1.0 - fx) + texel(x + 1, y + 1) * fx;
+            top * (1.0 - fy) + bottom * fy
+        };
+        let mut worst = (1.0_f32, 0.0, 0.0);
+        for r in 0..=20 {
+            let roughness = r as f32 / 20.0;
+            for v in 1..=20 {
+                let n_dot_v = v as f32 / 20.0;
+                let (scale, bias) = integrate_brdf(n_dot_v, roughness, 4096);
+                let single = scale + bias;
+                let compensated =
+                    single * (1.0 + (1.0 / sample(n_dot_v, roughness).max(1e-4) - 1.0));
+                assert!(
+                    compensated.is_finite(),
+                    "roughness {roughness} N·V {n_dot_v}"
+                );
+                if (compensated - 1.0).abs() > (worst.0 - 1.0).abs() {
+                    worst = (compensated, roughness, n_dot_v);
+                }
+            }
+        }
+        assert!(
+            (worst.0 - 1.0).abs() <= 0.02,
+            "furnace {:.4} at roughness {} N·V {}",
+            worst.0,
+            worst.1,
+            worst.2
+        );
     }
 
     #[test]

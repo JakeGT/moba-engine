@@ -1112,6 +1112,7 @@ impl Renderer {
             default_shadow_format,
             shadow_linear,
             config.quality_tier.max_anisotropy(),
+            tiered,
         )?;
         let fog = fog_resolution
             .map(|resolution| {

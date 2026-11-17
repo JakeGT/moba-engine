@@ -1252,6 +1252,64 @@ impl MaterialDesc {
         out
     }
 
+    /// `content-check`'s evaluator rules (ADR-0023 §10, gate 8): the material against both
+    /// evaluators, given whether its `metallic_roughness` texture carries the emissive mask
+    /// (a third channel, [`has_emissive_mask`]). Returns the Compat fallback when
+    ///
+    /// - every collapsed value is finite and in its key's range (base colour, metallic and
+    ///   roughness 0..=1, emissive 0..=16), `[compat]` overrides included;
+    /// - an `unlit` material emits something on both evaluators (an emissive factor or, on
+    ///   Tiered, an emissive texture, and a Compat emissive), since both draw nothing else;
+    /// - an `emissive_texture` with a non-zero `emissive` comes with the mask or a
+    ///   `[compat] emissive`: Compat ignores the texture and would glow over the whole
+    ///   surface;
+    /// - a `model_texture` is on a model that reads it (every model but `unlit`).
+    ///
+    /// Bible ranges per material class are not checked here: they belong to the art bible
+    /// (PR #347), which is not approved.
+    ///
+    /// # Errors
+    /// [`MaterialError::Invalid`] naming the first rule that fails.
+    pub fn check_evaluators(&self, emissive_mask: bool) -> Result<CompatMaterial, MaterialError> {
+        let compat = self.compat_fallback();
+        let unit = |value: f32| in_range(value, 0.0, 1.0);
+        if !compat.base_color_factor.iter().all(|&value| unit(value))
+            || !unit(compat.metallic)
+            || !unit(compat.roughness)
+            || !compat
+                .emissive
+                .iter()
+                .all(|&value| in_range(value, 0.0, 16.0))
+        {
+            return Err(MaterialError::Invalid(
+                "the Compat fallback leaves its range (base colour, metallic and roughness                  0..=1, emissive 0..=16)",
+            ));
+        }
+        let lit = |emissive: [f32; 3]| emissive.iter().any(|&value| value > 0.0);
+        if self.shading_model() == ShadingModel::Unlit {
+            if !lit(compat.emissive) {
+                return Err(MaterialError::Invalid(
+                    "an unlit material draws its emissive alone: Compat's emissive is zero,                      so it is black there",
+                ));
+            }
+            if self.texture(TextureSlot::Model).is_some() {
+                return Err(MaterialError::Invalid(
+                    "model_texture is never read by an unlit material",
+                ));
+            }
+        }
+        if self.texture(TextureSlot::Emissive).is_some()
+            && lit(self.emissive)
+            && self.compat.emissive.is_none()
+            && !emissive_mask
+        {
+            return Err(MaterialError::Invalid(
+                "emissive_texture needs an emissive mask (a 3- or 4-channel                  metallic_roughness) or a [compat] emissive: Compat ignores the texture and                  would glow over the whole surface",
+            ));
+        }
+        Ok(compat)
+    }
+
     /// The base layer's F0 per channel from the factors (no texture): the base colour for a
     /// metal, the dielectric F0 otherwise, mixed by `metallic`.
     fn base_f0_rgb(&self) -> [f32; 3] {
@@ -1674,6 +1732,56 @@ roughness = 0.6
         );
         assert_eq!(overridden.base_color_factor, [0.1, 0.2, 0.3, 1.0]);
         assert_eq!((overridden.metallic, overridden.emissive), (0.5, [0.0; 3]));
+    }
+
+    #[test]
+    fn evaluator_rules_hold_for_both_paths() {
+        let base = "shader = \"textured\"\nbase_color = \"x\"\n";
+        let check = |extra: &str, mask: bool| {
+            MaterialDesc::parse(&format!("{base}{extra}\n"))
+                .expect(extra)
+                .check_evaluators(mask)
+        };
+        // Every model with its defaults passes (unlit needs an emissive).
+        for model in ShadingModel::ALL {
+            let extra = if *model == ShadingModel::Unlit {
+                format!("model = \"{}\"\nemissive = [1, 1, 1]", model.name())
+            } else {
+                format!("model = \"{}\"", model.name())
+            };
+            assert!(check(&extra, false).is_ok(), "{extra}");
+        }
+        // An unlit material that is black on Compat, or carries an unread model texture.
+        assert!(check("model = \"unlit\"", false).is_err());
+        assert!(
+            check(
+                "model = \"unlit\"\nemissive = [1, 0, 0]\n[compat]\nemissive = [0, 0, 0]",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                "model = \"unlit\"\nemissive = [1, 0, 0]\nmodel_texture = \"m\"",
+                false
+            )
+            .is_err()
+        );
+        // An emissive texture needs the mask or a Compat emissive.
+        let glow = "emissive_texture = \"e\"\nemissive = [2, 2, 2]";
+        assert!(check(glow, false).is_err());
+        assert!(check(glow, true).is_ok());
+        assert!(
+            check(
+                &format!("{glow}\n[compat]\nemissive = [0.5, 0.5, 0.5]"),
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            check("emissive_texture = \"e\"", false).is_ok(),
+            "no emissive factor"
+        );
     }
 
     #[test]

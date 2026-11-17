@@ -886,6 +886,7 @@ pub fn module(name: &str) -> Option<&'static [u8]> {
 mod tests {
     use super::*;
     use std::borrow::Cow;
+    use std::collections::BTreeMap;
 
     const SPIRV_MAGIC: u32 = 0x0723_0203;
 
@@ -968,6 +969,36 @@ mod tests {
     /// explicit layouts; `slangc` has no flag that rejects implicit bindings, so the
     /// reflected layout must match this table exactly. A new module, resource or binding
     /// change is a deliberate edit here (and in the Rust descriptor layout that mirrors it).
+    /// `unit_material_gbuffer*.slang` (N2c, ADR-0023 §5): the camera at set 0, the bindless
+    /// table's samplers and sampled images at set 2 (`bindless.rs`), the material push.
+    const MATERIAL_GBUFFER: &[(&str, Slot)] = &[
+        (
+            "camera",
+            Slot::Descriptor {
+                set: 0,
+                binding: 0,
+                ty: Cow::Borrowed("constantBuffer"),
+            },
+        ),
+        (
+            "bindless_samplers",
+            Slot::Descriptor {
+                set: 2,
+                binding: 0,
+                ty: Cow::Borrowed("[0]samplerState"),
+            },
+        ),
+        (
+            "bindless_textures",
+            Slot::Descriptor {
+                set: 2,
+                binding: 2,
+                ty: Cow::Borrowed("[0]texture2D:read"),
+            },
+        ),
+        ("push", Slot::PushConstants),
+    ];
+
     const SLANG_BINDINGS: &[(&str, &[(&str, Slot)])] = &[
         (
             "toolchain_smoke.slang",
@@ -1244,6 +1275,10 @@ mod tests {
                 ("push", Slot::PushConstants),
             ],
         ),
+        ("unit_material_gbuffer.slang", MATERIAL_GBUFFER),
+        ("unit_material_gbuffer_ids.slang", MATERIAL_GBUFFER),
+        ("unit_material_gbuffer_hdr.slang", MATERIAL_GBUFFER),
+        ("unit_material_gbuffer_ids_hdr.slang", MATERIAL_GBUFFER),
     ];
 
     /// The slot of one reflected parameter, or why it is not allowed.
@@ -1466,6 +1501,128 @@ mod tests {
                      RowMajor {row}, ColMajor {column}",
                     module.name
                 );
+            }
+        }
+    }
+
+    /// One stage's location-decorated `Input` or `Output` variables: location -> (the
+    /// pointee's scalar kind and component count, whether it is `Flat`). Built-ins carry no
+    /// location and are skipped.
+    fn interface(spirv: &[u8], storage_class: u32) -> BTreeMap<u32, ((u32, u32), bool)> {
+        const OP_TYPE_INT: u32 = 21;
+        const OP_TYPE_FLOAT: u32 = 22;
+        const OP_TYPE_VECTOR: u32 = 23;
+        const OP_TYPE_POINTER: u32 = 32;
+        const OP_VARIABLE: u32 = 59;
+        const OP_DECORATE: u32 = 71;
+        const DECORATION_FLAT: u32 = 14;
+        const DECORATION_LOCATION: u32 = 30;
+        let words: Vec<u32> = spirv
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        // id -> (kind, components): 0 float, 1 int.
+        let mut types: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+        let mut pointers: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+        let mut variables: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut locations: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut flat = std::collections::BTreeSet::new();
+        let mut at = 5;
+        while at < words.len() {
+            let count = (words[at] >> 16) as usize;
+            assert!(count > 0, "malformed SPIR-V");
+            let op = &words[at..at + count];
+            match op[0] & 0xffff {
+                OP_TYPE_FLOAT => {
+                    types.insert(op[1], (0, 1));
+                }
+                OP_TYPE_INT => {
+                    types.insert(op[1], (1, 1));
+                }
+                OP_TYPE_VECTOR => {
+                    if let Some(&(kind, _)) = types.get(&op[2]) {
+                        types.insert(op[1], (kind, op[3]));
+                    }
+                }
+                OP_TYPE_POINTER => {
+                    pointers.insert(op[1], (op[2], op[3]));
+                }
+                OP_VARIABLE => {
+                    variables.insert(op[2], op[1]);
+                }
+                OP_DECORATE if op[2] == DECORATION_LOCATION => {
+                    locations.insert(op[1], op[3]);
+                }
+                OP_DECORATE if op[2] == DECORATION_FLAT => {
+                    flat.insert(op[1]);
+                }
+                _ => {}
+            }
+            at += count;
+        }
+        variables
+            .into_iter()
+            .filter_map(|(variable, pointer)| {
+                let &(class, pointee) = pointers.get(&pointer)?;
+                let &location = locations.get(&variable)?;
+                (class == storage_class).then(|| {
+                    let ty = *types
+                        .get(&pointee)
+                        .expect("interface variables are scalars or vectors");
+                    (location, (ty, flat.contains(&variable)))
+                })
+            })
+            .collect()
+    }
+
+    /// ADR-0023 gate 1 (moved to N2c by amendment 2): the textured units' G-buffer stage is
+    /// GLSL vertex (`unit_textured_gbuffer.vert`, `skinned_textured_gbuffer.vert`) and Slang
+    /// fragment (`unit_material_gbuffer*.slang`), linked by location only. Every fragment
+    /// input must be a vertex output at the same location with the same scalar type and
+    /// width, and integer inputs must be `Flat`.
+    #[test]
+    fn glsl_vertex_and_slang_fragment_interfaces_match() {
+        const INPUT: u32 = 1;
+        const OUTPUT: u32 = 3;
+        let fragments = [
+            "unit_material_gbuffer.slang",
+            "unit_material_gbuffer_ids.slang",
+            "unit_material_gbuffer_hdr.slang",
+            "unit_material_gbuffer_ids_hdr.slang",
+        ];
+        for vertex in [
+            "unit_textured_gbuffer.vert",
+            "skinned_textured_gbuffer.vert",
+        ] {
+            let outputs = interface(module(vertex).expect("vertex module"), OUTPUT);
+            for fragment in fragments {
+                let inputs = interface(module(fragment).expect("fragment module"), INPUT);
+                // Slang drops the inputs a permutation does not read (`world_pos`, and the
+                // outline slot without `PREPASS_IDS`); the rest must be there.
+                let mut read: Vec<u32> = vec![0, 1, 3, 4, 14, 15];
+                if fragment.contains("_ids") {
+                    read.push(13);
+                }
+                for location in read {
+                    assert!(
+                        inputs.contains_key(&location),
+                        "{fragment}: input location {location} is found ({inputs:?})"
+                    );
+                }
+                for (location, ((kind, width), is_flat)) in inputs {
+                    let output = outputs.get(&location);
+                    assert_eq!(
+                        output.map(|(ty, _)| *ty),
+                        Some((kind, width)),
+                        "{vertex} -> {fragment}: location {location}"
+                    );
+                    assert!(
+                        kind == 0 || is_flat,
+                        "{fragment}: integer input at location {location} is not Flat"
+                    );
+                }
             }
         }
     }

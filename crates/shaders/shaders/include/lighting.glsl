@@ -103,6 +103,21 @@ vec3 moba_energy_compensation = vec3(1.0);
 vec3 multiscatter_compensation(vec3 f0, vec2 brdf) {
     return vec3(1.0) + f0 * (1.0 / max(brdf.x + brdf.y, 1e-4) - 1.0);
 }
+
+// The split-sum LUT at (N·V, roughness), extrapolated linearly past its last row's centre
+// (roughness above 1 − 0.5 / size), where the clamped fetch would hold the row's value and
+// the compensation would miss the roughest lobes' loss (ADR-0023 amendment 3; the white
+// furnace test in `lighting.rs` models this fetch).
+vec2 brdf_lut_sample(float n_dot_v, float roughness) {
+    float size = float(textureSize(brdf_lut, 0).y);
+    float row = roughness * size - 0.5;
+    if (row <= size - 1.0) {
+        return textureLod(brdf_lut, vec2(n_dot_v, roughness), 0.0).rg;
+    }
+    vec2 last = textureLod(brdf_lut, vec2(n_dot_v, (size - 0.5) / size), 0.0).rg;
+    vec2 before = textureLod(brdf_lut, vec2(n_dot_v, (size - 1.5) / size), 0.0).rg;
+    return mix(before, last, row - (size - 2.0));
+}
 #endif
 
 // SH-L2 irradiance / pi in direction `n` (crates/tools env-bake convention).
@@ -365,7 +380,7 @@ vec3 shade(Surface surface) {
     float alpha = roughness * roughness;
 #ifdef MOBA_TIERED_SHADING
     vec3 f0 = mix(vec3(surface.f0), surface.albedo, surface.metallic);
-    vec2 brdf = textureLod(brdf_lut, vec2(n_dot_v, roughness), 0.0).rg;
+    vec2 brdf = brdf_lut_sample(n_dot_v, roughness);
     moba_energy_compensation = multiscatter_compensation(f0, brdf);
 #else
     vec3 f0 = mix(vec3(0.04), surface.albedo, surface.metallic);
